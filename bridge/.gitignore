@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.session-id
+config.json
+*.log
+.env

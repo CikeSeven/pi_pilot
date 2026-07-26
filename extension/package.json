@@ -1,0 +1,28 @@
+{
+  "name": "pipilot-desktop-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only session relay and fenced remote-control adapter for PiPilot",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

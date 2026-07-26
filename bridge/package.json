@@ -1,0 +1,24 @@
+{
+  "name": "pipilot-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WebSocket bridge that exposes `pi --mode rpc` to the PiPilot mobile app",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "configure:extension": "node scripts/install-extension.mjs --config-only",
+    "install:extension": "node scripts/install-extension.mjs",
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
