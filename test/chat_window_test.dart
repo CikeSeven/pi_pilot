@@ -155,6 +155,111 @@ void main() {
     });
   });
 
+  /// 滑到顶部自动补齐 —— 顶部那行只是指示,不需要用户去点。
+  ///
+  /// 这几道卡全是真踩过的坑,算错的后果是「每次切会话都白发一轮请求」
+  /// 或者「滑到顶了不动弹」。
+  group('滑到顶部自动加载的触发条件', () {
+    test('接近顶部且还有更早 → 触发', () {
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 300,
+          maxScrollExtent: 5000,
+          threshold: 600,
+          hasEarlier: true,
+          loadingEarlier: false,
+          jumpingToBottom: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('留提前量:还差一点到顶就该开始取,别等硬停', () {
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 600,
+          maxScrollExtent: 5000,
+          threshold: 600,
+          hasEarlier: true,
+          loadingEarlier: false,
+          jumpingToBottom: false,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 601,
+          maxScrollExtent: 5000,
+          threshold: 600,
+          hasEarlier: true,
+          loadingEarlier: false,
+          jumpingToBottom: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('历史到头了就不再触发', () {
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 0,
+          maxScrollExtent: 5000,
+          threshold: 600,
+          hasEarlier: false,
+          loadingEarlier: false,
+          jumpingToBottom: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('已经在取了就不叠第二轮', () {
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 0,
+          maxScrollExtent: 5000,
+          threshold: 600,
+          hasEarlier: true,
+          loadingEarlier: true,
+          jumpingToBottom: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('切会话正在跳底时不能触发', () {
+      // 跳底途中 pixels 从 0 往下跑,中途必然落在阈值内 ——
+      // 不挡的话每次切会话都会白白往前分页一次。
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 0,
+          maxScrollExtent: 5000,
+          threshold: 600,
+          hasEarlier: true,
+          loadingEarlier: false,
+          jumpingToBottom: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('内容没撑满一屏时不触发', () {
+      // maxScrollExtent 为 0 时 pixels 恒为 0,恒等于「在顶部」,
+      // 列表刚建好那几帧会白白发一轮请求。
+      expect(
+        shouldAutoLoadEarlier(
+          pixels: 0,
+          maxScrollExtent: 0,
+          threshold: 600,
+          hasEarlier: true,
+          loadingEarlier: false,
+          jumpingToBottom: false,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   /// 桥为了不撞爆手机的 2MB 套接字缓冲,只发 entries 的尾巴(全量快照实测到过
   /// 10.27MB)。所以「本地没有更早」不等于「没有更早」—— 滚到本地头部时按钮还得在,
   /// 只是改成联网补。

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
 import '../settings/settings_screen.dart';
+import '../theme/shapes.dart';
 import 'widgets/chat_item_view.dart';
 import 'widgets/composer.dart';
 import 'widgets/message_timestamp.dart';
@@ -65,6 +66,55 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   /// 那一帧就是几百毫秒的掉帧。窗口化之后无论会话多长,首帧只建这么多条。
   static const _windowStep = 60;
   int _windowSize = _windowStep;
+
+  /// 离顶部多远就开始预加载。
+  ///
+  /// 留一段提前量而不是等 pixels 归零:联网那一段有往返延迟,
+  /// 真到顶了才发请求的话用户会看到一次硬停。
+  static const _autoLoadThreshold = 600.0;
+
+  /// 自动加载的重入阁:一次滚动里 position 会反复通知。
+  bool _autoLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  /// 接近顶部就自动往前补。
+  void _onScroll() {
+    if (_autoLoading || !_scroll.hasClients) return;
+    final position = _scroll.position;
+    final state = ref.read(piSessionProvider);
+    final window = ChatWindow.of(
+      total: state.items.length,
+      windowSize: _windowSize,
+      hasPendingUiRequest: state.pendingUiRequest != null,
+      hasRemoteEarlier: state.hasMoreHistory,
+    );
+    final trigger = shouldAutoLoadEarlier(
+      pixels: position.pixels,
+      maxScrollExtent: position.hasContentDimensions
+          ? position.maxScrollExtent
+          : 0,
+      threshold: _autoLoadThreshold,
+      hasEarlier: window.hasEarlier,
+      loadingEarlier: state.loadingEarlier,
+      jumpingToBottom: _pendingBottomToken != null,
+    );
+    if (!trigger) return;
+
+    _autoLoading = true;
+    unawaited(
+      _loadEarlier(window).whenComplete(() {
+        // 下一帧再放门:本帧里 position 还会因为补偿 jumpTo 再通知几次。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _autoLoading = false;
+        });
+      }),
+    );
+  }
 
   void _growWindow() {
     if (!_scroll.hasClients) {
@@ -153,6 +203,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   @override
   void dispose() {
     _input.dispose();
+    _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
   }
@@ -317,10 +368,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   },
                   itemBuilder: (context, index) {
                     if (window.isLoadEarlierSlot(index)) {
-                      return _LoadEarlierButton(
+                      return _EarlierLoader(
                         remaining: window.offset,
                         loading: state.loadingEarlier,
-                        onPressed: () => unawaited(_loadEarlier(window)),
+                        onRetry: () => unawaited(_loadEarlier(window)),
                       );
                     }
                     if (window.isPendingRequestSlot(index)) {
@@ -635,6 +686,29 @@ class _LivenessBanner extends ConsumerWidget {
   }
 }
 
+/// 滚到顶部附近时该不该自动补更早的历史。
+///
+/// 抽成顶层函数而不是留在 `_onScroll` 里,是因为几道卡全是真踩过的坑,
+/// 而内联在私有 State 里没法单独测。
+bool shouldAutoLoadEarlier({
+  required double pixels,
+  required double maxScrollExtent,
+  required double threshold,
+  required bool hasEarlier,
+  required bool loadingEarlier,
+  required bool jumpingToBottom,
+}) {
+  if (!hasEarlier) return false;
+  if (loadingEarlier) return false;
+  // 切会话后还在跳底的过程中:pixels 从 0 往下跑,中途必然落在阈值内,
+  // 不挡的话每次切会话都会白白发一轮往前分页。
+  if (jumpingToBottom) return false;
+  // 内容还没撑满一屏时 maxScrollExtent 是 0,pixels 永远在「顶部」。
+  // 那种情况下本来也滚不动,交给指示行自己可点。
+  if (maxScrollExtent <= 0) return false;
+  return pixels <= threshold;
+}
+
 /// 消息列表的尾部窗口下标运算。
 ///
 /// 提成独立类而不是留在 `build` 里,是因为这里的下标换算(完整列表下标 ↔
@@ -703,45 +777,56 @@ class ChatWindow {
   }
 }
 
-class _LoadEarlierButton extends StatelessWidget {
-  const _LoadEarlierButton({
+/// 列表顶部的历史加载指示。
+///
+/// 不是按钮:滚到顶部附近由 `_onScroll` 自动触发补齐。仍然可点只是兼一手
+/// —— 内容没撑满一屏时根本没有滚动事件,此时自动触发依赖不上。
+class _EarlierLoader extends StatelessWidget {
+  const _EarlierLoader({
     required this.remaining,
-    required this.onPressed,
+    required this.onRetry,
     this.loading = false,
   });
 
   /// 窗口之上还没渲染的条数。0 表示本地已空,接下来要联网取 ——
   /// 那时数不出来还剩多少,因为条数在桥上。
   final int remaining;
-  final VoidCallback onPressed;
+  final VoidCallback onRetry;
   final bool loading;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final text = Theme.of(
+      context,
+    ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant);
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Center(
-        child: TextButton.icon(
-          onPressed: loading ? null : onPressed,
-          icon: loading
-              ? SizedBox(
-                  width: 16,
-                  height: 16,
+        child: InkWell(
+          onTap: loading ? null : onRetry,
+          borderRadius: BorderRadius.circular(PiShape.sm),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 14,
+                  height: 14,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
                     color: colors.onSurfaceVariant,
                   ),
-                )
-              : const Icon(Icons.keyboard_double_arrow_up_rounded, size: 18),
-          label: Text(
-            loading
-                ? '正在取更早的消息…'
-                : remaining > 0
-                ? '加载更早的消息 · 还有 $remaining 条'
-                : '加载更早的消息',
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  remaining > 0 ? '正在加载更早的消息 · 还有 $remaining 条' : '正在加载更早的消息…',
+                  style: text,
+                ),
+              ],
+            ),
           ),
-          style: TextButton.styleFrom(foregroundColor: colors.onSurfaceVariant),
         ),
       ),
     );
