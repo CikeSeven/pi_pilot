@@ -430,3 +430,113 @@ test("silent desktop relay is declared dead and then pruned", async () => {
     ]);
   }
 });
+
+test("an in-flight questionnaire is republished when a client selects the source", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:ask",
+          label: "Ask desktop",
+          cwd: "/tmp/pipilot-ask",
+          sessionId: "session-ask",
+          capabilities: ["prompt", "ask-user-question-relay"],
+        },
+        snapshot: {
+          epoch: "epoch-ask",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-ask", isStreaming: false },
+          entries: [],
+          leafId: "leaf-1",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    // relay 的门控是「有手机在看这个源」,所以要先有一个观众。
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:ask" })).success,
+      true,
+    );
+
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_ask_request",
+        requestId: "ask:1",
+        epoch: "epoch-ask",
+        toolCallId: "call-1",
+        questions: [
+          {
+            question: "缓存放在哪一层?",
+            header: "缓存层",
+            options: [{ label: "Redis", description: "跨进程共享" }],
+          },
+        ],
+      }),
+    );
+    const first = await phone.waitFor(
+      (frame) => frame.type === "ask_user_question_request",
+    );
+    assert.equal(first.requestId, "ask:1");
+    assert.equal(first.toolCallId, "call-1");
+
+    // 重连/换源后必须重新看见这份问卷。重放环不够用:断层大到回落整份快照时,
+    // 那条 hub 注入的本地事件就跟着丢了,于是电脑还在 beforeToolCall 上等,
+    // 手机却什么都没有,谁也动不了,直到作答窗口超时。
+    const late = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(late);
+    await late.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await late.request("hub_select_source", { sourceId: "desktop:ask" })).success,
+      true,
+    );
+    const republished = await late.waitFor(
+      (frame) => frame.type === "ask_user_question_request",
+    );
+    assert.equal(republished.requestId, "ask:1");
+    assert.equal(republished.questions[0].question, "缓存放在哪一层?");
+    // 重发用的是新 seq,否则客户端的游标会把它当重复直接丢掉。
+    assert.ok(republished._hub.seq > first._hub.seq);
+
+    // 作答后要撤卡,别的客户端也得收到撤卡事件。
+    assert.equal(
+      (await late.request("ask_response", {
+        requestId: "ask:1",
+        answers: [{ question: "缓存放在哪一层?", labels: ["Redis"] }],
+      })).success,
+      true,
+    );
+    const result = await desktop.waitFor((frame) => frame.type === "desktop_ask_result");
+    assert.equal(result.requestId, "ask:1");
+    assert.equal(result.answers[0].labels[0], "Redis");
+    await phone.waitFor(
+      (frame) =>
+        frame.type === "ask_user_question_retracted" && frame.requestId === "ask:1",
+    );
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});

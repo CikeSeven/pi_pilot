@@ -5,12 +5,12 @@ import 'package:pi_pilot/state/pi_session.dart';
 import 'package:pi_pilot/ui/chat/widgets/chat_item_view.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
 
-/// 插件 `@juicesharp/rpiv-ask-user-question` 的问卷是电脑端 TUI 的覆盖层
-/// (`ctx.ui.custom()`),不走 pi 的 select/confirm/input/editor 对话框协议,
-/// 所以手机收不到 `extension_ui_request`,也没有任何可编程应答入口。
+/// relay 用 `tool_call` 钩子在插件的 `execute` 跑起来之前截下整次调用,把题目转到
+/// 手机作答(见 ask_answerable_test.dart)。所以这里覆盖的是**没转过来**的那半:
+/// 没手机在看、认领超时、或用户点了「在电脑上作答」。
 ///
-/// 但题目和选项本来就随 `tool_execution_start` 的 args 一起到了手机 ——
-/// 以前没人渲染,卡片上只剩一个转不完的圈,看不出在等人作答。
+/// 那种情形下只给一行交代,不再摊开一份不能点的只读问卷 —— 摊开反而让人以为
+/// 「能选却选不动」。
 Widget _wrap(Widget child) => ProviderScope(
   child: MaterialApp(
     theme: buildLightTheme(),
@@ -50,63 +50,70 @@ void main() {
         ..args = _args()
         ..argsSummary = PiSessionNotifier.debugSummarizeArgs(_args());
 
-  group('问卷工具卡', () {
+  group('问卷未转到手机时', () {
     // 未作答的卡片 trailing 是 CircularProgressIndicator —— 无限动画,
     // pumpAndSettle 永远等不到静止。这里推进固定时长让 AnimatedSize 展开完。
-    testWidgets('未作答时展开显示全部题目与选项,而不是一个空转的圈', (tester) async {
+    testWidgets('只给一行交代,不摊开一份不能点的只读问卷', (tester) async {
       await tester.pumpWidget(_wrap(ChatItemView(item: pending())));
       await tester.pump(const Duration(milliseconds: 400));
 
-      // 题干
-      expect(find.text('缓存放在哪一层?'), findsOneWidget);
-      expect(find.text('要开启哪些特性?'), findsOneWidget);
-      // 选项标签与说明
-      expect(find.text('内存 LRU'), findsOneWidget);
-      expect(find.text('进程内,重启即失效'), findsOneWidget);
-      expect(find.text('Redis'), findsOneWidget);
-      // header 标签与多选标记
-      expect(find.text('缓存层'), findsOneWidget);
-      expect(find.text('可多选'), findsOneWidget);
-      // 带 preview 的选项要标出来(预览内容只有电脑上看得到)
-      expect(find.text('含预览'), findsOneWidget);
+      expect(find.text('这份问卷在电脑上作答'), findsOneWidget);
+      // 回归:以前这里画整张只读问卷(题干 + 选项 + 「手机上只能查看」),
+      // 让人以为能选却选不动。
+      expect(find.text('缓存放在哪一层?'), findsNothing);
+      expect(find.text('内存 LRU'), findsNothing);
+      expect(find.textContaining('手机上只能查看'), findsNothing);
+      // 也不能出现可作答那份的提交键
+      expect(find.text('提交'), findsNothing);
     });
 
-    testWidgets('未作答时明确告知只能在电脑上回答', (tester) async {
-      await tester.pumpWidget(_wrap(ChatItemView(item: pending())));
-      await tester.pump(const Duration(milliseconds: 400));
-
-      // 手机上无法应答是硬约束(插件没有可编程应答入口),必须说清楚,
-      // 否则用户会一直等这张卡自己动。
-      expect(find.textContaining('电脑端正在等你作答'), findsOneWidget);
-    });
-
-    testWidgets('作答完成后撤掉等待提示并显示结果', (tester) async {
+    testWidgets('作答完成后撤掉交代行,显示结果', (tester) async {
       final item = pending()
-        ..output = 'Question: 缓存放在哪一层?\nAnswer: Redis'
+        ..output = 'Q: 缓存放在哪一层?\nA: Redis'
         ..done = true;
       await tester.pumpWidget(_wrap(ChatItemView(item: item)));
       // 完成态默认折叠
       await tester.tap(find.text('ask_user_question'));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('电脑端正在等你作答'), findsNothing);
-      expect(find.textContaining('Answer: Redis'), findsOneWidget);
-      // 题目仍然留着,便于对照模型问了什么
-      expect(find.text('缓存放在哪一层?'), findsOneWidget);
+      expect(find.text('这份问卷在电脑上作答'), findsNothing);
+      expect(find.textContaining('A: Redis'), findsOneWidget);
     });
 
-    testWidgets('参数丢失时回落到普通工具卡,不崩也不显示空问卷', (tester) async {
+    testWidgets('手机作答回来的答案剥掉给模型看的信封头,也不标红', (tester) async {
+      // relay 拦截只能返回 {block, reason},pi 的 agent-loop 把 block 分支写死
+      // isError: true —— 那是一次成功的作答,不能当报错渲染。
+      final item = pending()
+        ..output =
+            'The user answered this questionnaire on their phone through '
+            'PiPilot. This is a SUCCESSFUL answer, NOT an error.\n\n'
+            'Q: 缓存放在哪一层?\nA: Redis'
+        ..done = true
+        ..isError = true;
+      await tester.pumpWidget(_wrap(ChatItemView(item: item)));
+      await tester.tap(find.text('ask_user_question'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('A: Redis'), findsOneWidget);
+      // 信封头是写给模型的,用户不必读
+      expect(find.textContaining('SUCCESSFUL answer'), findsNothing);
+      // 不套错误图标
+      expect(find.byIcon(Icons.error_outline), findsNothing);
+      expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
+    });
+
+    testWidgets('参数丢失时回落到普通工具卡,不崩', (tester) async {
       // 历史 toolResult 常常没有 args,断层重放同理
       final item =
           ToolItem('tool:bare', toolCallId: 'bare', name: 'ask_user_question')
-            ..output = 'Answer: Redis'
+            ..output = 'A: Redis'
             ..done = true;
       await tester.pumpWidget(_wrap(ChatItemView(item: item)));
       await tester.tap(find.text('ask_user_question'));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('Answer: Redis'), findsOneWidget);
-      expect(find.textContaining('电脑端正在等你作答'), findsNothing);
+      expect(find.textContaining('A: Redis'), findsOneWidget);
+      expect(find.text('这份问卷在电脑上作答'), findsNothing);
     });
   });
 

@@ -50,25 +50,31 @@ class _ToolCardState extends ConsumerState<ToolCard> {
     final piColors = PiColors.of(context);
     final item = widget.item;
     // 电脑端转过来、当前正等这台手机作答的问卷。
-    // 空 toolCallId 也匹配不上 —— 宁可退成只读也不能把问卷接到别的工具卡上。
-    final ask = ref.watch(piSessionProvider).pendingAsk;
-    final answerable =
-        item.name == _kAskUserQuestion &&
-            !item.done &&
-            ask != null &&
-            ask.toolCallId.isNotEmpty &&
-            ask.toolCallId == item.toolCallId
-        ? ask
+    //
+    // 必须用 select 只盯自己那一份:直接 watch 整个 PiState 的话,流式输出时
+    // revision 每秒改很多次,窗口里几十张工具卡会跟着全量重建 —— 手机卡到
+    // 连 bridge 的 10s ping 都答不上,接着就是断线重连。
+    // 空 toolCallId 不匹配:宁可不画,也不能把问卷接到别的工具卡上。
+    final ask = item.name == _kAskUserQuestion && !item.done
+        ? ref.watch(
+            piSessionProvider.select((s) {
+              final pending = s.pendingAsk;
+              return pending != null &&
+                      pending.toolCallId.isNotEmpty &&
+                      pending.toolCallId == item.toolCallId
+                  ? pending
+                  : null;
+            }),
+          )
         : null;
-    // 问卷的内容全在**参数**里,不在 output 里。不把它算进 hasBody,
-    // 卡片就永远不可展开 —— 手机上只剩一个转不完的圈,看不出在等什么。
+    // 问卷还没有结果 —— 要么在等这台手机,要么已经回落到电脑上答。
+    final askPending = item.name == _kAskUserQuestion && !item.done;
+    // 问卷的内容不在 output 里。不把它算进 hasBody,卡片就永远不可展开 ——
+    // 手机上只剩一个转不完的圈,看不出在等什么。
     final hasBody =
-        answerable != null ||
-        item.output.isNotEmpty ||
-        _writeContent(item) != null ||
-        _questions(item) != null;
+        askPending || item.output.isNotEmpty || _writeContent(item) != null;
     // 可作答的问卷强制展开:折叠着的话用户根本不知道自己能答。
-    final expanded = answerable != null || _expanded;
+    final expanded = ask != null || _expanded;
     final category = PiToolAvatar.categoryForTool(item.name);
     // 整条身份行铺类别色 —— 之前这 7 组色只染了一个 36dp 头像,
     // 埋在灰卡里根本看不出 bash / 读 / 写 / 搜索的区别。
@@ -89,7 +95,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
       subtitle: item.argsSummary.isEmpty
           ? null
           : Text(item.argsSummary, style: AppType.monoLabel(color: headerFg)),
-      onTap: hasBody && answerable == null
+      onTap: hasBody && ask == null
           ? () => setState(() => _expanded = !_expanded)
           : null,
       onLongPress: item.output.isEmpty
@@ -128,7 +134,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
                 ),
               ),
             ),
-          if (hasBody && answerable == null) ...[
+          if (hasBody && ask == null) ...[
             const SizedBox(width: 4),
             AnimatedRotation(
               turns: expanded ? 0.5 : 0,
@@ -145,7 +151,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
         alignment: Alignment.topCenter,
         child: !expanded || !hasBody
             ? const SizedBox(width: double.infinity)
-            : _buildBody(context, item, answerable),
+            : _buildBody(context, item, ask),
       ),
     );
   }
@@ -161,14 +167,13 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             ask: ask,
           );
         }
-        final questions = _questions(item);
-        if (questions != null) {
-          return _QuestionnaireView(
-            questions: questions,
-            answered: item.done,
-            output: _isAskAnswer(item)
-                ? _stripAskHeader(item.output)
-                : item.output,
+        // 没转到手机(没人在看、认领超时、或你点了「在电脑上作答」)。
+        // 只给一行交代 —— 以前把整张只读问卷拄在这里,反而让人以为手机能答。
+        if (!item.done) return const _DesktopAnsweringNotice();
+        if (item.output.isNotEmpty) {
+          return _outputWell(
+            context,
+            _isAskAnswer(item) ? _stripAskHeader(item.output) : item.output,
           );
         }
       case 'read':
@@ -202,19 +207,6 @@ class _ToolCardState extends ConsumerState<ToolCard> {
     }
     // 默认:mono + ANSI 解析的输出井(固定井底,保证前景对比度与主题无关)
     return _outputWell(context, item.output);
-  }
-
-  /// 问卷题目。只在参数确实带着题目列表时返回,否则回落到普通工具卡渲染 ——
-  /// 参数在断层里丢了(历史 toolResult 常常没有 args)也不能把卡片搞坏。
-  static List<Map<String, dynamic>>? _questions(ToolItem item) {
-    if (item.name != _kAskUserQuestion) return null;
-    final raw = item.args?['questions'];
-    if (raw is! List || raw.isEmpty) return null;
-    final parsed = [
-      for (final entry in raw)
-        if (entry is Map) Map<String, dynamic>.from(entry),
-    ];
-    return parsed.isEmpty ? null : parsed;
   }
 
   /// 这份输出是手机作答回来的答案吗?
@@ -300,205 +292,42 @@ Widget _outputWell(BuildContext context, String text) {
   );
 }
 
-/// 问卷的只读呈现。
+/// 问卷没转到手机时的一行交代。
 ///
-/// 插件 `@juicesharp/rpiv-ask-user-question` 的问卷是电脑端 TUI 的覆盖层
-/// (`ctx.ui.custom()`),**不走** pi 的 select/confirm/input/editor 对话框协议,
-/// 所以手机既收不到 `extension_ui_request`,也没有任何可编程的应答入口 ——
-/// 插件全仓只有两处 `pi.events.emit`、零处 `pi.events.on`,答案唯一入口是
-/// TUI 组件内部的键盘输入。
+/// 以前这里画的是整张只读问卷(题目 + 选项 + 「手机上只能查看」),
+/// 那是 relay 还没有 tool_call 拦截时的产物 —— 现在问卷本来就该在手机上答,
+/// 再摊开一份不能点的副本只会让人以为「能选却选不动」。
 ///
-/// 因此手机能做的只有一件事:把电脑正在等什么如实显示出来。题目和选项本来就
-/// 随 `tool_execution_start` 的 args 一起到了手机,以前只是没人渲染,于是卡片
-/// 上只剩一个转不完的圈,看不出在等人作答。
-class _QuestionnaireView extends StatelessWidget {
-  const _QuestionnaireView({
-    required this.questions,
-    required this.answered,
-    required this.output,
-  });
+/// 走到这里只剩三种情形:没手机在看这个源、认领窗口(8s)超时、或你自己点了
+/// 「在电脑上作答」。三种都意味着插件已经在电脑上弹出它那套完整问卷了。
+class _DesktopAnsweringNotice extends StatelessWidget {
+  const _DesktopAnsweringNotice();
 
-  final List<Map<String, dynamic>> questions;
-  final bool answered;
-  final String output;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (!answered) _WaitingHint(),
-        for (var i = 0; i < questions.length; i++) ...[
-          if (i > 0) const SizedBox(height: 12),
-          _QuestionBlock(question: questions[i], index: i),
-        ],
-        // 作答结果是模型看到的那份信封,答完了才有意义
-        if (answered && output.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          _outputWell(context, output),
-        ],
-      ],
-    );
-  }
-}
-
-/// 「去电脑上作答」提示。手机上无法应答是硬约束,必须说清楚,
-/// 否则用户会一直等这张卡自己动。
-class _WaitingHint extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: colors.tertiaryContainer,
+        color: colors.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(PiShape.sm),
       ),
       child: Row(
         children: [
           Icon(
-            Icons.keyboard_outlined,
+            Icons.desktop_windows_outlined,
             size: 18,
-            color: colors.onTertiaryContainer,
+            color: colors.onSurfaceVariant,
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '电脑端正在等你作答 · 手机上只能查看',
+              '这份问卷在电脑上作答',
               style: theme.textTheme.bodySmall?.copyWith(
-                color: colors.onTertiaryContainer,
+                color: colors.onSurfaceVariant,
               ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 单个问题:序号 + header 标签 + 题干 + 选项。
-class _QuestionBlock extends StatelessWidget {
-  const _QuestionBlock({required this.question, required this.index});
-
-  final Map<String, dynamic> question;
-  final int index;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    final header = question['header'];
-    final text = question['question'];
-    final multi = question['multiSelect'] == true;
-    final options = question['options'];
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${index + 1}.',
-              style: AppType.monoLabel(color: colors.onSurfaceVariant),
-            ),
-            const SizedBox(width: 8),
-            if (header is String && header.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: colors.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(PiShape.xs),
-                ),
-                child: Text(
-                  header,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: colors.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            if (multi) ...[
-              const SizedBox(width: 6),
-              Text(
-                '可多选',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: colors.primary,
-                ),
-              ),
-            ],
-          ],
-        ),
-        if (text is String && text.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(text, style: theme.textTheme.bodyMedium),
-          ),
-        if (options is List)
-          for (final option in options)
-            if (option is Map) _OptionRow(option: option),
-      ],
-    );
-  }
-}
-
-/// 一个选项:标签 + 说明。带 preview 的额外标一下,
-/// 那是电脑上才看得到的并排对比内容。
-class _OptionRow extends StatelessWidget {
-  const _OptionRow({required this.option});
-
-  final Map option;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    final label = option['label'];
-    final description = option['description'];
-    final preview = option['preview'];
-    final hasPreview = preview is String && preview.isNotEmpty;
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 6, left: 24),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Icon(Icons.circle, size: 6, color: colors.onSurfaceVariant),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        label is String ? label : '',
-                        style: theme.textTheme.bodyMedium,
-                      ),
-                    ),
-                    if (hasPreview)
-                      Text(
-                        '含预览',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: colors.onSurfaceVariant,
-                        ),
-                      ),
-                  ],
-                ),
-                if (description is String && description.isNotEmpty)
-                  Text(
-                    description,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-              ],
             ),
           ),
         ],

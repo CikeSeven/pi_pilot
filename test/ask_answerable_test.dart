@@ -133,7 +133,7 @@ void main() {
       expect(submit.onPressed, isNotNull);
     });
 
-    testWidgets('toolCallId 对不上时退回只读,不把问卷接到别的卡上', (tester) async {
+    testWidgets('toolCallId 对不上时不作答,不把问卷接到别的卡上', (tester) async {
       // 在途问卷属于另一次调用
       await tester.pumpWidget(
         _wrap(

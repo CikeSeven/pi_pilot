@@ -3017,10 +3017,13 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 告诉电脑「卡片已在前台、有人在看」,它才把秒级的认领窗口换成分钟级的作答窗口。
   Future<void> _claimAsk(String requestId) async {
     final resp = await _request('ask_claim', {'requestId': requestId});
-    // 认领失败通常意味着电脑那侧已经收回了这份问卷,跟着撤卡。
-    if (resp?['success'] != true && state.pendingAsk?.requestId == requestId) {
-      _clearAsk();
-    }
+    if (state.pendingAsk?.requestId != requestId) return;
+    // 只有桥**明确回绝**时才撤卡 —— 那意味着这份问卷已经不在了。
+    //
+    // resp == null 是传输层没结果(socket 没开、超时、重连中),不能当回绝:
+    // 问卷仍在重放环里,下一次重同步会把它再放出来,于是变成
+    // 「可选 → 认领超时撤卡 → 重同步再画 → 又超时」的来回跳。
+    if (resp != null && resp['success'] != true) _clearAsk();
   }
 
   void _clearAsk() {

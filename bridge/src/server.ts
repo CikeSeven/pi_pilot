@@ -317,6 +317,26 @@ function clearAskForSource(sourceId: string, retract: boolean): void {
   if (retract) retractAsk(sourceId, ask.requestId);
 }
 
+/// 选源时把还在途的问卷重新放一遍。
+///
+/// 重放环不够用:断层大到回落整份快照时,那条 ask 事件就跟着丢了 —— 快照是
+/// 会话状态,不含 hub 自己注入的本地事件。于是电脑还在 beforeToolCall 上等,
+/// 手机却只剩「这份问卷在电脑上作答」,谁也动不了,直到作答窗口超时。
+///
+/// 用新 seq 重新记一条而不是把旧事件原样重发:旧 seq 会被客户端的游标判成
+/// 重复直接丢掉。requestId 不变,所以对已经看到过的客户端是幂等的。
+function republishAsk(sourceId: string): void {
+  const ask = asksBySource.get(sourceId);
+  if (!ask) return;
+  const event = sources.recordLocalEvent(sourceId, {
+    type: "ask_user_question_request",
+    requestId: ask.requestId,
+    toolCallId: ask.toolCallId,
+    questions: ask.questions,
+  });
+  if (event.ok) broadcastSourceEvent(event.event);
+}
+
 function requestDesktopTree(
   sourceId: string,
   timeoutMs = config.snapshotRequestTimeoutMs,
@@ -1093,6 +1113,8 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
         });
         if (previous) pushDesktopStatus(previous);
         pushDesktopStatus(sourceId);
+        // 电脑可能正卡在一份问卷上等人答 —— 重连/换源后要让手机重新看见它。
+        republishAsk(sourceId);
         return;
       }
 
