@@ -37,6 +37,82 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   final _composerKey = GlobalKey();
   double _composerHeight = 96;
 
+  /// 派生数据缓存:key -> 下标、以及时间标注标志。
+  ///
+  /// 两者都只依赖 items 列表本身,但以前都在 build 里现算:
+  /// - findChildIndexCallback 里用 indexWhere 线性扫描,而它**对每个可见子项调一次**,
+  ///   一次重建就是 O(可见项 x 总条数);流式期间每个 token 都涨 revision 触发重建。
+  /// - _timestampFlags 全量重扫一遍 items。
+  /// 靠 revision 判定失效,同一份列表只算一次。
+  int _derivedRevision = -1;
+  Map<String, int> _indexByKey = const {};
+  List<bool> _timestampFlagCache = const [];
+
+  /// 会话切换后待执行的「跳到底部」。
+  ///
+  /// 加载完的落点必须是最新消息 —— 长会话停在第一条,用户要滑很久。
+  String? _pendingBottomToken;
+  String? _lastSessionToken;
+
+  /// 正在跑的跳底链(防止 build 每帧都新开一条)。
+  String? _bottomChainToken;
+
+  /// 列表窗口:只渲染最后这么多条。
+  ///
+  /// **这是消除切换卡顿的关键**。`RenderSliverList` 要求子项在布局上连续,
+  /// 没法跳过中间项直接量最后一项的位置 —— 所以 `jumpTo(maxScrollExtent)`
+  /// 会在一帧里把从头到底的所有项全建出来。2000 条的会话切过去,
+  /// 那一帧就是几百毫秒的掉帧。窗口化之后无论会话多长,首帧只建这么多条。
+  static const _windowStep = 60;
+  int _windowSize = _windowStep;
+
+  /// 「加载更早」时用来抵消位置跳动:展开前的 maxScrollExtent。
+  double? _extentBeforeGrow;
+
+  void _growWindow() {
+    if (!_scroll.hasClients) {
+      setState(() => _windowSize += _windowStep);
+      return;
+    }
+    // 头部插入内容会把当前位置整体推下去,记下展开前的高度,
+    // 下一帧按增量补偿,视觉上停在原处。
+    _extentBeforeGrow = _scroll.position.maxScrollExtent;
+    final pixels = _scroll.position.pixels;
+    setState(() => _windowSize += _windowStep);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final before = _extentBeforeGrow;
+      _extentBeforeGrow = null;
+      if (!mounted || !_scroll.hasClients || before == null) return;
+      final delta = _scroll.position.maxScrollExtent - before;
+      if (delta <= 0) return;
+      _scroll.jumpTo(
+        (pixels + delta).clamp(
+          _scroll.position.minScrollExtent,
+          _scroll.position.maxScrollExtent,
+        ),
+      );
+    });
+  }
+
+  void _syncDerived(PiState state) {
+    if (_derivedRevision == state.revision) return;
+    _derivedRevision = state.revision;
+    final items = state.items;
+
+    final index = <String, int>{};
+    final flags = List<bool>.filled(items.length, false);
+    DateTime? prev;
+    for (var i = 0; i < items.length; i++) {
+      index[items[i].key] = i;
+      final time = timeOf(items[i]);
+      if (time == null) continue;
+      flags[i] = shouldShowTimestamp(prev, time);
+      prev = time;
+    }
+    _indexByKey = index;
+    _timestampFlagCache = flags;
+  }
+
   void _syncComposerHeight() {
     final box = _composerKey.currentContext?.findRenderObject() as RenderBox?;
     final height = box?.size.height;
@@ -62,6 +138,42 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
         }
       });
     }
+  }
+
+  /// 无条件跳到底部。
+  ///
+  /// 与 [_scrollToBottomIfNear] 的区别是不看当前位置 —— 会话刚加载完时
+  /// pixels 是 0 而 maxScrollExtent 很大,「接近底部」永远不成立。
+  ///
+  /// 惰性列表的 maxScrollExtent 是估算值,一次 jumpTo 到不了真正的底,
+  /// 所以连着推几帧,每帧都朝当前的 maxScrollExtent 再跳一次。
+  void _jumpToBottomSoon(String token) {
+    // build 每帧都会调到这里(流式时尤其频),同一个 token 只允许一条链在跑。
+    if (_bottomChainToken == token) return;
+    _bottomChainToken = token;
+    var remaining = 6;
+    void step() {
+      if (!mounted || _pendingBottomToken != token) {
+        if (_bottomChainToken == token) _bottomChainToken = null;
+        return;
+      }
+      if (!_scroll.hasClients) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => step());
+        return;
+      }
+      final position = _scroll.position;
+      if (position.pixels < position.maxScrollExtent) {
+        _scroll.jumpTo(position.maxScrollExtent);
+      }
+      if (--remaining > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => step());
+      } else {
+        _pendingBottomToken = null;
+        _bottomChainToken = null;
+      }
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => step());
   }
 
   void _send({PiDelivery? delivery}) {
@@ -104,19 +216,6 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     if (confirmed == true && mounted) _send(delivery: PiDelivery.interrupt);
   }
 
-  /// 每项是否显示时间标注(与上一条带时间的项间隔 >5 分钟)。
-  List<bool> _timestampFlags(List<ChatItem> items) {
-    final flags = List<bool>.filled(items.length, false);
-    DateTime? prev;
-    for (var i = 0; i < items.length; i++) {
-      final time = timeOf(items[i]);
-      if (time == null) continue;
-      flags[i] = shouldShowTimestamp(prev, time);
-      prev = time;
-    }
-    return flags;
-  }
-
   @override
   Widget build(BuildContext context) {
     ref.listen<int>(
@@ -125,7 +224,30 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     );
 
     final state = ref.watch(piSessionProvider);
-    final timestampFlags = _timestampFlags(state.items);
+    _syncDerived(state);
+    final timestampFlags = _timestampFlagCache;
+
+    // 会话/源一换就残一个「跳底」标记。不能在此时就跳 ——
+    // 切换瞬间 items 还是空的,得等历史刷进来。
+    final sessionToken = '${state.selectedSourceId}/${state.sessionId}';
+    if (sessionToken != _lastSessionToken) {
+      _lastSessionToken = sessionToken;
+      _pendingBottomToken = sessionToken;
+      // 换会话必须收回窗口,否则从长会话切过去会继承一个很大的窗口,
+      // 首帧又要建几百条。
+      _windowSize = _windowStep;
+    }
+    if (_pendingBottomToken == sessionToken && state.items.isNotEmpty) {
+      _jumpToBottomSoon(sessionToken);
+    }
+
+    // 只渲染尾部窗口。offset 是窗口首项在完整列表里的下标。
+    final window = ChatWindow.of(
+      total: state.items.length,
+      windowSize: _windowSize,
+      hasPendingUiRequest: state.pendingUiRequest != null,
+    );
+
     // 首帧之后量一次;之后由 SizeChangedLayoutNotifier 驱动
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncComposerHeight());
     // 留 12dp 呼吸,免得最后一条消息贴着输入卡的圆角
@@ -150,31 +272,40 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   controller: _scroll,
                   // 底部留出输入卡的实测高度,免得最后一条消息被压在下面
                   padding: EdgeInsets.fromLTRB(12, 12, 12, listBottomInset),
-                  // +1:待应答的扩展对话框作为列表最后一项,
-                  // 跟着内容一起滚,而不是卡在输入条上方的孤儿位置
-                  itemCount:
-                      state.items.length +
-                      (state.pendingUiRequest != null ? 1 : 0),
+                  // 长会话里 keep-alive 会把滚过的每一项都钉在内存里不释放,
+                  // 越滚越重。消息项本身无状态可留(展开态在 ChatItem 上),关掉。
+                  addAutomaticKeepAlives: false,
+                  itemCount: window.itemCount,
                   findChildIndexCallback: (key) {
-                    final index = state.items.indexWhere(
-                      (item) => ValueKey(item.key) == key,
-                    );
-                    return index < 0 ? null : index;
+                    // 预建的 key -> 下标表。以前这里 indexWhere 线性扫描,
+                    // 而本回调对每个可见子项都会调一次 —— 一次重建就是
+                    // O(可见项 x 总条数),流式期间每个 token 都要付这笔钱。
+                    if (key is! ValueKey<String>) return null;
+                    final full = _indexByKey[key.value];
+                    if (full == null) return null;
+                    return window.slotOf(full);
                   },
                   itemBuilder: (context, index) {
-                    if (index == state.items.length) {
+                    if (window.isLoadEarlierSlot(index)) {
+                      return _LoadEarlierButton(
+                        remaining: window.offset,
+                        onPressed: _growWindow,
+                      );
+                    }
+                    if (window.isPendingRequestSlot(index)) {
                       final request = state.pendingUiRequest!;
                       return UiRequestCard(
                         key: ValueKey('ui-request-${request.id}'),
                         request: request,
                       );
                     }
-                    final item = state.items[index];
+                    final full = window.itemIndexOf(index);
+                    final item = state.items[full];
                     final view = ChatItemView(
                       key: ValueKey(item.key),
                       item: item,
                     );
-                    if (!timestampFlags[index]) return view;
+                    if (!timestampFlags[full]) return view;
                     return Column(
                       children: [
                         MessageTimestamp(time: timeOf(item)!),
@@ -467,6 +598,86 @@ class _LivenessBanner extends ConsumerWidget {
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 消息列表的尾部窗口下标运算。
+///
+/// 提成独立类而不是留在 `build` 里,是因为这里的下标换算(完整列表下标 ↔
+/// 列表槽位)一旦算错就会**渲染错消息**,而内联在 build 里没法单独测。
+///
+/// 槽位布局:`[加载更早?] + 窗口内消息 + [待应答对话框?]`
+class ChatWindow {
+  const ChatWindow({
+    required this.total,
+    required this.offset,
+    required this.hasPendingUiRequest,
+  });
+
+  factory ChatWindow.of({
+    required int total,
+    required int windowSize,
+    required bool hasPendingUiRequest,
+  }) => ChatWindow(
+    total: total,
+    offset: total > windowSize ? total - windowSize : 0,
+    hasPendingUiRequest: hasPendingUiRequest,
+  );
+
+  /// 完整列表的总条数。
+  final int total;
+
+  /// 窗口首项在完整列表里的下标。
+  final int offset;
+  final bool hasPendingUiRequest;
+
+  /// 窗口之上还有没渲染的历史 → 需要「加载更早」按钮占一个槽位。
+  bool get hasEarlier => offset > 0;
+
+  int get _leading => hasEarlier ? 1 : 0;
+  int get _trailing => hasPendingUiRequest ? 1 : 0;
+
+  /// 窗口内渲染的消息条数。
+  int get visibleCount => total - offset;
+
+  int get itemCount => _leading + visibleCount + _trailing;
+
+  bool isLoadEarlierSlot(int slot) => hasEarlier && slot == 0;
+
+  bool isPendingRequestSlot(int slot) =>
+      hasPendingUiRequest && slot - _leading == visibleCount;
+
+  /// 槽位 → 完整列表下标。调用前必须先排除两个特殊槽位。
+  int itemIndexOf(int slot) => offset + slot - _leading;
+
+  /// 完整列表下标 → 槽位;落在窗口之外返回 null(ListView 会当作新子项)。
+  int? slotOf(int index) {
+    if (index < offset || index >= total) return null;
+    return index - offset + _leading;
+  }
+}
+
+class _LoadEarlierButton extends StatelessWidget {
+  const _LoadEarlierButton({required this.remaining, required this.onPressed});
+
+  /// 窗口之上还没渲染的条数。
+  final int remaining;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Center(
+        child: TextButton.icon(
+          onPressed: onPressed,
+          icon: const Icon(Icons.keyboard_double_arrow_up_rounded, size: 18),
+          label: Text('加载更早的消息 · 还有 $remaining 条'),
+          style: TextButton.styleFrom(foregroundColor: colors.onSurfaceVariant),
         ),
       ),
     );
