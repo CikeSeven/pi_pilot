@@ -698,7 +698,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// - [PiDelivery.followUp] 排队:全部处理完之后再处理。
   /// - [PiDelivery.interrupt] 中断当前生成,然后发送。
   ///
-  /// 不传 [delivery] 时:空闲直接发,生成中默认 [PiDelivery.steer]
+  /// 不传 [delivery] 时:空闲直接发,忙(生成中**或压缩中**)默认 [PiDelivery.steer]
   /// (旧代码硬编码 followUp,导致"插队"其实要等整轮跑完)。
   Future<void> sendPrompt(String text, {PiDelivery? delivery}) async {
     final trimmed = text.trim();
@@ -2364,16 +2364,27 @@ class PiSessionNotifier extends Notifier<PiState> {
           steeringQueue: _stringList(event['steering']),
           followUpQueue: _stringList(event['followUp']),
         );
+      // pi 内部事件流用 compaction_start/compaction_end,而桌面 relay 的
+      // emitBoundary 转发的是扩展钩子事件 session_before_compact/session_compact。
+      // 两套名字都要认 —— 只认前者的话,桌面压缩时 app 一条提示都收不到。
       case 'compaction_start':
-        state = state.copyWith(isCompacting: true);
-        _addSystem('正在压缩上下文…');
+      case 'session_before_compact':
+        if (!state.isCompacting) {
+          state = state.copyWith(isCompacting: true);
+          _addSystem('桌面端正在压缩上下文,消息会排队等它完成…');
+        }
       case 'compaction_end':
+      case 'session_compact':
+        final wasCompacting = state.isCompacting;
         state = state.copyWith(isCompacting: false);
         final result = event['result'];
         if (result is Map<String, dynamic>) {
           final before = result['tokensBefore'];
           final after = result['estimatedTokensAfter'];
           _addSystem('上下文已压缩 ($before → ~$after tokens)');
+        } else if (wasCompacting) {
+          // session_compact 钩子事件没有 result 字段,至少给个收尾提示
+          _addSystem('上下文压缩完成');
         }
       case 'auto_retry_start':
         _addSystem(

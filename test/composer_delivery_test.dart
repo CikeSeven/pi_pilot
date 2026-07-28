@@ -9,6 +9,7 @@ void main() {
   Widget wrap({
     required TextEditingController controller,
     required bool streaming,
+    bool compacting = false,
     VoidCallback? onSteer,
     VoidCallback? onFollowUp,
     VoidCallback? onInterruptAndSend,
@@ -20,6 +21,7 @@ void main() {
         controller: controller,
         enabled: true,
         streaming: streaming,
+        compacting: compacting,
         onSend: () {},
         onSteer: onSteer,
         onFollowUp: onFollowUp,
@@ -48,6 +50,48 @@ void main() {
     expect(find.text('插队'), findsOneWidget);
     expect(find.text('排队'), findsOneWidget);
     expect(find.text('中断并发送'), findsOneWidget);
+  });
+
+  // 压缩期间桌面 ctx.isIdle() 也是 false,消息同样要选投递方式。
+  // 以前输入框完全不知道自己在忙,发出去直接被桌面报
+  // "busy desktop source requires steer or followUp delivery"。
+  testWidgets('压缩中且已输入内容时,给插队/排队但不给中断', (tester) async {
+    final controller = TextEditingController(text: '压缩完再干这个');
+    await tester.pumpWidget(
+      wrap(controller: controller, streaming: false, compacting: true),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('插队'), findsOneWidget);
+    expect(find.text('排队'), findsOneWidget);
+    // 中断打断的是生成 —— 拿它去中断压缩只会让上下文停在半路
+    expect(find.text('中断并发送'), findsNothing);
+  });
+
+  testWidgets('压缩中的输入框占位文案说清会排队', (tester) async {
+    final controller = TextEditingController();
+    await tester.pumpWidget(
+      wrap(controller: controller, streaming: false, compacting: true),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('压缩上下文中 · 发送会排队'), findsOneWidget);
+  });
+
+  testWidgets('压缩中且输入框为空时,发送键不变成停止键', (tester) async {
+    final controller = TextEditingController();
+    await tester.pumpWidget(
+      wrap(
+        controller: controller,
+        streaming: false,
+        compacting: true,
+        onAbort: () {},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.stop_rounded), findsNothing);
+    expect(find.byIcon(Icons.arrow_upward_rounded), findsOneWidget);
   });
 
   testWidgets('三个投递芯片各自触发对应回调', (tester) async {

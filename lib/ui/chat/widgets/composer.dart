@@ -11,6 +11,7 @@ class Composer extends StatelessWidget {
     required this.controller,
     required this.enabled,
     required this.streaming,
+    this.compacting = false,
     required this.onSend,
     this.onSteer,
     this.onFollowUp,
@@ -23,6 +24,10 @@ class Composer extends StatelessWidget {
   final TextEditingController controller;
   final bool enabled;
   final bool streaming;
+
+  /// 桌面端正在压缩上下文:它也是「忙」,但不是流式 ——
+  /// 没有打字指示器、没有中断按钮,输入框必须自己说清楚消息会排队。
+  final bool compacting;
   final VoidCallback onSend;
 
   /// 生成中的三种投递方式(输入框有内容时才展示)。
@@ -45,6 +50,9 @@ class Composer extends StatelessWidget {
     final showStop =
         streaming && onAbort != null && controller.text.trim().isEmpty;
     final sendEnabled = enabled || showStop;
+    // 压缩期间桌面 ctx.isIdle() 也是 false,消息同样要选投递方式。
+    // 但停止键只跟流式绑定 —— 中断压缩不是这个按钮该干的事。
+    final busy = streaming || compacting;
     // 输入条本身是透明的,「悬浮卡片」是下面那个 Material。
     // 不投影 —— 靠底色(surfaceContainerHigh)和四周留白与消息流分开。
     return Material(
@@ -65,7 +73,7 @@ class Composer extends StatelessWidget {
               duration: PiMotion.quick,
               curve: PiMotion.enter,
               alignment: Alignment.bottomCenter,
-              child: streaming && controller.text.trim().isNotEmpty
+              child: busy && controller.text.trim().isNotEmpty
                   ? SizedBox(
                       width: double.infinity,
                       child: SingleChildScrollView(
@@ -76,7 +84,7 @@ class Composer extends StatelessWidget {
                             ActionChip(
                               avatar: const Icon(Icons.bolt_outlined, size: 18),
                               label: const Text('插队'),
-                              tooltip: '本轮结束后立刻处理',
+                              tooltip: compacting ? '压缩结束后立刻处理' : '本轮结束后立刻处理',
                               onPressed: onSteer,
                             ),
                             const SizedBox(width: 8),
@@ -89,16 +97,20 @@ class Composer extends StatelessWidget {
                               tooltip: '全部处理完之后再处理',
                               onPressed: onFollowUp,
                             ),
-                            const SizedBox(width: 8),
-                            ActionChip(
-                              avatar: const Icon(
-                                Icons.stop_circle_outlined,
-                                size: 18,
+                            // 压缩中不给「中断并发送」:那个按钮打断的是生成,
+                            // 拿它去中断压缩只会让上下文停在半路。
+                            if (streaming) ...[
+                              const SizedBox(width: 8),
+                              ActionChip(
+                                avatar: const Icon(
+                                  Icons.stop_circle_outlined,
+                                  size: 18,
+                                ),
+                                label: const Text('中断并发送'),
+                                tooltip: '停止当前这一轮,然后发送',
+                                onPressed: onInterruptAndSend,
                               ),
-                              label: const Text('中断并发送'),
-                              tooltip: '停止当前这一轮,然后发送',
-                              onPressed: onInterruptAndSend,
-                            ),
+                            ],
                           ],
                         ),
                       ),
@@ -128,7 +140,11 @@ class Composer extends StatelessWidget {
                           textInputAction: TextInputAction.newline,
                           onChanged: onChanged,
                           decoration: InputDecoration(
-                            hintText: streaming ? '生成中 · 发送会插队' : '指挥 pi 做点什么…',
+                            hintText: compacting
+                                ? '压缩上下文中 · 发送会排队'
+                                : streaming
+                                ? '生成中 · 发送会插队'
+                                : '指挥 pi 做点什么…',
                             // 视觉容器由外面那张卡承担,输入框自己不画边框和底色。
                             // 设置页的输入框不受影响,仍走 inputDecorationTheme。
                             filled: false,

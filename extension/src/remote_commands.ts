@@ -49,11 +49,16 @@ export async function executeRemoteCommand(
         runtime.pi.sendUserMessage(command.message);
         return { accepted: true, delivery: "immediate" };
       }
-      if (command.streamingBehavior !== "steer" && command.streamingBehavior !== "followUp") {
-        throw new Error("busy desktop source requires steer or followUp delivery");
-      }
-      runtime.pi.sendUserMessage(command.message, { deliverAs: command.streamingBehavior });
-      return { accepted: true, delivery: command.streamingBehavior };
+      // 忙但客户端没指定投递方式:以前直接抛错,消息就丢了。
+      // 压缩上下文期间 isIdle() 为 false,而客户端看到的 isStreaming 是 false ——
+      // 双方对「忙」的判断必然错开,这个竞态不该由用户承担。
+      // 排队是无损的:兜底成 followUp,而不是丢消息。
+      const delivery =
+        command.streamingBehavior === "steer" || command.streamingBehavior === "followUp"
+          ? command.streamingBehavior
+          : "followUp";
+      runtime.pi.sendUserMessage(command.message, { deliverAs: delivery });
+      return { accepted: true, delivery };
     }
 
     case "abort":

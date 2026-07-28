@@ -212,6 +212,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                       controller: _input,
                       enabled: true,
                       streaming: state.isStreaming,
+                      compacting: state.isCompacting,
                       onSend: _send,
                       onSteer: () => _send(delivery: PiDelivery.steer),
                       onFollowUp: () => _send(delivery: PiDelivery.followUp),
@@ -378,7 +379,16 @@ class _LivenessBanner extends ConsumerWidget {
       // 「正在生成」**不占横幅**。这个状态本来就有三处更省地方的表达:
       // 顶栏的中断按钮、助手气泡里的打字指示器、输入框的「生成中 · 发送会插队」。
       // 再压一条 50dp 的横幅纯属浪费空间。
-      // 压缩同理 —— 它下面紧跟着一条 LinearProgressIndicator。
+      //
+      // 压缩不一样:它没有打字指示器、没有中断按钮,输入框也不知道自己在忙,
+      // 以前只有一条 2px 进度条 —— 等于没提示。所以压缩要占横幅。
+      _ when state.isCompacting => (
+        Icons.compress,
+        '${source.label} 正在压缩上下文 · 消息会排队等它完成',
+        colors.surfaceContainerHighest,
+        colors.onSurfaceVariant,
+        null,
+      ),
       _ when !source.connected => (
         Icons.bedtime_outlined,
         '${source.label} 已休眠 · 发消息会自动唤醒',
@@ -410,7 +420,7 @@ class _LivenessBanner extends ConsumerWidget {
             if (text.isNotEmpty)
               Row(
                 children: [
-                  if (state.isStreaming)
+                  if (state.isStreaming || state.isCompacting)
                     SizedBox(
                       width: 16,
                       height: 16,

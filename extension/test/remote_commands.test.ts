@@ -46,12 +46,29 @@ test("idle prompt starts immediately", async () => {
   assert.deepEqual(calls[0], { name: "message", value: { message: "hello", options: undefined } });
 });
 
-test("busy prompt requires an explicit delivery mode", async () => {
-  const { value } = runtime(false);
-  await assert.rejects(
-    executeRemoteCommand({ type: "prompt", message: "hello" }, value),
-    /requires steer or followUp/,
+// 以前这里抛错,消息直接丢掉。压缩上下文期间 isIdle() 为 false 而客户端
+// 看到的 isStreaming 是 false,双方对「忙」的判断必然错开 —— 兜底排队而不是丢。
+test("busy prompt without delivery mode falls back to followUp", async () => {
+  const { value, calls } = runtime(false);
+  const result = await executeRemoteCommand({ type: "prompt", message: "hello" }, value);
+  assert.deepEqual(result, { accepted: true, delivery: "followUp" });
+  assert.deepEqual(calls[0], {
+    name: "message",
+    value: { message: "hello", options: { deliverAs: "followUp" } },
+  });
+});
+
+test("busy prompt ignores an unknown delivery mode instead of dropping", async () => {
+  const { value, calls } = runtime(false);
+  const result = await executeRemoteCommand(
+    { type: "prompt", message: "hello", streamingBehavior: "bogus" },
+    value,
   );
+  assert.deepEqual(result, { accepted: true, delivery: "followUp" });
+  assert.deepEqual(calls[0], {
+    name: "message",
+    value: { message: "hello", options: { deliverAs: "followUp" } },
+  });
 });
 
 test("busy prompt forwards steer exactly", async () => {
