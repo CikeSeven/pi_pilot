@@ -43,14 +43,21 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    debugPrint('[NotificationController] 生命周期变化: $_lifecycle -> $state');
     _lifecycle = state;
     if (state == AppLifecycleState.resumed) {
+      debugPrint('[NotificationController] 应用回到前台，取消所有通知');
       NotificationService.instance.cancelAll();
     }
   }
 
   void _notify(String title, [String? body]) {
-    if (!_inBackground || !_enabled) return;
+    debugPrint('[NotificationController] _notify 被调用: title=$title, body=$body');
+    debugPrint('[NotificationController] _inBackground=$_inBackground, _enabled=$_enabled, _lifecycle=$_lifecycle');
+    if (!_inBackground || !_enabled) {
+      debugPrint('[NotificationController] 跳过通知: 前台或未启用');
+      return;
+    }
     NotificationService.instance.show(
       id: ++_notificationId,
       title: title,
@@ -62,6 +69,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   Widget build(BuildContext context) {
     // 任务完成:isStreaming true → false
     ref.listen(piSessionProvider.select((s) => s.isStreaming), (prev, next) {
+      debugPrint('[NotificationController] isStreaming 变化: $prev → $next');
       if (prev == true && next == false) {
         final items = ref.read(piSessionProvider).items;
         final lastAssistant = items.reversed
@@ -69,6 +77,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
             .firstOrNull;
         var snippet = lastAssistant?.text ?? '';
         if (snippet.length > 120) snippet = '${snippet.substring(0, 120)}…';
+        debugPrint('[NotificationController] 准备发送任务完成通知');
         _notify('pi 任务完成', snippet.isEmpty ? null : snippet);
       }
     });

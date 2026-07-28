@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 /// 本地通知封装(Android channel `agent_events`)。
@@ -17,8 +18,14 @@ class NotificationService {
     'agent_events',
     '任务事件',
     channelDescription: 'pi 任务完成、扩展等待输入、连接中断等提醒',
-    importance: Importance.high,
+    importance: Importance.max,
     priority: Priority.high,
+    playSound: true,
+    enableVibration: true,
+    enableLights: true,
+    showWhen: true,
+    visibility: NotificationVisibility.public,
+    channelShowBadge: true,
   );
 
   Future<void> init() async {
@@ -35,6 +42,7 @@ class NotificationService {
         >();
     _permissionGranted =
         await android?.requestNotificationsPermission() ?? false;
+    debugPrint('[NotificationService] 初始化完成, 权限: $_permissionGranted');
   }
 
   Future<void> show({
@@ -42,13 +50,19 @@ class NotificationService {
     required String title,
     String? body,
   }) async {
-    if (!_initialized || !_permissionGranted) return;
+    debugPrint('[NotificationService] show 被调用: id=$id, title=$title, body=$body');
+    debugPrint('[NotificationService] _initialized=$_initialized, _permissionGranted=$_permissionGranted');
+    if (!_initialized || !_permissionGranted) {
+      debugPrint('[NotificationService] 跳过通知: 未初始化或无权限');
+      return;
+    }
     await _plugin.show(
       id: id,
       title: title,
       body: body,
       notificationDetails: const NotificationDetails(android: _channel),
     );
+    debugPrint('[NotificationService] 通知已发送');
   }
 
   Future<void> cancelAll() async {

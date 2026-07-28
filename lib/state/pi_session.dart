@@ -2383,6 +2383,16 @@ class PiSessionNotifier extends Notifier<PiState> {
         );
       case 'bridge_error':
         _addSystem('bridge: ${event['error']}', SystemKind.error);
+      case 'system_message':
+        final kind = switch (event['level']) {
+          'warning' => SystemKind.warning,
+          'error' => SystemKind.error,
+          _ => SystemKind.info,
+        };
+        final text = event['message'] ?? event['text'] ?? '';
+        if (text is String && text.isNotEmpty) {
+          _addSystem(text, kind);
+        }
     }
   }
 
