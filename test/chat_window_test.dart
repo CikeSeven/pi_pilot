@@ -154,4 +154,81 @@ void main() {
       expect(full.itemCount, 200);
     });
   });
+
+  /// 桥为了不撞爆手机的 2MB 套接字缓冲,只发 entries 的尾巴(全量快照实测到过
+  /// 10.27MB)。所以「本地没有更早」不等于「没有更早」—— 滚到本地头部时按钮还得在,
+  /// 只是改成联网补。
+  group('本地到头但桥上还有历史', () {
+    test('本地窗口装得下全部,仍要显示按钮并走联网', () {
+      final w = ChatWindow.of(
+        total: 40,
+        windowSize: 60,
+        hasPendingUiRequest: false,
+        hasRemoteEarlier: true,
+      );
+      expect(w.offset, 0);
+      expect(w.hasEarlier, isTrue, reason: '桥上还有,按钮不能消失');
+      expect(w.needsRemoteFetch, isTrue);
+      // 按钮占掉槽位 0,消息整体后移一格
+      expect(w.itemCount, 41);
+      expect(w.isLoadEarlierSlot(0), isTrue);
+      expect(w.itemIndexOf(1), 0);
+      expect(w.slotOf(0), 1);
+    });
+
+    test('本地还有更早时先扩窗,不联网', () {
+      final w = ChatWindow.of(
+        total: 200,
+        windowSize: 60,
+        hasPendingUiRequest: false,
+        hasRemoteEarlier: true,
+      );
+      expect(w.offset, 140);
+      expect(w.hasEarlier, isTrue);
+      expect(w.needsRemoteFetch, isFalse, reason: '本地还有 140 条没渲染');
+    });
+
+    test('桥上没有了、本地也到头 → 按钮消失', () {
+      final w = ChatWindow.of(
+        total: 40,
+        windowSize: 60,
+        hasPendingUiRequest: false,
+        hasRemoteEarlier: false,
+      );
+      expect(w.hasEarlier, isFalse);
+      expect(w.needsRemoteFetch, isFalse);
+      expect(w.itemCount, 40);
+    });
+
+    test('联网补齐 + 同步扩窗后,新取回的那批必须落进窗口', () {
+      // 补齐前:本地 40 条全在窗口里
+      final before = ChatWindow.of(
+        total: 40,
+        windowSize: 60,
+        hasPendingUiRequest: false,
+        hasRemoteEarlier: true,
+      );
+      expect(before.offset, 0);
+
+      // 回归:光把历史插进列表而不放大窗口,offset 会跟着变大,
+      // 刚取回来的那批仍在窗口之上,点了等于没反应。
+      final grownOnly = ChatWindow.of(
+        total: 140,
+        windowSize: 60,
+        hasPendingUiRequest: false,
+        hasRemoteEarlier: true,
+      );
+      expect(grownOnly.offset, 80, reason: '没扩窗时新历史反而看不见');
+
+      // 正确做法:窗口同时加上新增条数
+      final after = ChatWindow.of(
+        total: 140,
+        windowSize: 60 + 100,
+        hasPendingUiRequest: false,
+        hasRemoteEarlier: true,
+      );
+      expect(after.offset, 0);
+      expect(after.visibleCount, 140);
+    });
+  });
 }

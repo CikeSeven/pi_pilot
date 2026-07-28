@@ -66,9 +66,6 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   static const _windowStep = 60;
   int _windowSize = _windowStep;
 
-  /// 「加载更早」时用来抵消位置跳动:展开前的 maxScrollExtent。
-  double? _extentBeforeGrow;
-
   void _growWindow() {
     if (!_scroll.hasClients) {
       setState(() => _windowSize += _windowStep);
@@ -76,14 +73,20 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     }
     // 头部插入内容会把当前位置整体推下去,记下展开前的高度,
     // 下一帧按增量补偿,视觉上停在原处。
-    _extentBeforeGrow = _scroll.position.maxScrollExtent;
+    final before = _scroll.position.maxScrollExtent;
     final pixels = _scroll.position.pixels;
     setState(() => _windowSize += _windowStep);
+    _compensateAfterGrow(pixels: pixels, extentBefore: before);
+  }
+
+  /// 头部长高之后把滚动位置拉回原处。
+  void _compensateAfterGrow({
+    required double pixels,
+    required double extentBefore,
+  }) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final before = _extentBeforeGrow;
-      _extentBeforeGrow = null;
-      if (!mounted || !_scroll.hasClients || before == null) return;
-      final delta = _scroll.position.maxScrollExtent - before;
+      if (!mounted || !_scroll.hasClients) return;
+      final delta = _scroll.position.maxScrollExtent - extentBefore;
       if (delta <= 0) return;
       _scroll.jumpTo(
         (pixels + delta).clamp(
@@ -92,6 +95,32 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
         ),
       );
     });
+  }
+
+  /// 「加载更早」—— 本地还有就只放大窗口,本地空了就联网补。
+  ///
+  /// 桥为了不撞爆手机的 2MB 套接字缓冲只发 entries 的尾巴(全量快照实测到过
+  /// 10.27MB),更早的留在桥上。所以滚到本地头部不等于历史到头了。
+  Future<void> _loadEarlier(ChatWindow window) async {
+    if (!window.needsRemoteFetch) {
+      _growWindow();
+      return;
+    }
+    final extentBefore = _scroll.hasClients
+        ? _scroll.position.maxScrollExtent
+        : null;
+    final pixels = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+    final countBefore = ref.read(piSessionProvider).items.length;
+    final ok = await ref.read(piSessionProvider.notifier).loadEarlierHistory();
+    if (!mounted || !ok) return;
+    final added = ref.read(piSessionProvider).items.length - countBefore;
+    if (added <= 0) return;
+    // 必须同时把窗口放大 —— 窗口是锚在**尾部**的,光把历史插进列表的话
+    // offset 会跟着变大,刚取回来的那批仍然在窗口之上,点了等于没反应。
+    setState(() => _windowSize += added);
+    if (extentBefore != null) {
+      _compensateAfterGrow(pixels: pixels, extentBefore: extentBefore);
+    }
   }
 
   void _syncDerived(PiState state) {
@@ -246,6 +275,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       total: state.items.length,
       windowSize: _windowSize,
       hasPendingUiRequest: state.pendingUiRequest != null,
+      hasRemoteEarlier: state.hasMoreHistory,
     );
 
     // 首帧之后量一次;之后由 SizeChangedLayoutNotifier 驱动
@@ -289,7 +319,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     if (window.isLoadEarlierSlot(index)) {
                       return _LoadEarlierButton(
                         remaining: window.offset,
-                        onPressed: _growWindow,
+                        loading: state.loadingEarlier,
+                        onPressed: () => unawaited(_loadEarlier(window)),
                       );
                     }
                     if (window.isPendingRequestSlot(index)) {
@@ -615,16 +646,19 @@ class ChatWindow {
     required this.total,
     required this.offset,
     required this.hasPendingUiRequest,
+    this.hasRemoteEarlier = false,
   });
 
   factory ChatWindow.of({
     required int total,
     required int windowSize,
     required bool hasPendingUiRequest,
+    bool hasRemoteEarlier = false,
   }) => ChatWindow(
     total: total,
     offset: total > windowSize ? total - windowSize : 0,
     hasPendingUiRequest: hasPendingUiRequest,
+    hasRemoteEarlier: hasRemoteEarlier,
   );
 
   /// 完整列表的总条数。
@@ -634,8 +668,17 @@ class ChatWindow {
   final int offset;
   final bool hasPendingUiRequest;
 
+  /// 桥上还留着更早的历史(本地已经没有了,但能联网取)。
+  ///
+  /// 桥为了不撞爆手机的 2MB 套接字缓冲只发 entries 的尾巴,所以「没有本地更早」
+  /// 不等于「没有更早」—— 滚到本地头部时按钮还要在,只是改成联网补。
+  final bool hasRemoteEarlier;
+
   /// 窗口之上还有没渲染的历史 → 需要「加载更早」按钮占一个槽位。
-  bool get hasEarlier => offset > 0;
+  bool get hasEarlier => offset > 0 || hasRemoteEarlier;
+
+  /// 本地窗口之上已经空了,再往前得联网取。
+  bool get needsRemoteFetch => offset == 0 && hasRemoteEarlier;
 
   int get _leading => hasEarlier ? 1 : 0;
   int get _trailing => hasPendingUiRequest ? 1 : 0;
@@ -661,11 +704,17 @@ class ChatWindow {
 }
 
 class _LoadEarlierButton extends StatelessWidget {
-  const _LoadEarlierButton({required this.remaining, required this.onPressed});
+  const _LoadEarlierButton({
+    required this.remaining,
+    required this.onPressed,
+    this.loading = false,
+  });
 
-  /// 窗口之上还没渲染的条数。
+  /// 窗口之上还没渲染的条数。0 表示本地已空,接下来要联网取 ——
+  /// 那时数不出来还剩多少,因为条数在桥上。
   final int remaining;
   final VoidCallback onPressed;
+  final bool loading;
 
   @override
   Widget build(BuildContext context) {
@@ -674,9 +723,24 @@ class _LoadEarlierButton extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 8),
       child: Center(
         child: TextButton.icon(
-          onPressed: onPressed,
-          icon: const Icon(Icons.keyboard_double_arrow_up_rounded, size: 18),
-          label: Text('加载更早的消息 · 还有 $remaining 条'),
+          onPressed: loading ? null : onPressed,
+          icon: loading
+              ? SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: colors.onSurfaceVariant,
+                  ),
+                )
+              : const Icon(Icons.keyboard_double_arrow_up_rounded, size: 18),
+          label: Text(
+            loading
+                ? '正在取更早的消息…'
+                : remaining > 0
+                ? '加载更早的消息 · 还有 $remaining 条'
+                : '加载更早的消息',
+          ),
           style: TextButton.styleFrom(foregroundColor: colors.onSurfaceVariant),
         ),
       ),

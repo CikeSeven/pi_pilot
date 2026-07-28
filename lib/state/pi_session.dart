@@ -438,6 +438,8 @@ class PiState {
     this.contextUsage,
     this.pendingMessageCount,
     this.snapshotTruncated = false,
+    this.hasMoreHistory = false,
+    this.loadingEarlier = false,
     this.sessionBusyElsewhere = false,
     this.sessionWaking = false,
     this.transientNotice,
@@ -521,6 +523,16 @@ class PiState {
   /// 桌面快照因超限被截断(历史消息不完整)。
   final bool snapshotTruncated;
 
+  /// 桥上还留着更早的历史,可以按需往前补。
+  ///
+  /// 与 [snapshotTruncated] 不是一回事:那个说的是**桌面 relay** 抓快照时就超限了,
+  /// 更早的内容压根没到桥上;这个说的是桥为了不撞爆手机的 2MB 套接字缓冲而只发了
+  /// 尾巴,更早的仍在桥上,`get_entries` 带 `before` 就能取回来。
+  final bool hasMoreHistory;
+
+  /// 正在往前补历史(用于「加载更早」按钮的加载态)。
+  final bool loadingEarlier;
+
   SourceInfo? get selectedSource {
     final id = selectedSourceId;
     if (id == null) return null;
@@ -592,6 +604,8 @@ class PiState {
     ContextUsage? contextUsage,
     int? pendingMessageCount,
     bool? snapshotTruncated,
+    bool? hasMoreHistory,
+    bool? loadingEarlier,
     bool clearError = false,
     bool clearSource = false,
     bool clearUiRequest = false,
@@ -650,6 +664,12 @@ class PiState {
       snapshotTruncated: clearSource
           ? false
           : (snapshotTruncated ?? this.snapshotTruncated),
+      hasMoreHistory: clearSource
+          ? false
+          : (hasMoreHistory ?? this.hasMoreHistory),
+      loadingEarlier: clearSource
+          ? false
+          : (loadingEarlier ?? this.loadingEarlier),
     );
   }
 }
@@ -691,6 +711,16 @@ class PiSessionNotifier extends Notifier<PiState> {
   int _reqId = 0;
 
   String? _leafId;
+
+  /// 已知最靠前那条 entry 的 id —— 往前分页的游标。
+  String? _oldestEntryId;
+
+  /// 非 null 时 [_addItem] 改成在这个下标插入并自增。
+  ///
+  /// 补回来的历史必须落在**头部**,而 _items 只有 add。不给个插入游标的话,
+  /// 旧消息会排在新消息后面,时间线直接反了。逐条自增而不是固定插 0,
+  /// 是为了保住这一批内部的先后顺序。
+  int? _prependAt;
   ({String host, int port, String token})? _creds;
   bool _intentionalDisconnect = false;
   bool _hubV2 = false;
@@ -2066,6 +2096,13 @@ class PiSessionNotifier extends Notifier<PiState> {
       if (mode == 'snapshot') {
         final snapshot = data['snapshot'];
         if (snapshot is Map) _applyHubSnapshot(snapshot, reconcile: reconcile);
+        // 桥为了不撞爆手机的 2MB 套接字缓冲,只发了 entries 的尾巴。
+        // 更早的仍在桥上,记住游标以便「加载更早」往前取。
+        if (data['entriesHasMore'] == true) {
+          final oldest = data['entriesOldestId'];
+          if (oldest is String && oldest.isNotEmpty) _oldestEntryId = oldest;
+          state = state.copyWith(hasMoreHistory: true);
+        }
       } else if (mode == 'rpc') {
         await _sync(forceFull: forceFull);
         if (stale()) return;
@@ -2205,8 +2242,60 @@ class PiSessionNotifier extends Notifier<PiState> {
     for (final entry in entries) {
       if (entry is Map) _ingestEntry(Map<String, dynamic>.from(entry));
     }
+    // 桥对每一批 entries 都封了字节上限,更早的留在桥上按需取。
+    final more = data?['hasMore'] == true;
+    if (more) {
+      final oldest = data?['oldestId'];
+      if (oldest is String && oldest.isNotEmpty) _oldestEntryId = oldest;
+    }
+    // 增量路径(since)不该动 hasMoreHistory:它取的是 leaf 之后的新消息,
+    // 与「更早的历史还在不在」无关,覆盖掉会让「加载更早」凭空消失。
+    state = state.copyWith(hasMoreHistory: incremental ? null : more);
     _emit();
     await _saveLeafId();
+  }
+
+  /// 往前补一段历史。
+  ///
+  /// 桥只给手机发 entries 的尾巴(全量快照实测到过 10.27MB,而手机套接字缓冲上限
+  /// 是 2MB,巨包会让下一次发送触发 close(1013),表现成约 2 秒一轮地重连)。
+  /// 更早的仍在桥上,靠 `get_entries` 的 `before` 游标取回来。
+  Future<bool> loadEarlierHistory() async {
+    final cursor = _oldestEntryId;
+    if (cursor == null || state.loadingEarlier || !state.hasMoreHistory) {
+      return false;
+    }
+    state = state.copyWith(loadingEarlier: true);
+    try {
+      final resp = await _request('get_entries', {'before': cursor});
+      final data = resp?['data'] as Map?;
+      if (resp?['success'] != true || data == null) {
+        // 取不到就别把按钮永久留在那儿骗人:游标可能已经随分支切换失效了。
+        state = state.copyWith(loadingEarlier: false, hasMoreHistory: false);
+        return false;
+      }
+      final entries = data['entries'] as List? ?? const [];
+      // 头插:这些是更早的消息,追加到尾部会让时间线直接反过来。
+      _prependAt = 0;
+      try {
+        for (final entry in entries) {
+          if (entry is Map) _ingestEntry(Map<String, dynamic>.from(entry));
+        }
+      } finally {
+        _prependAt = null;
+      }
+      final oldest = data['oldestId'];
+      if (oldest is String && oldest.isNotEmpty) _oldestEntryId = oldest;
+      state = state.copyWith(
+        loadingEarlier: false,
+        hasMoreHistory: data['hasMore'] == true,
+      );
+      _emit();
+      return entries.isNotEmpty;
+    } catch (_) {
+      state = state.copyWith(loadingEarlier: false);
+      return false;
+    }
   }
 
   Future<Map<String, dynamic>?> _request(
@@ -3304,7 +3393,13 @@ class PiSessionNotifier extends Notifier<PiState> {
   // -- helpers ------------------------------------------------------------------
 
   void _addItem(ChatItem item) {
-    _items.add(item);
+    final at = _prependAt;
+    if (at != null && at <= _items.length) {
+      _items.insert(at, item);
+      _prependAt = at + 1;
+    } else {
+      _items.add(item);
+    }
     _itemsByKey[item.key] = item;
   }
 
@@ -3337,6 +3432,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     _sawInFlightMessage = false;
     _inOrderStreak = 0;
     _gapNoticeShown = false;
+    // 历史被清空了,往前分页的游标随之作废;头插游标必须归位,
+    // 否则下一批正常消息会被插到列表中间。
+    _oldestEntryId = null;
+    _prependAt = null;
   }
 
   static List<String> _stringList(dynamic value) =>

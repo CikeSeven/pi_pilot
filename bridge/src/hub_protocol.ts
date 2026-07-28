@@ -3,6 +3,26 @@ export const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 export const MAX_DESKTOP_MESSAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_BUFFERED_SOCKET_BYTES = 2 * 1024 * 1024;
 
+/**
+ * 发给手机的一批 entries 的字节预算。
+ *
+ * 必须明显小于 [MAX_BUFFERED_SOCKET_BYTES]。sendRaw 是先判后发:一帧巨包本身
+ * 发得出去,但会把 bufferedAmount 顶到包大小;紧接着任何一次发送(流式事件
+ * 几毫秒就来一条)都会看到超限而 close(1013)。长会话的全量快照实测到过
+ * 10.27MB(4592 条 entries 占 9.78MB),于是手机变成「连上→要快照→被关→重连」
+ * 约 2 秒一轮的死循环。
+ */
+export const MAX_MOBILE_ENTRIES_BYTES = 1024 * 1024;
+
+/**
+ * 即使字节预算已经用完,也至少给这么多条尾部 entries。
+ *
+ * 单条 entry 实测最大能到 1.16MB(大段工具输出),只按字节封顶会在这种条目面前
+ * 退化成只发 1 条,聊天页就只剩一句话。所以条数下限优先于字节预算 ——
+ * 超出部分宁可让它大于预算,也不能把会话截成空卡。
+ */
+export const MIN_MOBILE_ENTRIES = 80;
+
 /** 向桌面 relay 索要新快照的等待上限(远小于 App 的 20s 请求超时)。 */
 export const SNAPSHOT_REQUEST_TIMEOUT_MS = 4_000;
 

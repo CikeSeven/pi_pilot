@@ -544,3 +544,132 @@ test("an in-flight questionnaire is republished when a client selects the source
     ]);
   }
 });
+
+test("mobile snapshots are clipped to a byte budget and older history pages back", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+
+    // 300 条 x 约 8KB ≈ 2.4MB。远超 1MB 的手机预算,也远超 2MB 套接字缓冲上限
+    // 所对应的危险区间 —— 真实长会话实测过 9.78MB / 4592 条。
+    const filler = "x".repeat(8_000);
+    const entries = Array.from({ length: 300 }, (_, i) => ({
+      id: `e${i}`,
+      type: "message",
+      timestamp: i + 1,
+      message: { role: i % 2 === 0 ? "user" : "assistant", content: filler, timestamp: i + 1 },
+    }));
+
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:big",
+          label: "Big desktop",
+          cwd: "/tmp/pipilot-big",
+          sessionId: "session-big",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-big",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-big", isStreaming: false },
+          entries,
+          leafId: "e299",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:big" })).success,
+      true,
+    );
+
+    // hub_sync 必须只发尾巴。整帧一旦超过 2MB,巨包本身发得出去,但紧接着的任何
+    // 一次发送都会看到 bufferedAmount 超限而 close(1013) —— 手机于是约 2 秒
+    // 一轮地重连,永远同步不完。
+    const sync = await phone.request("hub_sync");
+    assert.equal(sync.success, true);
+    assert.equal(sync.data.mode, "snapshot");
+    const sent = sync.data.snapshot.entries;
+    assert.ok(sent.length < entries.length, "整份 300 条不该原样发给手机");
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(sync)) < 2 * 1024 * 1024,
+      "hub_sync 整帧必须留在 2MB 套接字缓冲之内",
+    );
+    // 尾巴要对齐到最后一条,否则聊天页显示的不是最新消息
+    assert.equal(sent[sent.length - 1].id, "e299");
+    assert.equal(sync.data.entriesHasMore, true);
+    assert.equal(sync.data.entriesOmitted, entries.length - sent.length);
+    assert.equal(sync.data.entriesOldestId, sent[0].id);
+
+    // 条数下限优先于字节预算:单条 entry 实测最大能到 1.16MB,只按字节封顶会在
+    // 这种条目面前退化成只发 1 条,聊天页就只剩一句话。
+    assert.ok(sent.length >= 80, `至少要给 80 条,实际 ${sent.length}`);
+
+    // 往前分页:返回游标之前那段的**尾巴**,才能与已显示的内容接上。
+    const older = await phone.request("get_entries", { before: sync.data.entriesOldestId });
+    assert.equal(older.success, true);
+    const olderEntries = older.data.entries;
+    assert.ok(olderEntries.length > 0);
+    // 紧邻游标,中间不能有洞
+    const cursorIndex = entries.findIndex((e) => e.id === sync.data.entriesOldestId);
+    assert.equal(olderEntries[olderEntries.length - 1].id, `e${cursorIndex - 1}`);
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(older)) < 2 * 1024 * 1024,
+      "分页应答也必须留在缓冲之内",
+    );
+
+    // limit 能进一步收窄
+    const small = await phone.request("get_entries", {
+      before: sync.data.entriesOldestId,
+      limit: 5,
+    });
+    assert.equal(small.success, true);
+    assert.equal(small.data.entries.length, 5);
+    assert.equal(small.data.hasMore, true);
+
+    // 一路翻到头:hasMore 必须落回 false,否则按钮永远留在那儿骗人
+    let cursor: string | null = sync.data.entriesOldestId;
+    let guard = 0;
+    let sawEnd = false;
+    while (cursor && guard++ < 20) {
+      const page = await phone.request("get_entries", { before: cursor });
+      assert.equal(page.success, true);
+      if (page.data.hasMore !== true) {
+        sawEnd = true;
+        assert.equal(page.data.entries[0].id, "e0", "最后一页要一直翻到第一条");
+        break;
+      }
+      cursor = page.data.oldestId;
+    }
+    assert.equal(sawEnd, true, "应当能翻到历史开头");
+
+    // 游标不存在时要明确报错,而不是静默给空数组(那会让 App 以为到头了)
+    const bogus = await phone.request("get_entries", { before: "nope" });
+    assert.equal(bogus.success, false);
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});

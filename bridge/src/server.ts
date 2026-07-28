@@ -9,6 +9,8 @@ import {
   MAX_BUFFERED_SOCKET_BYTES,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_DESKTOP_MESSAGE_BYTES,
+  MAX_MOBILE_ENTRIES_BYTES,
+  MIN_MOBILE_ENTRIES,
   clampLeaseTtl,
   isDesktopMutationCommand,
   isReadOnlySourceCommand,
@@ -821,6 +823,43 @@ async function handleDesktopTreeRead(
   respond(client.ws, msg, false, undefined, `会话树读取失败:${live.reason}`);
 }
 
+/// 发给手机的 entries 尾巴。
+///
+/// 长会话的全量 entries 实测到过 9.78MB / 4592 条,而手机套接字的缓冲上限是
+/// 2MB。sendRaw 先判后发,所以巨包本身发得出去,但紧接着的任何一次发送都会
+/// 看到 bufferedAmount 超限而 close(1013) —— 手机于是「连上→要快照→被关→重连」
+/// 约 2 秒一轮地死循环。
+///
+/// 从尾向前收:聊天页要的就是最新那段。更早的靠 get_entries 的 before 分页补。
+interface ClippedEntries {
+  entries: JsonObject[];
+  /// 被砍掉的条数(0 表示这就是全部)。
+  omitted: number;
+  /// 砍完之后最靠前那条的 id,App 用它作往前分页的游标。
+  oldestId: string | null;
+}
+
+function clipEntriesForMobile(entries: JsonObject[]): ClippedEntries {
+  let bytes = 0;
+  let start = entries.length;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const size = JSON.stringify(entries[i]).length;
+    const taken = entries.length - i;
+    // 条数下限优先于字节预算:单条 entry 实测最大能到 1.16MB(大段工具输出),
+    // 只按字节封顶会在这种条目面前退化成只发 1 条,聊天页就只剩一句话。
+    if (bytes + size > MAX_MOBILE_ENTRIES_BYTES && taken > MIN_MOBILE_ENTRIES) break;
+    bytes += size;
+    start = i;
+  }
+  const clipped = start === 0 ? entries : entries.slice(start);
+  const first = clipped[0];
+  return {
+    entries: clipped,
+    omitted: start,
+    oldestId: typeof first?.id === "string" ? first.id : null,
+  };
+}
+
 function handleDesktopRead(client: MobileClient, source: SourceDescriptor, msg: BridgeMessage): void {
   if (msg.type === "get_tree") {
     void handleDesktopTreeRead(client, source, msg);
@@ -836,7 +875,29 @@ function handleDesktopRead(client: MobileClient, source: SourceDescriptor, msg: 
       respond(client.ws, msg, true, snapshot.state);
       return;
     case "get_entries": {
-      let entries = snapshot.entries;
+      const all = snapshot.entries;
+      // 往前翻历史:返回游标之前那段的**尾巴**(最靠近游标的一批),
+      // 才能与已显示的内容接上。
+      if (typeof msg.before === "string") {
+        const index = all.findIndex((entry) => entry.id === msg.before);
+        if (index < 0) {
+          respond(client.ws, msg, false, undefined, "entry cursor not found in desktop snapshot");
+          return;
+        }
+        const older = all.slice(0, index);
+        const limit = Number.isSafeInteger(msg.limit) ? Math.max(1, Number(msg.limit)) : undefined;
+        const window = limit !== undefined ? older.slice(-limit) : older;
+        const clipped = clipEntriesForMobile(window);
+        respond(client.ws, msg, true, {
+          entries: clipped.entries,
+          leafId: snapshot.leafId,
+          oldestId: clipped.oldestId,
+          // 还有更早的:要么本次窗口前面还剩,要么窗口内部又被字节预算砍了。
+          hasMore: older.length > window.length || clipped.omitted > 0,
+        });
+        return;
+      }
+      let entries = all;
       if (typeof msg.since === "string") {
         const index = entries.findIndex((entry) => entry.id === msg.since);
         if (index < 0) {
@@ -845,7 +906,14 @@ function handleDesktopRead(client: MobileClient, source: SourceDescriptor, msg: 
         }
         entries = entries.slice(index + 1);
       }
-      respond(client.ws, msg, true, { entries, leafId: snapshot.leafId });
+      // 连增量都要封顶:手机离开很久后回来,since 之后的那段本身就可能几 MB。
+      const clipped = clipEntriesForMobile(entries);
+      respond(client.ws, msg, true, {
+        entries: clipped.entries,
+        leafId: snapshot.leafId,
+        oldestId: clipped.oldestId,
+        hasMore: clipped.omitted > 0,
+      });
       return;
     }
     case "get_available_models":
@@ -1142,16 +1210,31 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
             sync = sources.sync(source.id, parseCursor(msg.cursor)) ?? sync;
           }
         }
-        respond(client.ws, msg, true, {
+        // 只把 entries 的尾巴发给手机。全量快照实测到过 10.27MB,而套接字缓冲上限
+        // 是 2MB —— 巨包本身发得出去,但紧接着的任何一次发送都会看到超限而
+        // close(1013),手机于是约 2 秒一轮地重连。更早的历史由 get_entries 的
+        // before 分页按需补齐。
+        const payload: JsonObject = {
           hubId: sources.hubId,
           sourceId: source.id,
           sourceEpoch: source.epoch,
           mode: sync.mode,
           continuous: sync.continuous,
-          ...(sync.mode === "snapshot" ? { snapshot: sync.snapshot } : {}),
-          ...(sync.mode === "rpc" ? { baseSeq: sync.baseSeq } : {}),
           events: sync.events.map(eventFrame),
-        });
+        };
+        if (sync.mode === "rpc") payload.baseSeq = sync.baseSeq;
+        if (sync.mode === "snapshot") {
+          const clipped = clipEntriesForMobile(sync.snapshot.entries);
+          // 浅拷贝:注册表里那份必须保持完整,别的客户端和往前分页都还要用。
+          payload.snapshot =
+            clipped.omitted > 0 ? { ...sync.snapshot, entries: clipped.entries } : sync.snapshot;
+          if (clipped.omitted > 0) {
+            payload.entriesOmitted = clipped.omitted;
+            payload.entriesOldestId = clipped.oldestId;
+            payload.entriesHasMore = true;
+          }
+        }
+        respond(client.ws, msg, true, payload);
         return;
       }
 
