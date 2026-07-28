@@ -300,14 +300,26 @@ interface InFlightAsk {
 /// 同一个源不可能并发弹出第二份。
 const asksBySource = new Map<string, InFlightAsk>();
 
-/// 撤卡也要进重放环。否则断线重连的手机会从环里读出那条 ask 事件,
-/// 把一份早就由电脑接手的问卷重新画出来。
+/// 问卷帧走**带外**,不占源的 seq,也不进重放环。
+///
+/// 不能用 recordLocalEvent:它用 `++record.lastSeq`,而桌面源的事件走
+/// recordDesktopEvent,那条路要求 `seq === lastSeq + 1`,且 seq 由 relay 自己
+/// 独立递增。在桌面源上注入一条本地事件就把 lastSeq 顶偏了,relay 下一条
+/// 事件立即被判 sequence_gap → hub 回 desktop_resync_required → relay 换 epoch
+/// 重发全量快照 → App 整份重同步。而重同步后手机会再选一次源,若那时
+/// 又重发一遍问卷,就又顶偏一次 —— 自己咬住尾巴,表现成答完题后永无止境
+/// 地重连。headless 源没这个问题(它的事件本来就走 recordLocalEvent),
+/// 但问卷只会来自桌面源。
+///
+/// 不进重放环的代价是断线重连拿不到它,由 republishAsk 在选源时补上。
+function sendAskFrame(sourceId: string, frame: JsonObject): void {
+  for (const client of mobileClients.values()) {
+    if (client.selectedSourceId === sourceId) sendObject(client.ws, frame);
+  }
+}
+
 function retractAsk(sourceId: string, requestId: string): void {
-  const event = sources.recordLocalEvent(sourceId, {
-    type: "ask_user_question_retracted",
-    requestId,
-  });
-  if (event.ok) broadcastSourceEvent(event.event);
+  sendAskFrame(sourceId, { type: "ask_user_question_retracted", requestId });
 }
 
 function clearAskForSource(sourceId: string, retract: boolean): void {
@@ -319,22 +331,19 @@ function clearAskForSource(sourceId: string, retract: boolean): void {
 
 /// 选源时把还在途的问卷重新放一遍。
 ///
-/// 重放环不够用:断层大到回落整份快照时,那条 ask 事件就跟着丢了 —— 快照是
-/// 会话状态,不含 hub 自己注入的本地事件。于是电脑还在 beforeToolCall 上等,
-/// 手机却只剩「这份问卷在电脑上作答」,谁也动不了,直到作答窗口超时。
-///
-/// 用新 seq 重新记一条而不是把旧事件原样重发:旧 seq 会被客户端的游标判成
-/// 重复直接丢掉。requestId 不变,所以对已经看到过的客户端是幂等的。
+/// 问卷帧不进重放环(见 sendAskFrame),所以重连、换源、或 epoch 重置后手机
+/// 没任何其他途径能重新看见它。不补的话电脑还在 beforeToolCall 上等,手机却
+/// 只剩「这份问卷在电脑上作答」,谁也动不了,直到作答窗口超时。
+/// requestId 不变,所以对已经看到过的客户端是幂等的。
 function republishAsk(sourceId: string): void {
   const ask = asksBySource.get(sourceId);
   if (!ask) return;
-  const event = sources.recordLocalEvent(sourceId, {
+  sendAskFrame(sourceId, {
     type: "ask_user_question_request",
     requestId: ask.requestId,
     toolCallId: ask.toolCallId,
     questions: ask.questions,
   });
-  if (event.ok) broadcastSourceEvent(event.event);
 }
 
 function requestDesktopTree(
@@ -1892,14 +1901,13 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
         questions,
         claimed: false,
       });
-      // 进重放环:断线重连的手机能从重放里拿到这份问卷,不依赖广播的时机。
-      const event = sources.recordLocalEvent(sourceId, {
+      // 带外下发(不占 seq,见 sendAskFrame)。重连后靠选源时的 republishAsk 补上。
+      sendAskFrame(sourceId, {
         type: "ask_user_question_request",
         requestId,
         toolCallId,
         questions,
       });
-      if (event.ok) broadcastSourceEvent(event.event);
       return;
     }
 

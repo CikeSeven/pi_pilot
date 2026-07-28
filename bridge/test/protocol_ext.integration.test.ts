@@ -511,8 +511,12 @@ test("an in-flight questionnaire is republished when a client selects the source
     );
     assert.equal(republished.requestId, "ask:1");
     assert.equal(republished.questions[0].question, "缓存放在哪一层?");
-    // 重发用的是新 seq,否则客户端的游标会把它当重复直接丢掉。
-    assert.ok(republished._hub.seq > first._hub.seq);
+    // 问卷帧必须是带外的:一旦占了源的 seq,桌面源下一条事件就会被判
+    // sequence_gap(recordDesktopEvent 要求 seq === lastSeq + 1,而 seq 由 relay
+    // 自己独立递增),于是 hub 回 desktop_resync_required、relay 换 epoch 重发
+    // 全量快照、App 整份重同步 —— 答完题后永无止境地重连。
+    assert.equal(republished._hub, undefined);
+    assert.equal(first._hub, undefined);
 
     // 作答后要撤卡,别的客户端也得收到撤卡事件。
     assert.equal(
