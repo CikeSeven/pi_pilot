@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/notification_service.dart';
 import '../../core/pi_connection.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
@@ -183,10 +184,7 @@ class AppearancePage extends ConsumerWidget {
                     segments: const [
                       ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
                       ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
-                      ButtonSegment(
-                        value: ThemeMode.system,
-                        label: Text('跟随'),
-                      ),
+                      ButtonSegment(value: ThemeMode.system, label: Text('跟随')),
                     ],
                     selected: {settings.themeMode},
                     onSelectionChanged: (selection) => ref
@@ -229,6 +227,29 @@ class NotificationsPage extends ConsumerWidget {
                   onChanged: (value) => ref
                       .read(settingsProvider.notifier)
                       .setNotificationsEnabled(value),
+                ),
+                const Divider(height: 1),
+                SwitchListTile(
+                  secondary: const Icon(Icons.vibration),
+                  title: const Text('震动'),
+                  subtitle: const Text('任务提醒到达时震动'),
+                  value: settings.notificationVibrationEnabled,
+                  onChanged: settings.notificationsEnabled
+                      ? (value) => ref
+                            .read(settingsProvider.notifier)
+                            .setNotificationVibrationEnabled(value)
+                      : null,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.open_in_new),
+                  title: const Text('系统通知设置'),
+                  subtitle: const Text('管理悬浮通知、声音与锁屏显示'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => NotificationService.instance
+                      .openSystemNotificationSettings(
+                        vibrate: settings.notificationVibrationEnabled,
+                      ),
                 ),
                 const Divider(height: 1),
                 const Padding(

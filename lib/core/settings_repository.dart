@@ -14,6 +14,7 @@ typedef SettingsData = ({
   List<String> recentDirs,
   List<String> quickPrompts,
   bool notificationsEnabled,
+  bool notificationVibrationEnabled,
   String accent,
 });
 
@@ -31,6 +32,8 @@ class SettingsRepository {
   static const _kRecentDirs = 'sessions.recentDirs';
   static const _kQuickPrompts = 'ui.quickPrompts';
   static const _kNotificationsEnabled = 'ui.notificationsEnabled';
+  static const _kNotificationVibrationEnabled =
+      'ui.notificationVibrationEnabled';
   static const _kAccent = 'ui.accentColor';
 
   Future<SettingsData> load() async {
@@ -48,6 +51,8 @@ class SettingsRepository {
       recentDirs: prefs.getStringList(_kRecentDirs) ?? const [],
       quickPrompts: prefs.getStringList(_kQuickPrompts) ?? const [],
       notificationsEnabled: prefs.getBool(_kNotificationsEnabled) ?? true,
+      notificationVibrationEnabled:
+          prefs.getBool(_kNotificationVibrationEnabled) ?? false,
       accent: prefs.getString(_kAccent) ?? 'blue',
     );
   }
@@ -104,6 +109,11 @@ class SettingsRepository {
   Future<void> saveNotificationsEnabled(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kNotificationsEnabled, enabled);
+  }
+
+  Future<void> saveNotificationVibrationEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kNotificationVibrationEnabled, enabled);
   }
 
   Future<void> saveAccent(String name) async {

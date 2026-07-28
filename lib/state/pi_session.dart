@@ -564,6 +564,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   Timer? _leaseRenewTimer;
   Timer? _healthTimer;
   int _reconnectAttempt = 0;
+  bool _reconnectInFlight = false;
   DateTime? _lastPongAt;
   final math.Random _jitterRandom = math.Random();
 
@@ -1584,8 +1585,9 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// 指数退避:min(30s, 1s·2^attempt) × jitter(0.8–1.2)。
   void _scheduleReconnect() {
-    if (_disposed) return;
-    _reconnectTimer?.cancel();
+    if (_disposed || _reconnectInFlight || _reconnectTimer?.isActive == true) {
+      return;
+    }
     final baseSeconds = math.min(
       30.0,
       math.pow(2, _reconnectAttempt).toDouble(),
@@ -1594,18 +1596,32 @@ class PiSessionNotifier extends Notifier<PiState> {
     _reconnectAttempt++;
     _reconnectTimer = Timer(
       Duration(milliseconds: (baseSeconds * jitter * 1000).round()),
-      _attemptReconnect,
+      () {
+        _reconnectTimer = null;
+        unawaited(_attemptReconnect());
+      },
     );
   }
 
   Future<void> _attemptReconnect() async {
-    if (_disposed || _intentionalDisconnect || _creds == null) return;
+    if (_disposed ||
+        _intentionalDisconnect ||
+        _creds == null ||
+        _reconnectInFlight) {
+      return;
+    }
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectInFlight = true;
     bool ok;
     try {
       ok = await _open();
     } catch (_) {
       ok = false;
+    } finally {
+      _reconnectInFlight = false;
     }
+    if (_disposed || _intentionalDisconnect) return;
     if (!ok) {
       _scheduleReconnect();
       return;
@@ -1615,13 +1631,27 @@ class PiSessionNotifier extends Notifier<PiState> {
     await _initializeAfterConnect();
   }
 
-  /// App 回前台:若连接已断,跳过退避立即重连。
+  /// App 回前台:若状态不是 connected,或最后一个 pong 已经过期,跳过退避
+  /// 立即重连。不能只信状态字段:后台 isolate 暂停时 socket 可能已被 hub 清掉,
+  /// 但 onDone 尚未得到调度。
   void onAppResumed() {
     if (_disposed) return;
     if (_intentionalDisconnect || _creds == null || !state.hasSession) return;
-    if (state.status == PiConnStatus.connected) return;
+    final lastPong = _lastPongAt;
+    final connectionFresh =
+        state.status == PiConnStatus.connected &&
+        _conn?.isOpen == true &&
+        lastPong != null &&
+        DateTime.now().difference(lastPong) <=
+            _healthInterval * 2 + const Duration(seconds: 5);
+    if (connectionFresh) {
+      _healthTick();
+      return;
+    }
+    state = state.copyWith(status: PiConnStatus.connecting);
     _reconnectAttempt = 0;
     _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     unawaited(_attemptReconnect());
   }
 
@@ -1651,8 +1681,9 @@ class PiSessionNotifier extends Notifier<PiState> {
         DateTime.now().difference(lastPong) >
             _healthInterval * 2 + const Duration(seconds: 5)) {
       _stopHealthMonitor();
+      // disconnect() 会通过 status stream 触发 _onConnStatus;这里不能再手动
+      // 调一次,否则同一次超时会重复增长退避并重排计时器。
       conn.disconnect();
-      _onConnStatus(PiConnStatus.disconnected);
       return;
     }
     conn.send({
@@ -2500,7 +2531,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (!isErr) return;
     if (!_erroredAssistantKeys.add(item.key)) return; // 已提示
     final label = stopReason == 'aborted' ? '已中断' : '出错';
-    _addSystem('助手响应$label${item.text.isEmpty ? "(无输出)" : ""}', SystemKind.error);
+    _addSystem(
+      '助手响应$label${item.text.isEmpty ? "(无输出)" : ""}',
+      SystemKind.error,
+    );
   }
 
   void _onToolStart(Map<String, dynamic> event) {
@@ -2738,7 +2772,10 @@ class PiSessionNotifier extends Notifier<PiState> {
             ..time = _timeFrom(ts);
           _addItem(item);
         }
-        _noteAssistantError(item: _itemsByKey[key] as AssistantItem?, stopReason: stopReason);
+        _noteAssistantError(
+          item: _itemsByKey[key] as AssistantItem?,
+          stopReason: stopReason,
+        );
         // 工具参数只存在于 assistant 条目的 toolCall 块上,**不在** toolResult 上。
         // 以前这里只取 text/thinking,toolCall 块被整个丢掉,于是历史回放出来的
         // 工具卡没有命令摘要 —— bash 卡的命令是一片空白。
@@ -2787,11 +2824,10 @@ class PiSessionNotifier extends Notifier<PiState> {
         }
         final key = 'bashExec:$ts';
         if (_seenMsgKeys.add(key)) {
-          final item =
-              BashItem(key, command: command)
-                ..output = message['output'] as String? ?? ''
-                ..done = true
-                ..exitCode = message['exitCode'] as int?;
+          final item = BashItem(key, command: command)
+            ..output = message['output'] as String? ?? ''
+            ..done = true
+            ..exitCode = message['exitCode'] as int?;
           _addItem(item);
         }
       case 'custom':

@@ -21,6 +21,7 @@ class AppSettings {
     this.recentDirs = const [],
     this.quickPrompts = const [],
     this.notificationsEnabled = true,
+    this.notificationVibrationEnabled = false,
     this.accent = AppAccent.blue,
     this.loaded = false,
   });
@@ -41,6 +42,10 @@ class AppSettings {
   /// 用户自定义快捷指令。
   final List<String> quickPrompts;
   final bool notificationsEnabled;
+
+  /// 任务事件通知是否震动。Android 通知渠道配置不可变,通知服务会据此选择
+  /// 独立的"无震动"或"震动"渠道。默认关闭。
+  final bool notificationVibrationEnabled;
 
   /// 主题强调色。
   final AppAccent accent;
@@ -63,6 +68,7 @@ class AppSettings {
     List<String>? recentDirs,
     List<String>? quickPrompts,
     bool? notificationsEnabled,
+    bool? notificationVibrationEnabled,
     AppAccent? accent,
     bool? loaded,
   }) {
@@ -79,6 +85,8 @@ class AppSettings {
       recentDirs: recentDirs ?? this.recentDirs,
       quickPrompts: quickPrompts ?? this.quickPrompts,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
+      notificationVibrationEnabled:
+          notificationVibrationEnabled ?? this.notificationVibrationEnabled,
       accent: accent ?? this.accent,
       loaded: loaded ?? this.loaded,
     );
@@ -117,6 +125,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
       recentDirs: data.recentDirs,
       quickPrompts: data.quickPrompts,
       notificationsEnabled: data.notificationsEnabled,
+      notificationVibrationEnabled: data.notificationVibrationEnabled,
       accent: AppAccent.fromName(data.accent),
       loaded: true,
     );
@@ -179,6 +188,11 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setNotificationsEnabled(bool enabled) async {
     state = state.copyWith(notificationsEnabled: enabled);
     await _repo.saveNotificationsEnabled(enabled);
+  }
+
+  Future<void> setNotificationVibrationEnabled(bool enabled) async {
+    state = state.copyWith(notificationVibrationEnabled: enabled);
+    await _repo.saveNotificationVibrationEnabled(enabled);
   }
 
   Future<void> setAccent(AppAccent accent) async {
