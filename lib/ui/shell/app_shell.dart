@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../chat/chat_body.dart';
 import '../chat/widgets/chat_app_bar.dart';
 import '../sessions/session_drawer.dart';
+import 'swipe_to_open_drawer.dart';
 
 /// 应用外壳:持有 `Scaffold` 与抽屉。
 ///
@@ -48,7 +49,14 @@ class _AppShellState extends ConsumerState<AppShell> {
           if (isOpen != _drawerOpen) setState(() => _drawerOpen = isOpen);
         },
         appBar: const ChatAppBar(),
-        body: const ChatBody(),
+        // 右滑开抽屉。挂在 body 外面而不是放大 drawerEdgeDragWidth ——
+        // 那个检测器叠在 body 之上,加宽会抢掉聊天页里代码块/diff/芯片行的
+        // 横向滚动。详见 SwipeToOpenDrawer 的注释。
+        body: SwipeToOpenDrawer(
+          enabled: !_drawerOpen,
+          onOpen: () => _scaffoldKey.currentState?.openDrawer(),
+          child: const ChatBody(),
+        ),
       ),
     );
   }
