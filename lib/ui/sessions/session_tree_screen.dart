@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/pi_session.dart';
+import '../common/tool_avatar.dart';
 import '../theme/semantic_colors.dart';
+import '../theme/shapes.dart';
 
 String relativeTime(DateTime? t) {
   if (t == null) return '未知时间';
@@ -72,16 +74,21 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
             );
           }
           final path = tree.currentPath;
+          // 展平成行。**迭代而非递归**:会话树是一条长单链(没有分叉时
+          // 深度 == 消息数),千条会话按 children 递归会爆栈。
           final rows = <_TreeRow>[];
-          void flatten(SessionTreeNode node, int depth) {
-            rows.add(_TreeRow(node, depth));
-            for (final child in node.children) {
-              flatten(child, depth + (node.children.length > 1 ? 1 : 0));
-            }
+          final stack = <(SessionTreeNode, int)>[];
+          for (final root in tree.roots.reversed) {
+            stack.add((root, 0));
           }
-
-          for (final root in tree.roots) {
-            flatten(root, 0);
+          while (stack.isNotEmpty) {
+            final (node, depth) = stack.removeLast();
+            rows.add(_TreeRow(node, depth));
+            // 只有分叉才加缩进,线性链保持齐平 —— 否则单链会一路缩到屏幕外
+            final childDepth = depth + (node.children.length > 1 ? 1 : 0);
+            for (final child in node.children.reversed) {
+              stack.add((child, childDepth));
+            }
           }
 
           return Column(
@@ -130,6 +137,24 @@ class _TreeRow {
   final int depth;
 }
 
+/// 节点的视觉身份。色相本身就是语义 —— 同一个色块头像里的 bg/fg 是主题
+/// 保证过对比度的一对,不能拆开用。
+class _NodeLook {
+  const _NodeLook({
+    required this.icon,
+    required this.bg,
+    required this.fg,
+    required this.roleName,
+    required this.title,
+  });
+
+  final IconData icon;
+  final Color bg;
+  final Color fg;
+  final String roleName;
+  final String title;
+}
+
 class _TreeNodeTile extends ConsumerWidget {
   const _TreeNodeTile({
     required this.row,
@@ -143,31 +168,98 @@ class _TreeNodeTile extends ConsumerWidget {
   final bool isLeaf;
   final VoidCallback onChanged;
 
+  /// 节点的视觉身份:图标 + 色对 + 角色名 + 标题。
+  ///
+  /// 以前只分「user / 非 user」两种,而一个会话里**超过一半的消息是 toolResult**
+  /// (实测 1594 条 message 里 909 条),它们与 assistant 共用同一个机器人图标、
+  /// 而且没有文本预览,整页看上去就是一堆一模一样的行。
+  _NodeLook _lookOf(ColorScheme colors, PiColors piColors) {
+    final node = row.node;
+    switch (node.type) {
+      case 'message' when node.role == 'user':
+        return _NodeLook(
+          icon: Icons.person,
+          bg: colors.primaryContainer,
+          fg: colors.onPrimaryContainer,
+          roleName: '你',
+          title: node.preview,
+        );
+      case 'message' when node.role == 'toolResult':
+        final name = node.toolName ?? '';
+        final category = PiToolAvatar.categoryForTool(name);
+        final (bg, fg) = PiToolAvatar.colorsFor(category, piColors);
+        return _NodeLook(
+          icon: _toolIcon(name),
+          bg: node.isError ? piColors.warningContainer : bg,
+          fg: node.isError ? piColors.onWarningContainer : fg,
+          roleName: name.isEmpty ? '工具' : name,
+          // toolResult 没有文本预览,拿工具名当标题才能区分开
+          title: node.preview.isEmpty
+              ? (node.isError ? '$name 报错' : '$name 结果')
+              : node.preview,
+        );
+      case 'message':
+        // 只有 thinking + toolCall 的回合预览是空的,而「这一步调了 bash」
+        // 恰恰是人回退时要找的锚点
+        final title = node.preview.isNotEmpty
+            ? node.preview
+            : (node.tools.isNotEmpty ? '调用 ${node.tools.join('、')}' : '无文本回复');
+        return _NodeLook(
+          icon: Icons.smart_toy_outlined,
+          bg: colors.secondaryContainer,
+          fg: colors.onSecondaryContainer,
+          roleName: 'AI',
+          title: title,
+        );
+      case 'compaction':
+        return _NodeLook(
+          icon: Icons.compress,
+          bg: piColors.warningContainer,
+          fg: piColors.onWarningContainer,
+          roleName: '压缩',
+          title: node.preview.isEmpty ? '上下文压缩' : node.preview,
+        );
+      case 'branch_summary':
+        return _NodeLook(
+          icon: Icons.fork_right,
+          bg: colors.tertiaryContainer,
+          fg: colors.onTertiaryContainer,
+          roleName: '分支',
+          title: node.preview.isEmpty ? '分支摘要' : node.preview,
+        );
+      default:
+        return _NodeLook(
+          icon: Icons.circle_outlined,
+          bg: colors.surfaceContainerHighest,
+          fg: colors.onSurfaceVariant,
+          roleName: node.type,
+          title: node.preview.isEmpty ? node.type : node.preview,
+        );
+    }
+  }
+
+  static IconData _toolIcon(String name) => switch (name) {
+    'bash' => Icons.terminal,
+    'read' => Icons.visibility_outlined,
+    'write' || 'edit' => Icons.edit_note,
+    'grep' || 'find' => Icons.search,
+    'ls' => Icons.folder_outlined,
+    _ => Icons.build_outlined,
+  };
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final colors = Theme.of(context).colorScheme;
     final piColors = PiColors.of(context);
+    final theme = Theme.of(context);
     final node = row.node;
-    // 任何节点都能跳过去 —— 这就是"分支间自由切换"。
+    // 任何消息都能跳过去 —— 这就是"分支间自由切换"。
     // fork(另开一个会话文件)降为长按里的次要动作。
-    final canNavigate = node.type == 'message' || node.type == 'branch_summary';
+    final canNavigate = node.canNavigate;
     final isHeadless = ref.watch(
       piSessionProvider.select((s) => s.selectedSource?.isHeadless == true),
     );
-
-    final (icon, iconColor) = switch (node.type) {
-      'message' when node.role == 'user' => (
-        Icons.person_outline,
-        onCurrentPath ? colors.primary : colors.onSurfaceVariant,
-      ),
-      'message' => (
-        Icons.smart_toy_outlined,
-        onCurrentPath ? colors.primary : colors.onSurfaceVariant,
-      ),
-      'compaction' => (Icons.compress, piColors.warning),
-      'branch_summary' => (Icons.fork_right, colors.tertiary),
-      _ => (Icons.circle_outlined, colors.onSurfaceVariant),
-    };
+    final look = _lookOf(colors, piColors);
 
     final indent = 16.0 + math.min(row.depth, 10) * 18;
     final tile = InkWell(
@@ -177,42 +269,67 @@ class _TreeNodeTile extends ConsumerWidget {
       onLongPress: canNavigate && isHeadless
           ? () => _confirmFork(context, ref, node)
           : null,
-      child: Padding(
+      child: Container(
+        // 当前路径链铺一层极浅的底:一眼看出“现在在哪条分支上”,
+        // 而不靠逐行比对文字颜色
+        color: onCurrentPath
+            ? colors.primary.withValues(alpha: 0.06)
+            : Colors.transparent,
         padding: EdgeInsets.only(
           // 缩进必须封顶:分叉树的 depth 没有上界,线性增长的 padding
           // 会把负约束喂给 Padding,窄屏上直接 assert 崩溃
           left: indent,
           right: 12,
-          top: 5,
-          bottom: 5,
+          top: 6,
+          bottom: 6,
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 与首行文本垂直居中对齐,而不是随多行文本贴顶
-            SizedBox(
-              height: 20,
-              child: Center(child: Icon(icon, size: 16, color: iconColor)),
+            // 色块头像:色相本身就是语义,比单色描边图标好区分得多
+            Container(
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                color: look.bg,
+                borderRadius: BorderRadius.circular(PiShape.xs),
+              ),
+              child: Center(child: Icon(look.icon, size: 13, color: look.fg)),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    node.preview.isEmpty ? node.type : node.preview,
+                    look.title.isEmpty ? node.type : look.title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    style: theme.textTheme.bodyMedium?.copyWith(
                       color: onCurrentPath
                           ? colors.onSurface
                           : colors.onSurfaceVariant,
                       fontWeight: isLeaf ? FontWeight.w600 : FontWeight.normal,
                     ),
                   ),
+                  const SizedBox(height: 1),
                   Row(
                     children: [
+                      // 角色名放在最前:扫一眼就知道这行是谁说的
+                      Text(
+                        look.roleName,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: look.fg,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                       if (node.label != null) ...[
+                        Text(
+                          ' · ',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ),
                         Icon(
                           Icons.bookmark_outline,
                           size: 12,
@@ -221,25 +338,29 @@ class _TreeNodeTile extends ConsumerWidget {
                         // 书签标签是用户自己起的,长度不可控
                         Flexible(
                           child: Text(
-                            '${node.label} · ',
+                            node.label!,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(color: colors.tertiary),
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: colors.tertiary,
+                            ),
                           ),
                         ),
                       ],
                       if (node.time != null)
                         Text(
-                          relativeTime(node.time),
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(color: colors.onSurfaceVariant),
+                          ' · ${relativeTime(node.time)}',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: colors.onSurfaceVariant,
+                          ),
                         ),
                       if (isLeaf)
                         Text(
                           ' · 当前位置',
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(color: colors.primary),
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: colors.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                     ],
                   ),

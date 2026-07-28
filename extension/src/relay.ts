@@ -43,9 +43,12 @@ function sanitizeSourceId(value: string): string {
 /** treeSummary 的字节预算;超出直接从快照剔除。 */
 const TREE_SUMMARY_BYTE_BUDGET = 256 * 1024;
 
-/// treeSummary 的节点数上限。字节预算之外还要限制**条数**,因为 app 侧
-/// 解析(_normalizeTreeNode)和路径计算仍是按 children 递归的。
-const MAX_TREE_SUMMARY_NODES = 1200;
+/// treeSummary 的最大嵌套深度。
+///
+/// 会话树是一条长单链,深度 == 消息数。`JSON.stringify` 和 app 侧的解析都受
+/// 各自的栈深限制,实测 2600 层能过、4000 层在 stringify 里就 RangeError。
+/// 留足余量取 2000。
+const MAX_TREE_SUMMARY_DEPTH = 2000;
 
 /** 与 pi getSessionStats 同形状的统计(从 branch entries 汇总)。 */
 export function computeSessionStats(
@@ -109,11 +112,37 @@ export function computeSessionStats(
   };
 }
 
+/// 会话树里**能作为回退目标**的 entry 类型。
+///
+/// pi 的会话文件里还有大量 model_change / thinking_level_change / custom 节点
+/// (实测某个 2558 条会话里就占了 1008 个),它们既不是回退目标、界面也从不
+/// 渲染,只是链上的一环。把它们过滤掉、子节点接到最近的保留祖先上,
+/// 省下的预算正好用来保住**每一条真实消息的 id**。
+const NAVIGABLE_TREE_TYPES = new Set(["message", "compaction", "branch_summary"]);
+
 /// 会话树节点的原始形态(pi sessionManager.getTree() 的元素)。
 interface RawTreeNode {
   entry?: any;
   children?: RawTreeNode[];
   label?: string | null;
+}
+
+function isNavigable(node: RawTreeNode): boolean {
+  return NAVIGABLE_TREE_TYPES.has(node?.entry?.type);
+}
+
+/// 时间戳转 epoch 毫秒数字。
+///
+/// pi 写的是 ISO 字符串(24 字节),数字只需 13 字节 —— 千条规模下这一项就差
+/// 十几 KB。而且 app 侧 `_timeFrom` 本来只认 int,拿到字符串会退成
+/// `DateTime.now()`,导致会话树里每条都显示「刚刚」—— 转数字后一并修好。
+function toEpochMs(ts: unknown): number | undefined {
+  if (typeof ts === "number" && Number.isFinite(ts)) return ts;
+  if (typeof ts === "string") {
+    const ms = Date.parse(ts);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
 }
 
 function treePreview(entry: any, limit: number): string {
@@ -127,23 +156,49 @@ function treePreview(entry: any, limit: number): string {
       .map((c: any) => c.text)
       .join(" ");
   }
+  preview = preview.trim();
   return preview.length > limit ? `${preview.slice(0, limit)}…` : preview;
+}
+
+/// assistant 回合里调用的工具名(去重、限 4 个)。
+///
+/// 只有 thinking + toolCall 的 assistant 回合没有任何文本,预览是空的,
+/// 界面上就只剩一个 "message" 字样 —— 而「这一步调了 bash」恰恰是人回退时要找的锚点。
+function toolCallNames(entry: any): string | undefined {
+  if (entry?.type !== "message") return undefined;
+  const content = entry.message?.content;
+  if (!Array.isArray(content)) return undefined;
+  const names: string[] = [];
+  for (const block of content) {
+    if (block?.type !== "toolCall") continue;
+    const name = typeof block.name === "string" ? block.name : undefined;
+    if (name && !names.includes(name)) names.push(name);
+    if (names.length >= 4) break;
+  }
+  return names.length > 0 ? names.join(",") : undefined;
 }
 
 /// 单个节点的压缩形态(**不含子节点**,children 由调用方迭代填充)。
 ///
 /// 为 null 的字段直接不输出 —— 千条规模下 `"label":null` 这类占位就是几十 KB,
-/// 而 app 侧 `as String?` 对缺字段与 null 同义。
+/// 而 app 侧 `as String?` 对缺字段与 null 同义。`parentId` 也不输出:
+/// 嵌套结构本身已经编码了父子关系,app 侧也没有用到它。
 function summarizeTreeNode(node: RawTreeNode, previewLimit: number): JsonObject {
   const entry = node?.entry ?? {};
   const preview = treePreview(entry, previewLimit);
   const role = entry.type === "message" ? (entry.message?.role ?? null) : null;
+  const timestamp = toEpochMs(entry.timestamp);
+  // toolResult 没有文本预览,工具名字是区分它们的唯一信息
+  const toolName = role === "toolResult" ? (entry.message?.toolName ?? null) : null;
+  const tools = role === "assistant" ? toolCallNames(entry) : undefined;
   return {
     id: entry.id,
-    ...(entry.parentId ? { parentId: entry.parentId } : {}),
     type: entry.type ?? "unknown",
-    ...(entry.timestamp != null ? { timestamp: entry.timestamp } : {}),
+    ...(timestamp != null ? { timestamp } : {}),
     ...(role ? { role } : {}),
+    ...(toolName ? { toolName } : {}),
+    ...(tools ? { tools } : {}),
+    ...(entry.message?.isError === true ? { isError: true } : {}),
     ...(preview ? { preview } : {}),
     ...(node?.label ? { label: node.label } : {}),
     children: [] as JsonObject[],
@@ -188,23 +243,66 @@ function buildSummaryTree(
   return roots;
 }
 
-function countNodes(tree: RawTreeNode[]): number {
-  let count = 0;
-  const stack = [...tree];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    count++;
-    for (const child of node?.children ?? []) stack.push(child);
+/// 把原始树投影成**只包含可回退节点**的树。
+///
+/// 被过滤的节点子代接到最近的保留祖先上。这一步是**静默**的:
+/// model_change / thinking_level_change / custom 不计入 `collapsedBefore`,
+/// 因为它们不是“被省略的消息”,报给用户只是噪声。
+function projectNavigable(tree: RawTreeNode[]): RawTreeNode[] {
+  const roots: RawTreeNode[] = [];
+  const stack: { node: RawTreeNode; sink: RawTreeNode[] }[] = [];
+  for (let i = tree.length - 1; i >= 0; i--) {
+    stack.push({ node: tree[i]!, sink: roots });
   }
-  return count;
+  while (stack.length > 0) {
+    const { node, sink } = stack.pop()!;
+    let childSink = sink;
+    if (isNavigable(node)) {
+      const copy: RawTreeNode = {
+        entry: node.entry,
+        children: [],
+        ...(node.label ? { label: node.label } : {}),
+      };
+      sink.push(copy);
+      childSink = copy.children!;
+    }
+    const children = node?.children ?? [];
+    for (let i = children.length - 1; i >= 0; i--) {
+      stack.push({ node: children[i]!, sink: childSink });
+    }
+  }
+  return roots;
 }
 
-/// 结构剪枝的保留集。
+/// 树的最大深度(迭代量,不递归)。
+function maxDepth(tree: RawTreeNode[]): number {
+  let deepest = 0;
+  const stack: { node: RawTreeNode; depth: number }[] = tree.map((node) => ({
+    node,
+    depth: 1,
+  }));
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (depth > deepest) deepest = depth;
+    for (const child of node?.children ?? []) stack.push({ node: child, depth: depth + 1 });
+  }
+  return deepest;
+}
+
+/// 结构剪枝的保留集(只在紧凑编码仍超预算时才用得上)。
 ///
-/// 会话树的用途是导航与回退,所以必需的是**结构**和**最近的位置**:分叉点、
-/// 分支头、叶子、非 message 节点(压缩/分支摘要)、书签,以及尾部一段。
-/// 中间那条长长的线性历史可以折叠 —— 那些节点既不是分叉,也不是人会回退到的目标。
-function collectKeepSet(tree: RawTreeNode[], tailCount: number): Set<RawTreeNode> {
+/// 优先保留人回退时真正会找的锚点:分叉点、分支头、叶子、非 message 节点
+/// (压缩/分支摘要)、书签,以及尾部一段。中间那些连续的 assistant/toolResult
+/// 才是可折叠的部分。
+///
+/// `keepUserMessages` 必须可关:用户消息是很好的锚点,但**保留规则不能压过深度下限**。
+/// 一条全是 user 消息的长单链若无条件全保,剪枝就一个都剪不掉,深度不降,
+/// `JSON.stringify` 继续爆栈 —— 最后仍然是「会话树不可用」。所以深层降级要关掉它。
+function collectKeepSet(
+  tree: RawTreeNode[],
+  tailCount: number,
+  keepUserMessages = true,
+): Set<RawTreeNode> {
   const order: RawTreeNode[] = [];
   const stack: RawTreeNode[] = [];
   for (let i = tree.length - 1; i >= 0; i--) stack.push(tree[i]!);
@@ -222,6 +320,7 @@ function collectKeepSet(tree: RawTreeNode[], tailCount: number): Set<RawTreeNode
     if (children.length !== 1) keep.add(node);
     if (children.length > 1) for (const child of children) keep.add(child);
     if (node?.entry?.type && node.entry.type !== "message") keep.add(node);
+    if (keepUserMessages && node?.entry?.message?.role === "user") keep.add(node);
     if (node?.label) keep.add(node);
   }
   for (const node of order.slice(-Math.max(0, tailCount))) keep.add(node);
@@ -233,32 +332,55 @@ function collectKeepSet(tree: RawTreeNode[], tailCount: number): Set<RawTreeNode
 /// **逐级降级,而不是超预算就整体剔掉**。以前这里是全有或全无:一超预算就
 /// 返回 undefined,`treeSummary` 从快照里消失,bridge 只能回
 /// "desktop snapshot does not include a tree",app 显示「会话树不可用」。
-/// 千条规模的会话必然超预算(每节点约 250 字节),于是会话树彻底不可用。
 ///
-/// 预算不能直接调大:`treeSummary` 搭在**每一份快照**里,包括流式期间每秒一次的
-/// 保活快照 —— 那等于每秒往手机推几百 KB。所以要让它变小,不是消失。
+/// 目标是「每一条消息都能回退」,所以剪枝是**最后才用**的手段。先用两道
+/// 不丢 id 的手段把体积降下来:
+///   a) 过滤噪声类型(model_change / thinking_level_change / custom) ——
+///      它们不是回退目标也从不渲染,实测占了 2558 条会话的 1008 个
+///   b) 紧凑编码:去掉冗余 `parentId`、时间戳改 epoch 数字、null 字段不输出
+/// 实测这两道就能把 2558 条会话的 1605 条真实消息全部装进预算。
+///
+/// 预算不能直接调大:`treeSummary` 搭在**每一份快照**里,包括流式期间的
+/// 保活快照(最快约 15 秒一份),调大就是持续往手机推大包。
 export function buildTreeSummary(tree: unknown[]): JsonObject[] | undefined {
-  const raw = (tree ?? []) as RawTreeNode[];
-  const fits = (summary: JsonObject[]) =>
-    JSON.stringify(summary).length <= TREE_SUMMARY_BYTE_BUDGET;
+  const raw = (tree ?? []) as JsonObject[] as RawTreeNode[];
+  // JSON.stringify 自身是递归的,几千层嵌套会 RangeError 爆栈;而这个异常会被
+  // captureSnapshot 的 try/catch 吞成 treeSummary = undefined,表现和超预算
+  // 完全一样。所以先量深度,超了就直接进剪枝层把链压短。
+  const fits = (summary: JsonObject[]) => {
+    try {
+      return JSON.stringify(summary).length <= TREE_SUMMARY_BYTE_BUDGET;
+    } catch {
+      return false;
+    }
+  };
 
-  // 1) 全部节点,预览逐级缩短。节点数本身也要设上限:app 侧解析与渲染
-  //    仍是按 children 递归的,几千层深度在 Dart 侧同样有栈风险。
-  if (countNodes(raw) <= MAX_TREE_SUMMARY_NODES) {
-    for (const previewLimit of [120, 40, 0]) {
-      const summary = buildSummaryTree(raw, previewLimit);
+  // 1) 保住每一条消息的 id,只逐级缩预览
+  const nav = projectNavigable(raw);
+  if (maxDepth(nav) <= MAX_TREE_SUMMARY_DEPTH) {
+    for (const previewLimit of [120, 80, 60, 40, 0]) {
+      const summary = buildSummaryTree(nav, previewLimit);
       if (fits(summary)) return summary;
     }
   }
-  // 2) 剪掉线性中间节点,尾部保留段逐步收紧
-  for (const tail of [400, 200, 80, 30]) {
-    const keep = collectKeepSet(raw, tail);
-    const summary = buildSummaryTree(raw, 40, keep);
+  // 2) 实在装不下(或链太深)才剪枝:尾部保留段逐步收紧。
+  //    后几层关掉「保留用户消息」——那条规则不能压过深度下限。
+  const layers: { tail: number; keepUsers: boolean }[] = [
+    { tail: 800, keepUsers: true },
+    { tail: 400, keepUsers: true },
+    { tail: 400, keepUsers: false },
+    { tail: 200, keepUsers: false },
+    { tail: 80, keepUsers: false },
+    { tail: 30, keepUsers: false },
+  ];
+  for (const { tail, keepUsers } of layers) {
+    const keep = collectKeepSet(nav, tail, keepUsers);
+    const summary = buildSummaryTree(nav, 40, keep);
     if (fits(summary)) return summary;
   }
   // 3) 最后一招:只给骨架
-  const keep = collectKeepSet(raw, 10);
-  const skeleton = buildSummaryTree(raw, 0, keep);
+  const keep = collectKeepSet(nav, 10, false);
+  const skeleton = buildSummaryTree(nav, 0, keep);
   return fits(skeleton) ? skeleton : undefined;
 }
 

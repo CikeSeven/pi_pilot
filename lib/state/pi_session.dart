@@ -208,6 +208,9 @@ class SessionTreeNode {
     this.preview = '',
     this.label,
     this.role,
+    this.toolName,
+    this.tools = const [],
+    this.isError = false,
     this.collapsedBefore = 0,
     this.children = const [],
   });
@@ -219,16 +222,32 @@ class SessionTreeNode {
   final String preview;
   final String? label;
 
-  /// message 节点的角色(user/assistant/…)。
+  /// message 节点的角色(user/assistant/toolResult)。
   final String? role;
+
+  /// toolResult 节点对应的工具名。toolResult 没有文本预览,
+  /// 工具名是区分它们的唯一信息。
+  final String? toolName;
+
+  /// assistant 节点这一回合调用的工具名。
+  ///
+  /// 只有 thinking + toolCall 的回合没有任何文本,预览是空的 ——
+  /// 而「这一步调了 bash」恰恰是人回退时要找的锚点。
+  final List<String> tools;
+
+  /// 工具报错。
+  final bool isError;
 
   /// 本节点与上一个保留节点之间被折叠掉的节点数。
   ///
-  /// 桌面端的 treeSummary 有字节与条数预算,千条会话会剪掉线性中间节点。
-  /// 被剪掉的不插占位节点(占位没有真实 entry id,点下去会回退到错的地方),
-  /// 只把数量记在这里,由界面提示「省略 N 条」。
+  /// 桌面端的 treeSummary 有字节预算。目标是每条消息都能回退,所以剪枝是
+  /// 最后才用的手段;真被剪时也不插占位节点(占位没有真实 entry id,
+  /// 点下去会回退到错的地方),只把数量记在这里,由界面提示「省略 N 条」。
   final int collapsedBefore;
   final List<SessionTreeNode> children;
+
+  /// 能否作为回退目标。
+  bool get canNavigate => type == 'message' || type == 'branch_summary';
 }
 
 class SessionTree {
@@ -241,31 +260,54 @@ class SessionTree {
   final bool isSummary;
 
   /// 从根到当前 leaf 的路径上的节点 id 集合。
+  ///
+  /// **迭代而非递归**:会话树是一条长单链(没有分叉时深度 == 消息数),
+  /// 千条会话按 children 递归会爆栈。先找到目标,再沿父指针回溯。
   Set<String> get currentPath {
     final target = leafId;
     if (target == null) return const {};
-    final path = <String>{};
-    bool walk(SessionTreeNode node) {
-      if (node.id == target || node.children.any(walk)) {
-        path.add(node.id);
-        return true;
-      }
-      return false;
+    final parentOf = <SessionTreeNode, SessionTreeNode?>{};
+    final stack = <SessionTreeNode>[];
+    for (final root in roots.reversed) {
+      parentOf[root] = null;
+      stack.add(root);
     }
-
-    roots.any(walk);
+    SessionTreeNode? found;
+    while (stack.isNotEmpty) {
+      final node = stack.removeLast();
+      if (node.id == target) {
+        found = node;
+        break;
+      }
+      for (final child in node.children.reversed) {
+        parentOf[child] = node;
+        stack.add(child);
+      }
+    }
+    if (found == null) return const {};
+    final path = <String>{};
+    SessionTreeNode? cursor = found;
+    while (cursor != null) {
+      path.add(cursor.id);
+      cursor = parentOf[cursor];
+    }
     return path;
   }
 
   /// 有多个子分支的节点(fork 点)。
   List<SessionTreeNode> get forkPoints {
     final result = <SessionTreeNode>[];
-    void walk(SessionTreeNode node) {
-      if (node.children.length > 1) result.add(node);
-      node.children.forEach(walk);
+    final stack = <SessionTreeNode>[];
+    for (final root in roots.reversed) {
+      stack.add(root);
     }
-
-    roots.forEach(walk);
+    while (stack.isNotEmpty) {
+      final node = stack.removeLast();
+      if (node.children.length > 1) result.add(node);
+      for (final child in node.children.reversed) {
+        stack.add(child);
+      }
+    }
     return result;
   }
 }
@@ -1322,37 +1364,99 @@ class PiSessionNotifier extends Notifier<PiState> {
     final raw = data['tree'];
     if (raw is! List) return null;
     final isSummary = data['summary'] == true;
-    final roots = [
-      for (final node in raw)
-        if (node is Map) _normalizeTreeNode(node, isSummary),
-    ].nonNulls.toList();
     return SessionTree(
-      roots: roots,
+      roots: _normalizeTree(raw, isSummary),
       leafId: data['leafId'] as String?,
       isSummary: isSummary,
     );
   }
 
-  SessionTreeNode? _normalizeTreeNode(
+  /// 会话树里**能作为回退目标**的 entry 类型。
+  ///
+  /// pi 的会话里还有大量 model_change / thinking_level_change / custom 节点,
+  /// 它们不是回退目标,列在树里只是把真正的消息冲淡。desktop 快照侧已经
+  /// 过滤过一道(省下的预算用来保住每条消息的 id),这里再过滤一道是为了
+  /// headless 全量路径也有一致的形态。
+  static const _navigableTreeTypes = {
+    'message',
+    'compaction',
+    'branch_summary',
+  };
+
+  /// 归一化会话树。
+  ///
+  /// **迭代而非递归**:会话树是一条长单链(没有分叉时深度 == 消息数),
+  /// 千条会话按 children 递归解析会爆栈。
+  List<SessionTreeNode> _normalizeTree(List<dynamic> raw, bool summary) {
+    // 第一趟:展平,记下每个节点的父下标(-1 为根)。非可回退类型不入表,
+    // 它的子节点直接接到最近的保留祖先上。
+    final nodes = <Map<dynamic, dynamic>>[];
+    final parents = <int>[];
+    final stack = <(Map<dynamic, dynamic>, int)>[];
+    for (final node in raw.reversed) {
+      if (node is Map) stack.add((node, -1));
+    }
+    while (stack.isNotEmpty) {
+      final (node, parent) = stack.removeLast();
+      final entry = _treeEntryOf(node, summary);
+      var childParent = parent;
+      if (entry != null &&
+          entry['id'] is String &&
+          _navigableTreeTypes.contains(entry['type'])) {
+        childParent = nodes.length;
+        nodes.add(node);
+        parents.add(parent);
+      }
+      final children = node['children'];
+      if (children is List) {
+        for (final child in children.reversed) {
+          if (child is Map) stack.add((child, childParent));
+        }
+      }
+    }
+
+    // 第二趟:倒序构建。DFS 先序保证子节点下标恒大于父节点,所以倒着走时
+    // 子节点已经建好 —— 这正好绕开了“节点不可变、子节点必须先存在”的顺序问题。
+    final kids = List<List<SessionTreeNode>>.generate(
+      nodes.length,
+      (_) => <SessionTreeNode>[],
+    );
+    final roots = <SessionTreeNode>[];
+    for (var i = nodes.length - 1; i >= 0; i--) {
+      // 入表时是倒序淌进去的,这里翻回原顺序
+      final node = _treeNodeFrom(nodes[i], summary, kids[i].reversed.toList());
+      final parent = parents[i];
+      if (parent >= 0) {
+        kids[parent].add(node);
+      } else {
+        roots.add(node);
+      }
+    }
+    return roots.reversed.toList();
+  }
+
+  /// 取节点对应的 entry。summary 形态已经是扁的,全量形态包在 `entry` 里。
+  Map<dynamic, dynamic>? _treeEntryOf(
     Map<dynamic, dynamic> node,
     bool summary,
   ) {
-    final Map<dynamic, dynamic> entry;
-    if (summary) {
-      entry = node;
-    } else {
-      final inner = node['entry'];
-      if (inner is! Map) return null;
-      entry = inner;
-    }
-    final id = entry['id'] as String?;
-    if (id == null) return null;
-    final children = [
-      for (final child in (node['children'] as List? ?? const []))
-        if (child is Map) _normalizeTreeNode(child, summary),
-    ].nonNulls.toList();
+    if (summary) return node;
+    final inner = node['entry'];
+    return inner is Map ? inner : null;
+  }
+
+  SessionTreeNode _treeNodeFrom(
+    Map<dynamic, dynamic> node,
+    bool summary,
+    List<SessionTreeNode> children,
+  ) {
+    final entry = _treeEntryOf(node, summary)!;
+    final message = entry['message'] as Map?;
+    final role = summary
+        ? entry['role'] as String?
+        : message?['role'] as String?;
     return SessionTreeNode(
-      id: id,
+      id: entry['id'] as String,
       parentId: entry['parentId'] as String?,
       type: entry['type'] as String? ?? 'unknown',
       time: entry['timestamp'] != null ? _timeFrom(entry['timestamp']) : null,
@@ -1360,12 +1464,40 @@ class PiSessionNotifier extends Notifier<PiState> {
           ? entry['preview'] as String? ?? ''
           : _treePreview(entry),
       label: node['label'] as String? ?? entry['label'] as String?,
-      role: summary
-          ? entry['role'] as String?
-          : ((entry['message'] as Map?)?['role'] as String?),
+      role: role,
+      toolName: summary
+          ? entry['toolName'] as String?
+          : message?['toolName'] as String?,
+      tools: summary
+          ? _splitTools(entry['tools'])
+          : _toolCallNames(message?['content']),
+      isError: summary ? entry['isError'] == true : message?['isError'] == true,
       collapsedBefore: (node['collapsedBefore'] as num?)?.toInt() ?? 0,
       children: children,
     );
+  }
+
+  static List<String> _splitTools(dynamic raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    return raw.split(',').where((s) => s.isNotEmpty).toList();
+  }
+
+  /// assistant 回合里调用的工具名(去重)。
+  ///
+  /// 只有 thinking + toolCall 的回合没有任何文本,预览是空的,界面上就只剩一个
+  /// 类型字样 —— 而「这一步调了 bash」恰恰是人回退时要找的锚点。
+  static List<String> _toolCallNames(dynamic content) {
+    if (content is! List) return const [];
+    final names = <String>[];
+    for (final block in content) {
+      if (block is! Map || block['type'] != 'toolCall') continue;
+      final name = block['name'];
+      if (name is String && name.isNotEmpty && !names.contains(name)) {
+        names.add(name);
+      }
+      if (names.length >= 4) break;
+    }
+    return names;
   }
 
   String _treePreview(Map<dynamic, dynamic> entry) {
@@ -2969,8 +3101,20 @@ class PiSessionNotifier extends Notifier<PiState> {
   static List<String> _stringList(dynamic value) =>
       value is List ? value.whereType<String>().toList() : const [];
 
-  static DateTime _timeFrom(dynamic ts) =>
-      ts is int ? DateTime.fromMillisecondsSinceEpoch(ts) : DateTime.now();
+  /// entry / 消息时间戳 → DateTime。
+  ///
+  /// pi 在不同位置用两种形态:流式事件里是 epoch 毫秒 int,而会话文件里的
+  /// entry.timestamp 是 ISO 字符串。以前只认 int,字符串一律退成 `DateTime.now()`,
+  /// 导致会话树里**每一条都显示「刚刚」**。
+  static DateTime _timeFrom(dynamic ts) {
+    if (ts is int) return DateTime.fromMillisecondsSinceEpoch(ts);
+    if (ts is double) return DateTime.fromMillisecondsSinceEpoch(ts.toInt());
+    if (ts is String) {
+      final parsed = DateTime.tryParse(ts);
+      if (parsed != null) return parsed.toLocal();
+    }
+    return DateTime.now();
+  }
 
   static String _textFromContent(dynamic content) {
     if (content is String) return content;
