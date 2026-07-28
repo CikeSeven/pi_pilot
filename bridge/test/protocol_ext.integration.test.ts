@@ -84,7 +84,11 @@ async function waitForHealth(port: number, child: ChildProcess): Promise<void> {
   }
 }
 
-function spawnHub(port: number, bridgeRoot: string): ChildProcess {
+function spawnHub(
+  port: number,
+  bridgeRoot: string,
+  extraEnv: Record<string, string> = {},
+): ChildProcess {
   return spawn(path.join(bridgeRoot, "node_modules", ".bin", "tsx"), ["src/server.ts"], {
     cwd: bridgeRoot,
     stdio: ["ignore", "pipe", "pipe"],
@@ -97,6 +101,7 @@ function spawnHub(port: number, bridgeRoot: string): ChildProcess {
       PIPILOT_HEADLESS_AUTO_START: "false",
       PIPILOT_PI_BIN: process.execPath,
       PI_CWD: bridgeRoot,
+      ...extraEnv,
     },
   });
 }
@@ -322,6 +327,98 @@ test("extension_ui_response reaches headless pi and broadcasts extension_ui_answ
       8_000,
     );
     assert.equal(answeredB.requestId, "dialog-7");
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});
+
+/// Ctrl+Z 发的是 SIGTSTP:pi 进程被冻住,但内核 socket 仍是 ESTABLISHED 且不发
+/// FIN,所以 `ws.on("close")` 永远不触发。只靠连接状态判断的话,旧源会永久停在
+/// connected=true,App 既不会切走、抽屉里那一行也永远不消失。
+///
+/// 这里用一条「注册后就再不发任何帧」的桌面连接模拟被冻住的 relay:
+/// 先必须被判死(connected=false),随后必须被摘出源列表。
+test("silent desktop relay is declared dead and then pruned", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot, {
+    PIPILOT_DESKTOP_STALE_MS: "600",
+    PIPILOT_DESKTOP_PRUNE_MS: "600",
+  });
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:frozen",
+          label: "Frozen desktop",
+          cwd: "/tmp/pipilot-frozen",
+          sessionId: "session-frozen",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-frozen",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-frozen", isStreaming: false },
+          entries: [],
+          leafId: "leaf-1",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+
+    const listed = await phone.request("hub_list_sources");
+    assert.equal(
+      listed.data.sources.some(
+        (source: Frame) => source.id === "desktop:frozen" && source.connected === true,
+      ),
+      true,
+    );
+
+    // 此后这条连接一个字都不发(等同于被 SIGTSTP 冻住)。
+    // 判死:必须先变成 connected=false。
+    await phone.waitFor(
+      (frame) =>
+        frame.type === "hub_sources_changed" &&
+        frame.sources.some(
+          (source: Frame) => source.id === "desktop:frozen" && source.connected === false,
+        ),
+      8_000,
+    );
+
+    // 回收:超过 prune 窗口后必须从列表里彻底消失,否则每次 Ctrl+Z 都永久留一行。
+    await phone.waitFor(
+      (frame) =>
+        frame.type === "hub_sources_changed" &&
+        !frame.sources.some((source: Frame) => source.id === "desktop:frozen"),
+      8_000,
+    );
+
+    const after = await phone.request("hub_list_sources");
+    assert.equal(
+      after.data.sources.some((source: Frame) => source.id === "desktop:frozen"),
+      false,
+    );
   } finally {
     for (const peer of peers) peer.ws.close();
     child.kill("SIGTERM");

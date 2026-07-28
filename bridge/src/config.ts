@@ -33,6 +33,13 @@ export interface BridgeConfig {
   /// 重放环的字节上限:单纯加大条数是错的杠杆——每条 message_update 都携带完整消息。
   replayByteBudget: number;
   snapshotRequestTimeoutMs: number;
+  /// 桌面 relay 静默多久算死。Ctrl+Z(SIGTSTP)会冻住 pi 进程但内核 socket
+  /// 仍是 ESTABLISHED、不发 FIN,所以 close 事件永远不来——只能靠
+  /// 「多久没收到帧」判定。relay 心跳 10s 一次,取 3 次为死。
+  desktopStaleMs: number;
+  /// 桌面源断开多久后从列表里摘掉。断开不立刻删是为了留重连窗口:
+  /// 同 epoch 重连能复用快照与重放环,不必强制全量重同步。
+  desktopPruneMs: number;
   /// 同时存活的 pi 进程上限(并发会话)。
   maxLiveSessions: number;
   /// 无人观察且空闲多久后回收进程。正在生成的会话永不回收。
@@ -181,6 +188,8 @@ export function loadConfig(): BridgeConfig {
       process.env.PIPILOT_SNAPSHOT_TIMEOUT_MS,
       4_000,
     ),
+    desktopStaleMs: positiveInt(process.env.PIPILOT_DESKTOP_STALE_MS, 30_000),
+    desktopPruneMs: positiveInt(process.env.PIPILOT_DESKTOP_PRUNE_MS, 300_000),
     maxLiveSessions: positiveInt(process.env.PIPILOT_MAX_PI_PROCESSES, 4),
     sessionIdleTtlMs: positiveInt(
       process.env.PIPILOT_SESSION_IDLE_TTL_MS,

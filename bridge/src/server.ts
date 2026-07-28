@@ -55,6 +55,10 @@ interface DesktopClient {
   ws: WebSocket;
   sourceId?: string;
   registering?: boolean;
+  /// 最近一次收到任何 desktop_* 帧的时间。Ctrl+Z(SIGTSTP)冻住 pi 进程时内核
+  /// socket 仍是 ESTABLISHED、不发 FIN,close 事件永远不来,所以「还活着吗」
+  /// 只能靠这个时间戳判断,不能靠连接状态。
+  lastSeen: number;
   /// 登记 claim 时用的会话 id。**不能**在断开时从 descriptor 反推 ——
   /// 用户在 TUI 里切过会话之后,descriptor 早就是另一个 id 了,
   /// 于是旧 claim 永远泄漏,那个会话再也开不起来。
@@ -75,6 +79,9 @@ interface PendingRequest {
 const mobileClients = new Map<WebSocket, MobileClient>();
 const desktopClients = new Set<DesktopClient>();
 const desktopBySource = new Map<string, DesktopClient>();
+/// 桌面源转为断开的时刻,用于延迟回收。只记桌面源:headless 的「断开」是
+/// 休眠会话,必须留在列表里等用户发消息唤醒。
+const desktopOfflineSince = new Map<string, number>();
 const pending = new Map<string, PendingRequest>();
 
 function labelForSession(spec: SessionSpec): string {
@@ -1614,6 +1621,7 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
       { send: (message) => sendObject(desktop.ws, message) },
     );
     sources.setSnapshot(sourceId, snapshot);
+    desktopOfflineSince.delete(sourceId);
     sendObject(desktop.ws, {
       type: "desktop_registered",
       hubId: sources.hubId,
@@ -1825,20 +1833,25 @@ wss.on("connection", (ws, req) => {
       ws.close(4001, "unauthorized desktop source");
       return;
     }
-    const desktop: DesktopClient = { ws };
+    const desktop: DesktopClient = { ws, lastSeen: Date.now() };
     desktopClients.add(desktop);
     sendObject(ws, {
       type: "desktop_hello",
       version: HUB_PROTOCOL_VERSION,
       hubId: sources.hubId,
     });
-    ws.on("message", (data) => void handleDesktopMessage(desktop, data.toString()));
+    ws.on("message", (data) => {
+      // 任何入站帧都算活着。心跳只是保底,流式期间的事件同样刷新时间戳。
+      desktop.lastSeen = Date.now();
+      void handleDesktopMessage(desktop, data.toString());
+    });
     ws.on("close", () => {
       desktopClients.delete(desktop);
       const sourceId = desktop.sourceId;
       if (!sourceId || desktopBySource.get(sourceId) !== desktop) return;
       desktopBySource.delete(sourceId);
       sources.setConnected(sourceId, false);
+      desktopOfflineSince.set(sourceId, Date.now());
       streamingBySource.delete(sourceId);
       failSnapshotRequestsForSource(sourceId);
       failTreeRequestsForSource(sourceId);
@@ -1950,6 +1963,40 @@ const pingTimer = setInterval(() => {
 }, 10_000);
 pingTimer.unref();
 
+/// 桌面 relay 的存活判定与陈旧源回收。
+///
+/// Ctrl+Z 发的是 SIGTSTP:pi 进程被冻住,但内核 socket 仍是 ESTABLISHED 且不发
+/// FIN,于是 `ws.on("close")` 永远不触发,旧源会一直停在 `connected=true`。App
+/// 因此既不认为它死了,也不会自动切走,抽屉里那一行也永远不消失。
+///
+/// 判定只能靠「多久没收到任何帧」:relay 每 10s 发一次 desktop_heartbeat,
+/// 静默超过 desktopStaleMs(默认 30s = 3 次心跳)即判死并 terminate。terminate
+/// 会触发 close,复用既有的断开清理(失败在途请求、释放 claim、广播源变化)。
+/// 用户 fg 恢复后 relay 自己会重连,所以主动断开是安全的。
+const desktopSweeper = setInterval(() => {
+  if (shuttingDown) return;
+  const now = Date.now();
+  for (const desktop of [...desktopClients]) {
+    if (now - desktop.lastSeen <= config.desktopStaleMs) continue;
+    // terminate 而不是 close:对方已经不再运转,四次挥手等不到回应。
+    desktop.ws.terminate();
+  }
+  // 断开的桌面源不立刻删,留一段重连窗口(同 epoch 重连可复用快照与重放环)。
+  // 超过 desktopPruneMs 仍没回来就摘掉,否则每次 Ctrl+Z 都会永久留下一行。
+  let pruned = false;
+  for (const [sourceId, since] of [...desktopOfflineSince]) {
+    if (now - since <= config.desktopPruneMs) continue;
+    desktopOfflineSince.delete(sourceId);
+    const source = sources.get(sourceId);
+    if (!source || source.kind !== "desktop" || source.connected) continue;
+    if (sources.remove(sourceId)) pruned = true;
+  }
+  if (pruned) notifySourcesChanged();
+  // 扫描周期跟着判死阈值走:阈值调小(测试/排查)时扫描也要跟着变密,
+  // 否则 30s 的固定周期会让「多久判死」实际上被扫描间隔支配。
+}, Math.min(10_000, Math.max(250, Math.floor(config.desktopStaleMs / 3))));
+desktopSweeper.unref();
+
 const leaseTimer = setInterval(() => {
   for (const sourceId of sources.expireLeases()) notifyOwnerChanged(sourceId);
 }, 1000);
@@ -1979,6 +2026,7 @@ async function shutdown(): Promise<void> {
   shuttingDown = true;
   clearInterval(leaseTimer);
   clearInterval(pingTimer);
+  clearInterval(desktopSweeper);
   clearInterval(idleSweeper);
   for (const client of [...mobileClients.keys(), ...[...desktopClients].map((item) => item.ws)]) {
     client.close(1001, "bridge shutting down");

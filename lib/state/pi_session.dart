@@ -2272,6 +2272,9 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (selected == null && state.selectedSourceId != null) {
       _dropLease(state.selectedSourceId!);
       state = state.copyWith(clearSource: true, sources: parsed);
+      // 源被 hub 摘掉了(桌面 pi 关掉/长期离线回收)。留在空选中态等于卡死,
+      // 有替代窗口就直接跟过去。
+      unawaited(_followLiveDesktop(parsed, previous));
       return;
     }
     if (sourceEpochChanged(previous, selected)) {
@@ -2305,6 +2308,53 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (previous?.connected == false && selected?.connected == true) {
       unawaited(_syncSelectedSource(forceFull: true));
     }
+    // 桌面源判死:桌面 TUI 不像 headless 会话那样能被发消息唤醒(进程已被冻住
+    // 或退出),继续停在它身上永远等不到事件。
+    if (selected != null && selected.isDesktop && !selected.connected) {
+      unawaited(_followLiveDesktop(parsed, selected));
+    }
+  }
+
+  /// 选中的桌面窗口没了之后,自动跟到还活着的那个窗口。
+  ///
+  /// 电脑上 Ctrl+Z 挂起再开一个 pi 时,新进程的 sourceId 里嵌着新的 PID,必然与
+  /// 旧的不同。以前只有 [_initializeAfterConnect] 会做回退选源,所以运行期换窗口
+  /// 时 App 就一直钉在那个已经死掉的源上,要杀掉重开才恢复。
+  Future<void> _followLiveDesktop(
+    List<SourceInfo> sources,
+    SourceInfo? previous,
+  ) async {
+    if (_disposed || !_hubV2) return;
+    final target = pickFollowTarget(sources, previous);
+    if (target == null || target.id == state.selectedSourceId) return;
+    if (!await selectSource(target.id)) return;
+    if (_disposed) return;
+    _write(state.copyWith(transientNotice: '原窗口已断开,已切到 ${target.label}'));
+  }
+
+  /// 旧桌面源失联后该跟到哪个窗口。
+  ///
+  /// 优先同一会话(用户在电脑上 `fg` 回原会话,或另开一个跑同一会话),否则只在
+  /// 剩一个候选时才跟随 —— 多个候选时擅自挑一个,等于替用户改了他正在看的会话。
+  ///
+  /// 抽成纯函数是因为挑错窗口会把用户的对话换掉,这个判断值得单独钉住。
+  @visibleForTesting
+  static SourceInfo? pickFollowTarget(
+    List<SourceInfo> sources,
+    SourceInfo? previous,
+  ) {
+    final candidates = sources
+        .where((source) => source.isDesktop && source.connected)
+        .toList();
+    if (candidates.isEmpty) return null;
+    final previousSession = previous?.sessionId;
+    if (previousSession != null) {
+      final sameSession = candidates
+          .where((source) => source.sessionId == previousSession)
+          .firstOrNull;
+      if (sameSession != null) return sameSession;
+    }
+    return candidates.length == 1 ? candidates.single : null;
   }
 
   void _onOwnerChanged(Map<String, dynamic> event) {
