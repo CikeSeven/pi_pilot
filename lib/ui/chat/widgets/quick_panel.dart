@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../state/pi_session.dart';
 import '../../../state/settings_provider.dart';
 import '../../common/tool_avatar.dart';
+import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
 
 /// 输入条上方的快捷面板:
@@ -57,48 +58,64 @@ class _QuickPanelState extends ConsumerState<QuickPanel> {
           .take(6)
           .toList();
       if (matches.isEmpty) return const SizedBox(width: double.infinity);
-      return ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 220),
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          children: [
-            for (final command in matches)
-              ListTile(
-                dense: true,
-                visualDensity: VisualDensity.compact,
-                leading: PiToolAvatar(
-                  icon: switch (command.source) {
-                    'skill' => Icons.bolt_outlined,
-                    'prompt' => Icons.notes_outlined,
-                    _ => Icons.extension_outlined,
-                  },
-                  category: switch (command.source) {
-                    'skill' => PiToolCategory.search,
-                    'prompt' => PiToolCategory.read,
-                    _ => PiToolCategory.extension,
-                  },
-                  size: 28,
-                ),
-                title: Text(
-                  '/${command.name}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppType.monoLabel(color: colors.onSurface),
-                ),
-                subtitle: command.description == null
-                    ? null
-                    : Text(
-                        command.description!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: colors.onSurfaceVariant,
-                        ),
-                      ),
-                onTap: () => widget.onInsert('/${command.name} '),
-              ),
-          ],
+      // 这个列表悬浮在消息流上方,必须自带不透明底色。
+      // 之前直接铺 ListView,背景是透明的,文字和正文糊在一起没法读。
+      // 底色与输入卡一致(surfaceContainerHigh),再加描边和投影压住下层内容。
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        child: Material(
+          color: colors.surfaceContainerHigh,
+          elevation: 3,
+          shadowColor: colors.shadow,
+          surfaceTintColor: colors.surfaceTint,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(PiShape.xl),
+            side: BorderSide(color: colors.outlineVariant),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 220),
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              children: [
+                for (final command in matches)
+                  ListTile(
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    leading: PiToolAvatar(
+                      icon: switch (command.source) {
+                        'skill' => Icons.bolt_outlined,
+                        'prompt' => Icons.notes_outlined,
+                        _ => Icons.extension_outlined,
+                      },
+                      category: switch (command.source) {
+                        'skill' => PiToolCategory.search,
+                        'prompt' => PiToolCategory.read,
+                        _ => PiToolCategory.extension,
+                      },
+                      size: 28,
+                    ),
+                    title: Text(
+                      '/${command.name}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppType.monoLabel(color: colors.onSurface),
+                    ),
+                    subtitle: command.description == null
+                        ? null
+                        : Text(
+                            command.description!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(color: colors.onSurfaceVariant),
+                          ),
+                    onTap: () => widget.onInsert('/${command.name} '),
+                  ),
+              ],
+            ),
+          ),
         ),
       );
     }
