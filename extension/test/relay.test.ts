@@ -112,6 +112,8 @@ test("relay registers, coalesces updates, and fences commands", async () => {
     token: "test",
     reconnectMinMs: 20,
     reconnectMaxMs: 100,
+    streamSnapshotEvents: 192,
+    streamSnapshotMaxMs: 15_000,
   });
 
   try {
@@ -140,6 +142,21 @@ test("relay registers, coalesces updates, and fences commands", async () => {
     );
     assert.equal(updates.length, 1);
     assert.equal(updates[0]!.event.message.content, "ab");
+
+    // pi 的 ExtensionRunner 每次 emit 都 createContext() 新建一个 ctx 对象。
+    // relay 曾经用 `this.ctx === ctx` 判定,于是 session_start 之后的**每一个**
+    // 事件都被静默丢掉 —— 桌面源看起来在线,内容却永远不更新。
+    const freshCtx = Object.create(
+      Object.getPrototypeOf(ctx) as object,
+      Object.getOwnPropertyDescriptors(ctx),
+    ) as ExtensionContext;
+    assert.notEqual(freshCtx, ctx);
+    relay.emitEvent({ type: "user_bash", command: "ls" }, freshCtx);
+    await waitFor(() =>
+      frames.find(
+        (frame) => frame.type === "desktop_event" && frame.event?.type === "user_bash",
+      ),
+    );
 
     assert.ok(sourceSocket);
     sourceSocket!.send(
@@ -282,6 +299,114 @@ test("relay registers, coalesces updates, and fences commands", async () => {
     assert.match(expired.error, /stale owner lease/);
     assert.deepEqual(sentMessages, [{ message: "from phone", options: undefined }]);
     assert.equal(statuses.includes("PiPilot: synced"), true);
+  } finally {
+    relay.stop(ctx);
+    for (const socket of server.clients) socket.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("on-demand snapshot keeps the epoch and lands exactly on the last event", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const frames: Frame[] = [];
+  let sourceSocket: WebSocket | undefined;
+  server.on("connection", (socket) => {
+    sourceSocket = socket;
+    socket.send(JSON.stringify({ type: "desktop_hello", version: 3, hubId: "test-hub" }));
+    socket.on("message", (data) => {
+      const frame = JSON.parse(data.toString()) as Frame;
+      frames.push(frame);
+      if (frame.type === "desktop_register") {
+        socket.send(
+          JSON.stringify({
+            type: "desktop_registered",
+            hubId: "test-hub",
+            sourceId: frame.source.sourceId,
+            epoch: frame.snapshot.epoch,
+          }),
+        );
+      }
+    });
+  });
+
+  const pi = {
+    getThinkingLevel: () => "low",
+    getCommands: () => [],
+    setSessionName: () => {},
+  } as unknown as ExtensionAPI;
+
+  const ctx = {
+    cwd: "/tmp/project",
+    model: { id: "m", name: "M", provider: "p" },
+    sessionManager: {
+      getBranch: () => [],
+      getEntries: () => [],
+      getTree: () => [],
+      getSessionFile: () => "/tmp/project/session.jsonl",
+      getSessionId: () => "session-1",
+      getSessionName: () => "Session",
+      getLeafId: () => null,
+    },
+    modelRegistry: { getAvailable: () => [], find: () => undefined },
+    getContextUsage: () => undefined,
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    abort: () => {},
+  } as unknown as ExtensionContext;
+
+  const relay = new DesktopRelay(pi, {
+    url: `ws://127.0.0.1:${address.port}/desktop?token=test`,
+    token: "test",
+    reconnectMinMs: 20,
+    reconnectMaxMs: 100,
+    streamSnapshotEvents: 192,
+    streamSnapshotMaxMs: 15_000,
+  });
+
+  try {
+    relay.start(ctx);
+    const registration = await waitFor(() =>
+      frames.find((frame) => frame.type === "desktop_register"),
+    );
+    const epoch = registration.snapshot.epoch as string;
+    await waitFor(() => (sourceSocket ? true : undefined));
+
+    // 推几个事件把 seq 抬起来
+    relay.emitBoundary({ type: "turn_start" }, ctx);
+    relay.emitBoundary({ type: "message_start" }, ctx);
+    const lastEvent = await waitFor(() => {
+      const events = frames.filter((frame) => frame.type === "desktop_event");
+      return events.length >= 2 ? events[events.length - 1] : undefined;
+    });
+
+    // hub 索要一份新快照
+    sourceSocket!.send(
+      JSON.stringify({ type: "desktop_snapshot_request", requestId: "r1", epoch }),
+    );
+    const snapshot = await waitFor(() =>
+      frames.find((frame) => frame.type === "desktop_snapshot" && frame.requestId === "r1"),
+    );
+
+    // 关键三条:回传 requestId、epoch 不变(否则会清空 hub 的重放环并毁掉租约)、
+    // baseSeq 正好等于线上最后一个事件(先 flush 后 capture 的结果)
+    assert.equal(snapshot.requestId, "r1");
+    assert.equal(snapshot.snapshot.epoch, epoch);
+    assert.equal(snapshot.snapshot.baseSeq, lastEvent.seq);
+    // 快照里必须带上"正在生成"(ctx.isIdle() === false)
+    assert.equal(snapshot.snapshot.state.isStreaming, true);
+
+    // 后续事件必须接着 baseSeq+1
+    relay.emitBoundary({ type: "turn_end" }, ctx);
+    const next = await waitFor(() =>
+      frames.find(
+        (frame) => frame.type === "desktop_event" && frame.seq === snapshot.snapshot.baseSeq + 1,
+      ),
+    );
+    assert.equal(next.epoch, epoch);
   } finally {
     relay.stop(ctx);
     for (const socket of server.clients) socket.close();

@@ -30,6 +30,13 @@ export interface BridgeConfig {
   headlessSourceName: string;
   headlessAutoStart: boolean;
   replayCapacity: number;
+  /// 重放环的字节上限:单纯加大条数是错的杠杆——每条 message_update 都携带完整消息。
+  replayByteBudget: number;
+  snapshotRequestTimeoutMs: number;
+  /// 同时存活的 pi 进程上限(并发会话)。
+  maxLiveSessions: number;
+  /// 无人观察且空闲多久后回收进程。正在生成的会话永不回收。
+  sessionIdleTtlMs: number;
   leaseMinTtlMs: number;
   leaseMaxTtlMs: number;
 }
@@ -165,9 +172,23 @@ export function loadConfig(): BridgeConfig {
     headlessSourceId: process.env.PIPILOT_HEADLESS_SOURCE_ID ?? "headless:local",
     headlessSourceName: process.env.PIPILOT_HEADLESS_SOURCE_NAME ?? "Local headless pi",
     headlessAutoStart: process.env.PIPILOT_HEADLESS_AUTO_START === "true",
-    replayCapacity: positiveInt(process.env.PIPILOT_REPLAY_CAPACITY, 512),
-    leaseMinTtlMs: positiveInt(process.env.PIPILOT_LEASE_MIN_TTL_MS, 5_000),
-    leaseMaxTtlMs: positiveInt(process.env.PIPILOT_LEASE_MAX_TTL_MS, 30_000),
+    replayCapacity: positiveInt(process.env.PIPILOT_REPLAY_CAPACITY, 1024),
+    replayByteBudget: positiveInt(
+      process.env.PIPILOT_REPLAY_BYTES,
+      16 * 1024 * 1024,
+    ),
+    snapshotRequestTimeoutMs: positiveInt(
+      process.env.PIPILOT_SNAPSHOT_TIMEOUT_MS,
+      4_000,
+    ),
+    maxLiveSessions: positiveInt(process.env.PIPILOT_MAX_PI_PROCESSES, 4),
+    sessionIdleTtlMs: positiveInt(
+      process.env.PIPILOT_SESSION_IDLE_TTL_MS,
+      900_000,
+    ),
+    // 强制抢占后,TTL 只负责释放死客户端的 fence,可以做得很短
+    leaseMinTtlMs: positiveInt(process.env.PIPILOT_LEASE_MIN_TTL_MS, 3_000),
+    leaseMaxTtlMs: positiveInt(process.env.PIPILOT_LEASE_MAX_TTL_MS, 8_000),
   };
 }
 

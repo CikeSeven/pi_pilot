@@ -163,8 +163,13 @@ class PiConnection {
     );
   }
 
-  void send(Map<String, dynamic> message) {
-    _channel?.sink.add(jsonEncode(message));
+  /// 发送一帧。**返回是否真的写进了 socket** —— 调用方据此决定要不要
+  /// 告诉用户"没发出去",而不是让消息静静消失。
+  bool send(Map<String, dynamic> message) {
+    final channel = _channel;
+    if (channel == null) return false;
+    channel.sink.add(jsonEncode(message));
+    return true;
   }
 
   void disconnect({bool notify = true}) {

@@ -4,6 +4,12 @@ import path from "node:path";
 import WebSocket from "ws";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RelayConfig } from "./config.js";
+import {
+  navRuntimeFor,
+  runNavigate,
+  type NavCommandContextCache,
+  type NavResult,
+} from "./nav_commands.js";
 import { executeRemoteCommand, SAFE_REMOTE_COMMANDS, type RemoteCommand } from "./remote_commands.js";
 import { cloneForWire, encodeForWire, MAX_SNAPSHOT_BYTES } from "./serialization.js";
 
@@ -34,6 +40,115 @@ function sanitizeSourceId(value: string): string {
   return value.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 128);
 }
 
+/** treeSummary 的字节预算;超出直接从快照剔除。 */
+const TREE_SUMMARY_BYTE_BUDGET = 256 * 1024;
+
+/** 与 pi getSessionStats 同形状的统计(从 branch entries 汇总)。 */
+export function computeSessionStats(
+  entries: readonly unknown[],
+  contextUsage: unknown,
+): JsonObject {
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let cost = 0;
+  let userMessages = 0;
+  let assistantMessages = 0;
+  let toolResults = 0;
+  let toolCalls = 0;
+  let totalMessages = 0;
+  const add = (usage: any): void => {
+    if (!usage) return;
+    input += usage.input ?? 0;
+    output += usage.output ?? 0;
+    cacheRead += usage.cacheRead ?? 0;
+    cacheWrite += usage.cacheWrite ?? 0;
+    cost += usage.cost?.total ?? 0;
+  };
+  for (const raw of entries) {
+    const entry = raw as any;
+    if ((entry?.type === "branch_summary" || entry?.type === "compaction") && entry.usage) {
+      add(entry.usage);
+    }
+    if (entry?.type !== "message") continue;
+    totalMessages++;
+    const message = entry.message;
+    if (message?.role === "user") {
+      userMessages++;
+    } else if (message?.role === "toolResult") {
+      toolResults++;
+      add(message.usage);
+    } else if (message?.role === "assistant") {
+      assistantMessages++;
+      if (Array.isArray(message.content)) {
+        toolCalls += message.content.filter((c: any) => c?.type === "toolCall").length;
+      }
+      add(message.usage);
+    }
+  }
+  return {
+    userMessages,
+    assistantMessages,
+    toolCalls,
+    toolResults,
+    totalMessages,
+    tokens: {
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      total: input + output + cacheRead + cacheWrite,
+    },
+    cost,
+    contextUsage: contextUsage ?? null,
+  };
+}
+
+function summarizeTreeNode(node: any): JsonObject {
+  const entry = node?.entry ?? {};
+  let preview = "";
+  if (entry.type === "message") {
+    const content = entry.message?.content;
+    if (typeof content === "string") preview = content;
+    else if (Array.isArray(content)) {
+      preview = content
+        .filter((c: any) => c?.type === "text")
+        .map((c: any) => c.text)
+        .join(" ");
+    }
+  }
+  if (preview.length > 120) preview = `${preview.slice(0, 120)}…`;
+  return {
+    id: entry.id,
+    parentId: entry.parentId ?? null,
+    type: entry.type ?? "unknown",
+    timestamp: entry.timestamp ?? null,
+    role: entry.type === "message" ? (entry.message?.role ?? null) : null,
+    preview,
+    label: node?.label ?? null,
+    children: Array.isArray(node?.children) ? node.children.map(summarizeTreeNode) : [],
+  };
+}
+
+/** 压缩会话树;超出预算返回 undefined(整体剔除)。 */
+export function buildTreeSummary(tree: unknown[]): JsonObject[] | undefined {
+  const summary = tree.map(summarizeTreeNode);
+  return JSON.stringify(summary).length <= TREE_SUMMARY_BYTE_BUDGET ? summary : undefined;
+}
+
+/** 读会话文件路径;陈旧 ctx 的 getter 会抛,这里吞掉。 */
+function safeSessionFile(ctx: ExtensionContext): string | undefined {
+  try {
+    return ctx.sessionManager.getSessionFile() ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/// 队列镜像的上界:pi 消费排队消息不会回调扩展,镜像只能在回合边界收敛。
+const MAX_QUEUE_MIRROR = 32;
+
 export class DesktopRelay {
   private socket: WebSocket | undefined;
   private ctx: ExtensionContext | undefined;
@@ -58,24 +173,38 @@ export class DesktopRelay {
   private commandChain: Promise<void> = Promise.resolve();
   private activeRequests = new Set<string>();
   private commandResults = new Map<string, JsonObject>();
+  private compacting = false;
+  private streaming = false;
+  private snapshotTimer: NodeJS.Timeout | undefined;
+  /// 绑定的会话文件:ctx 对象每次 emit 都换,只有它是稳定的。
+  private boundSessionFile: string | undefined;
+  /// 合成队列镜像(pi 的 queue_update 不经过扩展事件流)。
+  /// 有界:pi 消费一条排队消息不会通知扩展,所以镜像只能靠回合边界收敛,
+  /// 中间必然偏大 —— 至少不能无界增长。
+  private readonly steeringMirror: string[] = [];
+  private readonly followUpMirror: string[] = [];
+  private lastSnapshotAt = 0;
+  private lastSnapshotSeq = 0;
 
   readonly sourceId = sanitizeSourceId(`${os.hostname()}:${process.pid}`);
 
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly config: RelayConfig,
+    private readonly navCache?: NavCommandContextCache,
   ) {}
 
   start(ctx: ExtensionContext): void {
     this.stopInternal(false);
     this.ctx = ctx;
+    this.boundSessionFile = safeSessionFile(ctx);
     this.active = true;
     this.setStatus("PiPilot: connecting");
     this.connect();
   }
 
   stop(ctx: ExtensionContext): void {
-    if (ctx !== this.ctx) return;
+    if (!this.isBound(ctx)) return;
     this.flushCoalesced();
     this.stopInternal(true);
   }
@@ -84,10 +213,100 @@ export class DesktopRelay {
     this.stopInternal(true);
   }
 
+  /** session_before_compact / session_compact 事件驱动的压缩标志。 */
+  setCompacting(value: boolean, ctx: ExtensionContext): void {
+    if (!this.isCurrent(ctx)) return;
+    this.compacting = value;
+  }
+
+  /// agent_start / agent_settled 驱动。流式期间定期自发快照,
+  /// 这样中途加入的手机端拿到的快照带得上 isStreaming 与 inFlightMessage。
+  setStreaming(value: boolean, ctx: ExtensionContext): void {
+    if (!this.isCurrent(ctx)) return;
+    if (this.streaming === value) return;
+    this.streaming = value;
+    if (!value) {
+      this.clearSnapshotTimer();
+      return;
+    }
+    this.lastSnapshotAt = Date.now();
+    this.lastSnapshotSeq = this.seq;
+    this.snapshotTimer = setInterval(() => this.streamSnapshotTick(), 1000);
+    this.snapshotTimer.unref?.();
+  }
+
+  private streamSnapshotTick(): void {
+    if (!this.registered || !this.liveCtx()) return;
+    const grew = this.seq - this.lastSnapshotSeq;
+    if (grew <= 0) return;
+    if (
+      grew >= this.config.streamSnapshotEvents ||
+      Date.now() - this.lastSnapshotAt >= this.config.streamSnapshotMaxMs
+    ) {
+      this.sendSnapshot("streaming keepalive");
+    }
+  }
+
+  private clearSnapshotTimer(): void {
+    if (this.snapshotTimer) clearInterval(this.snapshotTimer);
+    this.snapshotTimer = undefined;
+  }
+
   emitBoundary(event: unknown, ctx: ExtensionContext): void {
     if (!this.isCurrent(ctx)) return;
     this.flushCoalesced();
     this.sendEvent(event);
+  }
+
+  /**
+   * 桌面端即将换会话/开分支/回退。
+   *
+   * 这些操作会让 relay 短暂离线并换 epoch。发一个提示帧让手机知道"这是切换,
+   * 不是掉线",避免它拆掉整个界面再重建。
+   */
+  emitSessionTransition(reason: string, ctx: ExtensionContext): void {
+    this.emitEvent({ type: "pipilot_session_transition", reason }, ctx);
+  }
+
+  /**
+   * 合成队列镜像。
+   *
+   * pi 的 `queue_update` **不经过扩展事件流**(它只发给 `session.subscribe`),
+   * 所以桌面源上手机永远看不到队列。这里由 relay 自己维护:手机发来的消息
+   * 明细我们知道,电脑端自己排的只能算个数 —— 所以帧上带 `partial: true`。
+   */
+  noteRemoteQueued(message: string, deliverAs: "steer" | "followUp", ctx: ExtensionContext): void {
+    const queue = deliverAs === "steer" ? this.steeringMirror : this.followUpMirror;
+    queue.push(message);
+    if (queue.length > MAX_QUEUE_MIRROR) queue.splice(0, queue.length - MAX_QUEUE_MIRROR);
+    this.emitQueueMirror(ctx);
+  }
+
+  /**
+   * 中断:pi 会把未发送的排队消息**回填到电脑端输入框**,它们不再排队。
+   * 镜像必须立刻清空,否则手机会一直显示一批根本不存在的待发消息。
+   */
+  noteAborted(ctx: ExtensionContext): void {
+    this.clearQueueMirror(ctx);
+  }
+
+  clearQueueMirror(ctx: ExtensionContext): void {
+    if (this.steeringMirror.length === 0 && this.followUpMirror.length === 0) return;
+    this.steeringMirror.length = 0;
+    this.followUpMirror.length = 0;
+    this.emitQueueMirror(ctx);
+  }
+
+  private emitQueueMirror(ctx: ExtensionContext): void {
+    this.emitEvent(
+      {
+        type: "queue_update",
+        steering: [...this.steeringMirror],
+        followUp: [...this.followUpMirror],
+        partial: true,
+      },
+      ctx,
+    );
   }
 
   emitEvent(event: unknown, ctx: ExtensionContext): void {
@@ -239,6 +458,23 @@ export class DesktopRelay {
         return;
       }
 
+      case "desktop_snapshot_request": {
+        // 按需快照:hub 发现快照与事件流不连续时索要。
+        // 绝不能走 resnapshot()——那会 newEpoch,清空重放环并摧毁租约。
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+        if (!requestId) return;
+        if (!this.registered || !this.liveCtx()) {
+          this.sendFrame({
+            type: "desktop_snapshot_unavailable",
+            requestId,
+            reason: this.registered ? "stale_ctx" : "not_registered",
+          });
+          return;
+        }
+        this.sendSnapshot("hub request", requestId);
+        return;
+      }
+
       case "desktop_resync_required":
         this.resnapshot(typeof msg.reason === "string" ? msg.reason : "hub requested resync");
         return;
@@ -307,7 +543,16 @@ export class DesktopRelay {
         ) {
           throw new Error("queued command has a stale owner lease");
         }
-        return executeRemoteCommand(command, { pi: this.pi, ctx });
+        const result = await executeRemoteCommand(command, {
+          pi: this.pi,
+          ctx,
+          navigate: (entryId) => this.navigate(entryId, ctx),
+        });
+        const delivery = (result as { delivery?: unknown } | undefined)?.delivery;
+        if (delivery === "steer" || delivery === "followUp") {
+          this.noteRemoteQueued(String(command.message), delivery, ctx);
+        }
+        return result;
       })
       .then(
         (data) => this.sendCommandResult(requestId, true, data),
@@ -323,6 +568,45 @@ export class DesktopRelay {
         this.activeRequests.delete(requestId);
         this.commandDepth--;
       });
+  }
+
+  /**
+   * 执行一次会话回退。
+   *
+   * 用缓存的命令上下文(远程命令自己的 ctx 上没有 `navigateTree`)。
+   * 从没在电脑上跑过 `/pipilot-nav` 时缓存是空的,这时如实报错并提示用户
+   * 在电脑上跑一次 —— 比悄悄失败或伪装成功要好。
+   */
+  private async navigate(entryId: string | undefined, ctx: ExtensionContext): Promise<unknown> {
+    const cached = this.navCache?.get(this.boundSessionFile ?? "");
+    if (!cached) {
+      if (ctx.mode === "tui") {
+        ctx.ui.notify(
+          "手机请求回退会话:请先在这里执行一次 /pipilot-undo 以启用远程回退",
+          "warning",
+        );
+      }
+      throw new Error(
+        "rollback needs the desktop command context; run /pipilot-undo once on the computer",
+      );
+    }
+    const result = await runNavigate(navRuntimeFor(cached), entryId);
+    if (!result.ok) throw new Error(result.error ?? "rollback was cancelled");
+    return result;
+  }
+
+  /** 回退结果广播给手机:两端都靠随后的 `session_tree` 事件收敛。 */
+  emitNavResult(result: NavResult, ctx: ExtensionContext): void {
+    this.emitEvent(
+      {
+        type: "pipilot_nav_result",
+        ok: result.ok,
+        ...(result.editorText !== undefined ? { editorText: result.editorText } : {}),
+        ...(result.error !== undefined ? { error: result.error } : {}),
+      },
+      ctx,
+    );
+    this.snapshot(ctx);
   }
 
   private sendCommandResult(
@@ -371,14 +655,20 @@ export class DesktopRelay {
     );
   }
 
-  private sendSnapshot(reason: string): void {
+  private sendSnapshot(reason: string, requestId?: string): void {
     if (!this.registered) return;
+    // 顺序是关键:先把 25ms/100ms 合批计时器排空(各自 ++seq),再取快照,
+    // 这样 baseSeq 恰好等于线上最后一个事件——既不留洞也不重复。
+    this.flushCoalesced();
     const snapshot = this.captureSnapshot();
     if (!snapshot) return;
+    this.lastSnapshotAt = Date.now();
+    this.lastSnapshotSeq = this.seq;
     this.sendFrame(
       {
         type: "desktop_snapshot",
         reason,
+        ...(requestId ? { requestId } : {}),
         snapshot,
       },
       MAX_SNAPSHOT_BYTES,
@@ -388,28 +678,51 @@ export class DesktopRelay {
   private captureSnapshot(): JsonObject | undefined {
     const ctx = this.liveCtx();
     if (!ctx) return undefined;
-    let entries = cloneForWire(
-      ctx.sessionManager.getBranch(),
-      MAX_CAPTURE_BYTES,
-    ) as unknown as JsonObject[];
+    const branch = ctx.sessionManager.getBranch();
+    let entries = cloneForWire(branch, MAX_CAPTURE_BYTES) as unknown as JsonObject[];
     const models = ctx.modelRegistry.getAvailable().map((model) => serializeModel(model));
     const contextUsage = ctx.getContextUsage();
     const state: JsonObject = {
       model: serializeModel(ctx.model),
       thinkingLevel: this.pi.getThinkingLevel(),
       isStreaming: !ctx.isIdle(),
-      isCompacting: false,
+      isCompacting: this.compacting,
       steeringMode: "one-at-a-time",
       followUpMode: "one-at-a-time",
       sessionFile: ctx.sessionManager.getSessionFile() ?? null,
       sessionId: ctx.sessionManager.getSessionId(),
       sessionName: ctx.sessionManager.getSessionName() ?? null,
       cwd: ctx.cwd,
-      autoCompactionEnabled: false,
+      // 扩展 API 不暴露 auto-compaction 状态,发 null 让客户端显示「未知」
+      autoCompactionEnabled: null,
       messageCount: entries.length,
       pendingMessageCount: ctx.hasPendingMessages() ? 1 : 0,
       contextUsage: contextUsage ?? null,
     };
+
+    let stats: JsonObject | undefined;
+    try {
+      stats = computeSessionStats(branch, contextUsage);
+    } catch {
+      stats = undefined;
+    }
+    let commands: JsonObject[] | undefined;
+    try {
+      commands = this.pi.getCommands().map((command) => ({
+        name: command.name,
+        description: command.description ?? null,
+        source: command.source,
+      }));
+    } catch {
+      commands = undefined;
+    }
+    let treeSummary: JsonObject[] | undefined;
+    try {
+      treeSummary = buildTreeSummary(ctx.sessionManager.getTree());
+    } catch {
+      treeSummary = undefined;
+    }
+
     const makeSnapshot = (): JsonObject => ({
       epoch: this.epoch,
       baseSeq: this.seq,
@@ -420,18 +733,30 @@ export class DesktopRelay {
       models,
       thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
       ...(this.inFlightMessage ? { inFlightMessage: this.inFlightMessage } : {}),
+      ...(stats ? { stats } : {}),
+      ...(commands ? { commands } : {}),
+      ...(treeSummary ? { treeSummary } : {}),
     });
 
+    // 超限丢弃顺序:treeSummary → commands → 截断 entries
     let snapshot = makeSnapshot();
-    while (entries.length > 1) {
+    for (;;) {
       try {
         encodeForWire(snapshot, MAX_SNAPSHOT_BYTES);
         return snapshot;
       } catch {
-        const removeCount = Math.max(1, Math.floor(entries.length / 4));
-        entries = entries.slice(removeCount);
-        state.snapshotTruncated = true;
-        state.messageCount = entries.length;
+        if (treeSummary) {
+          treeSummary = undefined;
+        } else if (commands) {
+          commands = undefined;
+        } else if (entries.length > 1) {
+          const removeCount = Math.max(1, Math.floor(entries.length / 4));
+          entries = entries.slice(removeCount);
+          state.snapshotTruncated = true;
+          state.messageCount = entries.length;
+        } else {
+          break;
+        }
         snapshot = makeSnapshot();
       }
     }
@@ -553,6 +878,8 @@ export class DesktopRelay {
     this.ownerActive = false;
     this.ownerFence = 0;
     this.ownerExpiresAt = 0;
+    this.streaming = false;
+    this.clearSnapshotTimer();
     this.cancelCoalesced();
     this.clearHeartbeat();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -594,7 +921,38 @@ export class DesktopRelay {
     );
   }
 
+  /**
+   * 这个 ctx 属于当前会话吗?
+   *
+   * **不能用对象身份比。** pi 的 `ExtensionRunner.emit()` 每次都
+   * `createContext()` 新建一个对象(runner.js:570),所以 `this.ctx === ctx`
+   * 只在 `session_start` 那一次成立 —— 用身份比等于把之后的**每一个**事件、
+   * 每一次快照、每一次流式标志全部静默丢掉,桌面源看起来在线却永远不更新。
+   *
+   * 真正要判的是"这个 ctx 指向的还是我们绑定的那个会话"。顺便把 `this.ctx`
+   * 刷新成最新的活 ctx,免得后续异步发送用到一个已经失效的旧对象。
+   */
   private isCurrent(ctx: ExtensionContext): boolean {
-    return this.active && this.ctx === ctx;
+    if (!this.active || !this.ctx) return false;
+    if (this.ctx === ctx) return true;
+    try {
+      const file = ctx.sessionManager.getSessionFile();
+      if (file !== this.boundSessionFile) return false;
+      this.ctx = ctx;
+      return true;
+    } catch {
+      // 陈旧 ctx 的 getter 会抛 assertActive()
+      return false;
+    }
+  }
+
+  /** 与 `isCurrent` 同源的判据,给 `stop()` 用。 */
+  private isBound(ctx: ExtensionContext): boolean {
+    if (this.ctx === ctx) return true;
+    try {
+      return ctx.sessionManager.getSessionFile() === this.boundSessionFile;
+    } catch {
+      return false;
+    }
   }
 }

@@ -5,22 +5,34 @@ export const SAFE_REMOTE_COMMANDS = [
   "abort",
   "set_model",
   "set_thinking_level",
+  "set_session_name",
+  // 压缩上下文与会话内回退都是"会话内"操作,不会把电脑上正在用的会话抽走。
+  // fork / new_session / switch_session 永远不在这个表里 —— 那会换掉人正在用的会话。
+  "compact",
+  "navigate_tree",
 ] as const;
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 export interface RemoteCommand {
   type?: unknown;
+  entryId?: unknown;
   message?: unknown;
   streamingBehavior?: unknown;
   provider?: unknown;
   modelId?: unknown;
   level?: unknown;
+  name?: unknown;
 }
 
 export interface CommandRuntime {
-  pi: Pick<ExtensionAPI, "sendUserMessage" | "setModel" | "getThinkingLevel" | "setThinkingLevel">;
+  pi: Pick<
+    ExtensionAPI,
+    "sendUserMessage" | "setModel" | "getThinkingLevel" | "setThinkingLevel" | "setSessionName"
+  >;
   ctx: Pick<ExtensionContext, "abort" | "isIdle" | "modelRegistry">;
+  /// 会话回退:relay 用缓存的命令上下文执行(普通 ExtensionContext 上没有 navigateTree)。
+  navigate?: (entryId: string | undefined) => Promise<unknown>;
 }
 
 export async function executeRemoteCommand(
@@ -48,6 +60,21 @@ export async function executeRemoteCommand(
       runtime.ctx.abort();
       return { aborted: true };
 
+    case "compact":
+      // pi 没有把 compact 暴露到 ExtensionAPI 上,只能走用户消息通道的斜杠命令。
+      throw new Error("compact is not available on the desktop relay");
+
+    case "navigate_tree": {
+      if (!runtime.navigate) {
+        throw new Error("session rollback is unavailable in this desktop runtime");
+      }
+      const entryId =
+        typeof command.entryId === "string" && command.entryId.length > 0
+          ? command.entryId
+          : undefined;
+      return runtime.navigate(entryId);
+    }
+
     case "set_model": {
       if (typeof command.provider !== "string" || typeof command.modelId !== "string") {
         throw new Error("provider and modelId are required");
@@ -67,6 +94,15 @@ export async function executeRemoteCommand(
         command.level as Parameters<ExtensionAPI["setThinkingLevel"]>[0],
       );
       return { level: runtime.pi.getThinkingLevel() };
+    }
+
+    case "set_session_name": {
+      if (typeof command.name !== "string" || command.name.trim().length === 0) {
+        throw new Error("session name must be a non-empty string");
+      }
+      if (command.name.length > 256) throw new Error("session name is too long");
+      runtime.pi.setSessionName(command.name.trim());
+      return { name: command.name.trim() };
     }
 
     default:

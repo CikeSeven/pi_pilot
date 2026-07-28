@@ -14,7 +14,7 @@ export interface PublicOwnerState {
 }
 
 export type LeaseResult =
-  | { ok: true; lease: OwnerLease }
+  | { ok: true; lease: OwnerLease; stolenFrom?: string }
   | { ok: false; error: string };
 
 export class OwnerLeaseManager {
@@ -23,15 +23,32 @@ export class OwnerLeaseManager {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  acquire(clientId: string, ttlMs: number): LeaseResult {
+  /**
+   * 获取租约。
+   *
+   * `force` 让新客户端直接抢占:fence 严格递增,旧持有者的在途命令因此被
+   * relay 的单调 fence 判定作废。这是"隐形租约"的基础——用户不该看到
+   * 「接管失败」,更不该等 TTL 过期。
+   */
+  acquire(clientId: string, ttlMs: number, opts?: { force?: boolean }): LeaseResult {
     this.expire();
     if (this.active && this.active.clientId !== clientId) {
-      return { ok: false, error: "source is controlled by another client" };
+      if (opts?.force !== true) {
+        return { ok: false, error: "source is controlled by another client" };
+      }
+      const stolenFrom = this.active.clientId;
+      this.active = undefined;
+      const lease = this.mint(clientId, ttlMs);
+      return { ok: true, lease: { ...lease }, stolenFrom };
     }
     if (this.active) {
       this.active.expiresAt = this.now() + ttlMs;
       return { ok: true, lease: { ...this.active } };
     }
+    return { ok: true, lease: { ...this.mint(clientId, ttlMs) } };
+  }
+
+  private mint(clientId: string, ttlMs: number): OwnerLease {
     const lease: OwnerLease = {
       leaseId: crypto.randomUUID(),
       clientId,
@@ -39,7 +56,7 @@ export class OwnerLeaseManager {
       expiresAt: this.now() + ttlMs,
     };
     this.active = lease;
-    return { ok: true, lease: { ...lease } };
+    return lease;
   }
 
   renew(clientId: string, leaseId: string, fence: number, ttlMs: number): LeaseResult {

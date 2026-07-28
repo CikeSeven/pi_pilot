@@ -27,6 +27,12 @@ export interface SourceSnapshot {
   models?: JsonObject[];
   thinkingLevels?: string[];
   inFlightMessage?: JsonObject;
+  /** 桌面扩展快照透传字段:会话统计(pi SessionStats 形状)。 */
+  stats?: JsonObject;
+  /** 桌面扩展快照透传字段:可用命令列表。 */
+  commands?: JsonObject[];
+  /** 桌面扩展快照透传字段:压缩会话树。 */
+  treeSummary?: JsonObject[];
 }
 
 export interface SequencedSourceEvent {
@@ -45,6 +51,9 @@ interface SourceRecord {
   transport: SourceTransport;
   snapshot?: SourceSnapshot;
   events: SequencedSourceEvent[];
+  /** 与 events 平行的字节数组,用于字节预算裁剪。 */
+  sizes: number[];
+  bytes: number;
   lastSeq: number;
   lease: OwnerLeaseManager;
 }
@@ -53,16 +62,26 @@ export type RecordEventResult =
   | { ok: true; event: SequencedSourceEvent }
   | { ok: false; error: "missing" | "stale_epoch" | "sequence_gap" };
 
+/// `continuous` 表示 snapshot 与随后的事件是否首尾相接。
+/// 不连续 = 重放环已经把 baseSeq 之后的事件挤掉了,客户端照单全收会永久错位。
 export type SourceSync =
-  | { mode: "replay"; events: SequencedSourceEvent[] }
-  | { mode: "snapshot"; snapshot: SourceSnapshot; events: SequencedSourceEvent[] }
-  | { mode: "rpc"; baseSeq: number; events: SequencedSourceEvent[] };
+  | { mode: "replay"; events: SequencedSourceEvent[]; continuous: true }
+  | {
+      mode: "snapshot";
+      snapshot: SourceSnapshot;
+      events: SequencedSourceEvent[];
+      continuous: boolean;
+    }
+  | { mode: "rpc"; baseSeq: number; events: SequencedSourceEvent[]; continuous: true };
 
 export class SourceRegistry {
   readonly hubId = crypto.randomUUID();
   private readonly records = new Map<string, SourceRecord>();
 
-  constructor(private readonly replayCapacity = 512) {}
+  constructor(
+    private readonly replayCapacity = 1024,
+    private readonly replayByteBudget = 16 * 1024 * 1024,
+  ) {}
 
   register(descriptor: SourceDescriptor, transport: SourceTransport): SourceDescriptor {
     const previous = this.records.get(descriptor.id);
@@ -72,8 +91,13 @@ export class SourceRegistry {
       transport,
       snapshot: sameEpoch ? previous?.snapshot : undefined,
       events: sameEpoch ? [...(previous?.events ?? [])] : [],
+      sizes: sameEpoch ? [...(previous?.sizes ?? [])] : [],
+      bytes: sameEpoch ? (previous?.bytes ?? 0) : 0,
       lastSeq: sameEpoch ? (previous?.lastSeq ?? 0) : 0,
-      lease: sameEpoch ? previous!.lease : new OwnerLeaseManager(),
+      // 换 epoch 只是"事件流重来了",不代表"谁在驱动"变了。
+      // 沿用同一个 lease manager:fence 保持严格递增(旧持有者照样被作废),
+      // 而正在驱动的客户端不会因为一次 fork / 进程重启就被踢掉。
+      lease: previous?.lease ?? new OwnerLeaseManager(),
     };
     this.records.set(descriptor.id, record);
     return this.describe(descriptor.id)!;
@@ -106,12 +130,10 @@ export class SourceRegistry {
     if (epoch && epoch !== record.descriptor.epoch) {
       record.descriptor.epoch = epoch;
       record.snapshot = undefined;
-      record.events = [];
+      this.clearEvents(record);
       record.lastSeq = 0;
-      record.lease = new OwnerLeaseManager();
     }
     record.descriptor.connected = connected;
-    if (!connected) record.lease = new OwnerLeaseManager();
     return this.describe(sourceId);
   }
 
@@ -133,13 +155,13 @@ export class SourceRegistry {
     const sameEpoch = snapshot.epoch === record.descriptor.epoch;
     if (!sameEpoch) {
       record.descriptor.epoch = snapshot.epoch;
-      record.events = [];
+      this.clearEvents(record);
       record.lastSeq = 0;
-      record.lease = new OwnerLeaseManager();
     }
     record.snapshot = snapshot;
     record.lastSeq = Math.max(record.lastSeq, snapshot.baseSeq);
-    record.events = record.events.filter(
+    this.filterEvents(
+      record,
       (event) => event.sourceEpoch === snapshot.epoch && event.seq > snapshot.baseSeq,
     );
     const state = snapshot.state;
@@ -198,20 +220,37 @@ export class SourceRegistry {
       cursor.sourceId === sourceId &&
       cursor.sourceEpoch === record.descriptor.epoch;
     if (matchingCursor && this.canReplay(record, cursor.seq)) {
-      return { mode: "replay", events: record.events.filter((event) => event.seq > cursor.seq) };
-    }
-    if (record.snapshot) {
       return {
-        mode: "snapshot",
-        snapshot: record.snapshot,
-        events: record.events.filter((event) => event.seq > record.snapshot!.baseSeq),
+        mode: "replay",
+        events: record.events.filter((event) => event.seq > cursor.seq),
+        continuous: true,
       };
     }
-    return { mode: "rpc", baseSeq: record.lastSeq, events: [] };
+    if (record.snapshot) {
+      const snapshot = record.snapshot;
+      return {
+        mode: "snapshot",
+        snapshot,
+        events: record.events.filter((event) => event.seq > snapshot.baseSeq),
+        continuous: this.isSnapshotContinuous(record),
+      };
+    }
+    return { mode: "rpc", baseSeq: record.lastSeq, events: [], continuous: true };
   }
 
-  acquire(sourceId: string, clientId: string, ttlMs: number): LeaseResult | undefined {
-    return this.records.get(sourceId)?.lease.acquire(clientId, ttlMs);
+  /** hub 用来判断是否需要向桌面索要新快照。 */
+  snapshotIsContinuous(sourceId: string): boolean {
+    const record = this.records.get(sourceId);
+    return record ? this.isSnapshotContinuous(record) : false;
+  }
+
+  acquire(
+    sourceId: string,
+    clientId: string,
+    ttlMs: number,
+    opts?: { force?: boolean },
+  ): LeaseResult | undefined {
+    return this.records.get(sourceId)?.lease.acquire(clientId, ttlMs, opts);
   }
 
   renew(
@@ -272,10 +311,58 @@ export class SourceRegistry {
     };
   }
 
+  /// 快照与事件流是否首尾相接:snapshot 之后的第一个事件必须正好是 baseSeq+1,
+  /// 且最后一个必须等于 lastSeq。这就是 canReplay 一直缺席于快照分支的那道校验。
+  private isSnapshotContinuous(record: SourceRecord): boolean {
+    const snapshot = record.snapshot;
+    if (!snapshot) return false;
+    if (snapshot.epoch !== record.descriptor.epoch) return false;
+    const events = record.events.filter((event) => event.seq > snapshot.baseSeq);
+    if (events.length === 0) return record.lastSeq === snapshot.baseSeq;
+    return (
+      events[0]!.seq === snapshot.baseSeq + 1 &&
+      events[events.length - 1]!.seq === record.lastSeq
+    );
+  }
+
+  private clearEvents(record: SourceRecord): void {
+    record.events = [];
+    record.sizes = [];
+    record.bytes = 0;
+  }
+
+  /** 保留 events/sizes/bytes 三者一致的过滤。 */
+  private filterEvents(
+    record: SourceRecord,
+    keep: (event: SequencedSourceEvent) => boolean,
+  ): void {
+    const events: SequencedSourceEvent[] = [];
+    const sizes: number[] = [];
+    let bytes = 0;
+    for (const [index, event] of record.events.entries()) {
+      if (!keep(event)) continue;
+      const size = record.sizes[index] ?? 0;
+      events.push(event);
+      sizes.push(size);
+      bytes += size;
+    }
+    record.events = events;
+    record.sizes = sizes;
+    record.bytes = bytes;
+  }
+
   private pushEvent(record: SourceRecord, event: SequencedSourceEvent): void {
+    const bytes = JSON.stringify(event.payload).length;
     record.events.push(event);
-    if (record.events.length > this.replayCapacity) {
-      record.events.splice(0, record.events.length - this.replayCapacity);
+    record.sizes.push(bytes);
+    record.bytes += bytes;
+    // 条数上限 + 字节预算双限:message_update 携带完整消息,只按条数裁剪会吃掉几十 MB。
+    while (
+      record.events.length > this.replayCapacity ||
+      (record.bytes > this.replayByteBudget && record.events.length > 1)
+    ) {
+      record.bytes -= record.sizes.shift() ?? 0;
+      record.events.shift();
     }
   }
 

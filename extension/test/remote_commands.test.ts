@@ -95,3 +95,29 @@ test("unknown commands and unavailable credentials are rejected", async () => {
     /unsupported desktop command/,
   );
 });
+
+test("set_session_name renames via pi API", async () => {
+  const { value, calls } = runtime(true);
+  (value.pi as any).setSessionName = (name: string) => {
+    calls.push({ name: "rename", value: name });
+  };
+  const result = await executeRemoteCommand(
+    { type: "set_session_name", name: "  新名字  " },
+    value,
+  );
+  assert.deepEqual(result, { name: "新名字" });
+  assert.deepEqual(calls.at(-1), { name: "rename", value: "新名字" });
+});
+
+test("set_session_name rejects empty and oversized names", async () => {
+  const { value } = runtime(true);
+  (value.pi as any).setSessionName = () => {};
+  await assert.rejects(
+    executeRemoteCommand({ type: "set_session_name", name: "   " }, value),
+    /non-empty/,
+  );
+  await assert.rejects(
+    executeRemoteCommand({ type: "set_session_name", name: "x".repeat(300) }, value),
+    /too long/,
+  );
+});

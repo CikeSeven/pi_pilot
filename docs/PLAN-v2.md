@@ -84,7 +84,7 @@ pi RPC 不够用,新增 **bridge 自有命令**(type 前缀 `bridge_`,与 pi 透
 其他改动:
 - token 从"每次随机"改为**首次生成后写入 config.json 复用**(持久化要求;仍可 env 覆盖)
 - 去掉"固定 session-id 文件"的单一绑定,改为 pi_process 支持重启时换 cwd/session 参数
-- 单进程架构保持不变;**多 pi 进程池(多目录并行)明确留到 v3**
+- ~~单进程架构保持不变~~;**多 pi 进程池已在 v3 交付**(`bridge/src/pi_pool.ts`)
 
 ### 3.4 设置页内容
 
@@ -156,8 +156,13 @@ pi RPC 不够用,新增 **bridge 自有命令**(type 前缀 `bridge_`,与 pi 透
 
 ## 六、明确不做(v3 候选)
 
-- 多 pi 进程池 / 多目录并行
-- 扩展 UI 交互回写(select/confirm/input 弹窗)
-- Markdown/代码高亮渲染、图片附件
+> **状态更新(v3 已交付)**:下面前四项已经做完 —— 进程池见 `bridge/src/pi_pool.ts`,
+> 扩展 UI 回写见 `ui_request_card.dart`,高亮/diff 见 `code_block.dart`/`diff_view.dart`,
+> 会话搜索与会话树见 `sessions_sheet.dart`/`session_tree_sheet.dart`。
+> 本文件保留为 v2 的历史记录,新规划见根目录的 v3 计划。
+
+- ~~多 pi 进程池 / 多目录并行~~ → v3 已交付
+- ~~扩展 UI 交互回写(select/confirm/input 弹窗)~~ → v3 已交付
+- ~~Markdown/代码高亮渲染~~ → v3 已交付(图片附件仍未做)
+- ~~会话搜索、会话树可视化~~ → v3 已交付
 - Tailscale 自动发现、TLS
-- 会话搜索、会话树可视化(get_tree 分支图)

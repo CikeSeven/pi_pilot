@@ -8,6 +8,10 @@ export interface RelayConfig {
   label?: string;
   reconnectMinMs: number;
   reconnectMaxMs: number;
+  /// 流式期间每累积这么多事件就自发一次保活快照。
+  streamSnapshotEvents: number;
+  /// 流式期间距上次快照超过这么久就自发一次(即使事件不多)。
+  streamSnapshotMaxMs: number;
 }
 
 interface FileConfig {
@@ -16,6 +20,8 @@ interface FileConfig {
   label?: string;
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
+  streamSnapshotEvents?: number;
+  streamSnapshotMaxMs?: number;
 }
 
 export const RELAY_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "pipilot-sync.json");
@@ -53,5 +59,7 @@ export function loadRelayConfig(): RelayConfig | undefined {
     label: process.env.PIPILOT_DESKTOP_LABEL ?? file.label,
     reconnectMinMs: positiveInt(file.reconnectMinMs, 500),
     reconnectMaxMs: positiveInt(file.reconnectMaxMs, 15_000),
+    streamSnapshotEvents: positiveInt(file.streamSnapshotEvents, 192),
+    streamSnapshotMaxMs: positiveInt(file.streamSnapshotMaxMs, 15_000),
   };
 }

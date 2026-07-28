@@ -1,0 +1,98 @@
+import 'package:flutter/material.dart';
+
+/// re_highlight 的 class -> TextStyle 映射(Xcode 风,深/浅两套)。
+/// 键名对应 highlight.js scope(无 hljs- 前缀)。
+Map<String, TextStyle> piHighlightTheme(Brightness brightness) =>
+    brightness == Brightness.dark ? _dark : _light;
+
+// 浅色:Xcode Default(#F2F2F7 井上)
+const _light = <String, TextStyle>{
+  'root': TextStyle(color: Color(0xFF1C1C1E)),
+  'keyword': TextStyle(color: Color(0xFF9B2393)),
+  'doctag': TextStyle(color: Color(0xFF9B2393)),
+  'template-tag': TextStyle(color: Color(0xFF9B2393)),
+  'string': TextStyle(color: Color(0xFFC41A16)),
+  'regexp': TextStyle(color: Color(0xFFC41A16)),
+  'meta-string': TextStyle(color: Color(0xFFC41A16)),
+  'comment': TextStyle(color: Color(0xFF5D6C79), fontStyle: FontStyle.italic),
+  'quote': TextStyle(color: Color(0xFF5D6C79), fontStyle: FontStyle.italic),
+  'number': TextStyle(color: Color(0xFF1C00CF)),
+  'literal': TextStyle(color: Color(0xFF1C00CF)),
+  'symbol': TextStyle(color: Color(0xFF1C00CF)),
+  'bullet': TextStyle(color: Color(0xFF1C00CF)),
+  'link': TextStyle(color: Color(0xFF1C00CF)),
+  'meta': TextStyle(color: Color(0xFF1C00CF)),
+  'title': TextStyle(color: Color(0xFF326D74)),
+  'title.function_': TextStyle(color: Color(0xFF326D74)),
+  'title.class_': TextStyle(color: Color(0xFF326D74)),
+  'class-title': TextStyle(color: Color(0xFF326D74)),
+  'section': TextStyle(color: Color(0xFF0062CC), fontWeight: FontWeight.w600),
+  'built_in': TextStyle(color: Color(0xFF3900A0)),
+  'type': TextStyle(color: Color(0xFF3900A0)),
+  'attr': TextStyle(color: Color(0xFF3900A0)),
+  'attribute': TextStyle(color: Color(0xFF3900A0)),
+  'variable': TextStyle(color: Color(0xFF3900A0)),
+  'template-variable': TextStyle(color: Color(0xFF3900A0)),
+  'selector-tag': TextStyle(color: Color(0xFF248A3D)),
+  'selector-class': TextStyle(color: Color(0xFF248A3D)),
+  'selector-id': TextStyle(color: Color(0xFF248A3D)),
+  'selector-attr': TextStyle(color: Color(0xFF248A3D)),
+  'selector-pseudo': TextStyle(color: Color(0xFF248A3D)),
+  'name': TextStyle(color: Color(0xFF248A3D)),
+  'addition': TextStyle(
+    color: Color(0xFF248A3D),
+    backgroundColor: Color(0xFFE3F7E8),
+  ),
+  'deletion': TextStyle(
+    color: Color(0xFFD70015),
+    backgroundColor: Color(0xFFFFE4E2),
+  ),
+  'emphasis': TextStyle(fontStyle: FontStyle.italic),
+  'strong': TextStyle(fontWeight: FontWeight.bold),
+};
+
+// 深色:Xcode Dark(#101012 井上)
+const _dark = <String, TextStyle>{
+  'root': TextStyle(color: Color(0xFFF2F2F7)),
+  'keyword': TextStyle(color: Color(0xFFFF7AB2)),
+  'doctag': TextStyle(color: Color(0xFFFF7AB2)),
+  'template-tag': TextStyle(color: Color(0xFFFF7AB2)),
+  'string': TextStyle(color: Color(0xFFFF8170)),
+  'regexp': TextStyle(color: Color(0xFFFF8170)),
+  'meta-string': TextStyle(color: Color(0xFFFF8170)),
+  'comment': TextStyle(color: Color(0xFF7F8C98), fontStyle: FontStyle.italic),
+  'quote': TextStyle(color: Color(0xFF7F8C98), fontStyle: FontStyle.italic),
+  'number': TextStyle(color: Color(0xFFD9C97C)),
+  'literal': TextStyle(color: Color(0xFFD9C97C)),
+  'symbol': TextStyle(color: Color(0xFFD9C97C)),
+  'bullet': TextStyle(color: Color(0xFFD9C97C)),
+  'link': TextStyle(color: Color(0xFFD9C97C)),
+  'meta': TextStyle(color: Color(0xFFD9C97C)),
+  'title': TextStyle(color: Color(0xFFDABAFF)),
+  'title.function_': TextStyle(color: Color(0xFFDABAFF)),
+  'title.class_': TextStyle(color: Color(0xFFDABAFF)),
+  'class-title': TextStyle(color: Color(0xFFDABAFF)),
+  'section': TextStyle(color: Color(0xFF47A3FF), fontWeight: FontWeight.w600),
+  'built_in': TextStyle(color: Color(0xFFFFB747)),
+  'type': TextStyle(color: Color(0xFFFFB747)),
+  'attr': TextStyle(color: Color(0xFFFFB747)),
+  'attribute': TextStyle(color: Color(0xFFFFB747)),
+  'variable': TextStyle(color: Color(0xFFFFB747)),
+  'template-variable': TextStyle(color: Color(0xFFFFB747)),
+  'selector-tag': TextStyle(color: Color(0xFF64DC82)),
+  'selector-class': TextStyle(color: Color(0xFF64DC82)),
+  'selector-id': TextStyle(color: Color(0xFF64DC82)),
+  'selector-attr': TextStyle(color: Color(0xFF64DC82)),
+  'selector-pseudo': TextStyle(color: Color(0xFF64DC82)),
+  'name': TextStyle(color: Color(0xFF64DC82)),
+  'addition': TextStyle(
+    color: Color(0xFF64DC82),
+    backgroundColor: Color(0xFF1F3D28),
+  ),
+  'deletion': TextStyle(
+    color: Color(0xFFFF736B),
+    backgroundColor: Color(0xFF452323),
+  ),
+  'emphasis': TextStyle(fontStyle: FontStyle.italic),
+  'strong': TextStyle(fontWeight: FontWeight.bold),
+};

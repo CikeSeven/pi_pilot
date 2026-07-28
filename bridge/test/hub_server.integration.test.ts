@@ -4,6 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
+import { HUB_PROTOCOL_VERSION } from "../src/hub_protocol.js";
 
 type Frame = Record<string, any>;
 
@@ -144,7 +145,7 @@ test("Source Hub isolates clients and fences desktop mutations", async () => {
     const phoneB = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
     peers.push(phoneA, phoneB);
     const hello = await phoneA.waitFor((frame) => frame.type === "bridge_hello");
-    assert.equal(hello.version, 2);
+    assert.equal(hello.version, HUB_PROTOCOL_VERSION);
 
     const unselected = await phoneA.request("get_state");
     assert.equal(unselected.success, false);
@@ -181,7 +182,11 @@ test("Source Hub isolates clients and fences desktop mutations", async () => {
 
     const acquired = await phoneA.request("hub_acquire_owner", { ttlMs: 10_000 });
     assert.equal(acquired.success, true);
-    const contested = await phoneB.request("hub_acquire_owner", { ttlMs: 10_000 });
+    // force:false 仍然尊重现有租约
+    const contested = await phoneB.request("hub_acquire_owner", {
+      ttlMs: 10_000,
+      force: false,
+    });
     assert.equal(contested.success, false);
 
     const lease = acquired.data;

@@ -11,6 +11,10 @@ typedef SettingsData = ({
   String? thinkingLevel,
   bool autoRetry,
   String? preferredSourceId,
+  List<String> recentDirs,
+  List<String> quickPrompts,
+  bool notificationsEnabled,
+  String accent,
 });
 
 /// SharedPreferences 统一持久化层。所有配置键集中在这里。
@@ -24,6 +28,10 @@ class SettingsRepository {
   static const _kThinkingLevel = 'pi.thinkingLevel';
   static const _kAutoRetry = 'pi.autoRetry';
   static const _kPreferredSourceId = 'hub.preferredSourceId';
+  static const _kRecentDirs = 'sessions.recentDirs';
+  static const _kQuickPrompts = 'ui.quickPrompts';
+  static const _kNotificationsEnabled = 'ui.notificationsEnabled';
+  static const _kAccent = 'ui.accentColor';
 
   Future<SettingsData> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -37,6 +45,10 @@ class SettingsRepository {
       thinkingLevel: prefs.getString(_kThinkingLevel),
       autoRetry: prefs.getBool(_kAutoRetry) ?? true,
       preferredSourceId: prefs.getString(_kPreferredSourceId),
+      recentDirs: prefs.getStringList(_kRecentDirs) ?? const [],
+      quickPrompts: prefs.getStringList(_kQuickPrompts) ?? const [],
+      notificationsEnabled: prefs.getBool(_kNotificationsEnabled) ?? true,
+      accent: prefs.getString(_kAccent) ?? 'blue',
     );
   }
 
@@ -77,5 +89,25 @@ class SettingsRepository {
   Future<void> savePreferredSourceId(String sourceId) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kPreferredSourceId, sourceId);
+  }
+
+  Future<void> saveRecentDirs(List<String> dirs) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_kRecentDirs, dirs);
+  }
+
+  Future<void> saveQuickPrompts(List<String> prompts) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_kQuickPrompts, prompts);
+  }
+
+  Future<void> saveNotificationsEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kNotificationsEnabled, enabled);
+  }
+
+  Future<void> saveAccent(String name) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kAccent, name);
   }
 }

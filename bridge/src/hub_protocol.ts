@@ -1,7 +1,10 @@
-export const HUB_PROTOCOL_VERSION = 2;
+export const HUB_PROTOCOL_VERSION = 3;
 export const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 export const MAX_DESKTOP_MESSAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_BUFFERED_SOCKET_BYTES = 2 * 1024 * 1024;
+
+/** 向桌面 relay 索要新快照的等待上限(远小于 App 的 20s 请求超时)。 */
+export const SNAPSHOT_REQUEST_TIMEOUT_MS = 4_000;
 
 export type JsonObject = Record<string, unknown>;
 
@@ -29,6 +32,10 @@ const READ_ONLY_SOURCE_COMMANDS = new Set([
   "get_available_models",
   "get_available_thinking_levels",
   "get_session_stats",
+  "get_tree",
+  "get_commands",
+  "get_fork_messages",
+  "get_last_assistant_text",
 ]);
 
 const DESKTOP_MUTATION_COMMANDS = new Set([
@@ -36,6 +43,9 @@ const DESKTOP_MUTATION_COMMANDS = new Set([
   "abort",
   "set_model",
   "set_thinking_level",
+  "set_session_name",
+  // 压缩上下文是纯粹的会话内操作,不会把电脑上正在用的会话抽走
+  "compact",
 ]);
 
 export function isReadOnlySourceCommand(type: string): boolean {

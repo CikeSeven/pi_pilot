@@ -1,5 +1,5 @@
 name: pi_pilot
-description: "A new Flutter project."
+description: "PiPilot — remote control for the pi coding agent."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -37,6 +37,10 @@ dependencies:
   flutter_riverpod: ^3.3.2
   web_socket_channel: ^3.0.3
   shared_preferences: ^2.5.5
+  gpt_markdown: ^1.1.8
+  re_highlight: ^0.0.3
+  share_plus: ^12.0.1
+  flutter_local_notifications: ^22.2.0
 
 dev_dependencies:
   flutter_test:
@@ -59,6 +63,17 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMono-Italic.ttf
+          style: italic
+        - asset: assets/fonts/JetBrainsMono-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700
 
   # To add assets to your application, add an assets section, like this:
   # assets:

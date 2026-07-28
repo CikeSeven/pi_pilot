@@ -57,6 +57,13 @@ export class PiProcess {
     this.start();
   }
 
+  /** 进程退出路径的兜底:同步 SIGKILL,不等待。 */
+  killSync(): void {
+    this.stopping = true;
+    this.proc?.kill("SIGKILL");
+    this.proc = null;
+  }
+
   async stopAndWait(timeoutMs = 4000): Promise<void> {
     const proc = this.proc;
     if (!proc) return;
@@ -79,7 +86,8 @@ export class PiProcess {
     if (this.alive) return;
     let proc: ChildProcessWithoutNullStreams;
     try {
-      proc = spawn("pi", this.args, {
+      // PIPILOT_PI_BIN 允许测试环境注入假 pi
+      proc = spawn(process.env.PIPILOT_PI_BIN ?? "pi", this.args, {
         cwd: this.cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: process.env,

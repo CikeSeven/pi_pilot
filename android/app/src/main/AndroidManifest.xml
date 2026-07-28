@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Bridge traffic is plaintext ws:// on LAN/Tailscale; required for release builds. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Android 13+ 通知运行时权限(任务完成/扩展等待输入提醒) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="PiPilot"
         android:name="${applicationName}"
