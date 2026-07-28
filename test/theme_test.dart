@@ -37,6 +37,33 @@ void main() {
       expect(buildLightTheme().brightness, Brightness.light);
     });
 
+    test('角标默认色不是错误红', () {
+      // 角标最常见的用途是「标记此处」(抽屉里的「当前」会话),那不是错误。
+      // 之前默认 scheme.error,结果「当前」两个字被涂成警告红,读起来像出了问题。
+      // 真正表示错误的角标都在各自现场显式指定 error 色,所以默认必须中性。
+      for (final accent in AppAccent.values) {
+        for (final theme in [buildLightTheme(accent), buildDarkTheme(accent)]) {
+          final scheme = theme.colorScheme;
+          final badge = theme.badgeTheme;
+          expect(badge.backgroundColor, isNot(scheme.error));
+          expect(badge.backgroundColor, isNot(scheme.errorContainer));
+          expect(badge.backgroundColor, scheme.primary);
+          expect(badge.textColor, scheme.onPrimary);
+
+          // 角标压在选中态的 secondaryContainer 上,分不开就等于没有角标
+          expect(
+            _contrast(badge.backgroundColor!, scheme.secondaryContainer),
+            greaterThanOrEqualTo(3.0),
+          );
+          // 角标自己的字要能读
+          expect(
+            _contrast(badge.textColor!, badge.backgroundColor!),
+            greaterThanOrEqualTo(4.5),
+          );
+        }
+      }
+    });
+
     test('ansi 色板固定 16 色', () {
       expect(PiColors.dark.ansi, hasLength(16));
       expect(PiColors.light.ansi, hasLength(16));

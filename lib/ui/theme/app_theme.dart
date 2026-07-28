@@ -150,8 +150,13 @@ ThemeData _build(
       constraints: const BoxConstraints(minHeight: 48),
     ),
     badgeTheme: BadgeThemeData(
-      backgroundColor: scheme.error,
-      textColor: scheme.onError,
+      // 默认是中性的强调色,不是错误红。角标最常见的用途是「标记此处」
+      // (当前会话、未读数),那不是错误;之前默认 error 的结果是抽屉里
+      // 「当前」两个字被涂成警告红,读起来像出了问题。
+      // 真正表示错误的角标(bash 非零退出码、有新消息的红点)都在各自
+      // 现场显式指定 error 色,所以这里改默认不会动到它们。
+      backgroundColor: scheme.primary,
+      textColor: scheme.onPrimary,
       // M3 默认 16dp 会纵向裁切 12sp 等宽字——这是必需项不是装饰
       largeSize: 22,
       padding: const EdgeInsets.symmetric(horizontal: 8),
