@@ -169,7 +169,8 @@ class _TreeNodeTile extends ConsumerWidget {
       _ => (Icons.circle_outlined, colors.onSurfaceVariant),
     };
 
-    return InkWell(
+    final indent = 16.0 + math.min(row.depth, 10) * 18;
+    final tile = InkWell(
       onTap: canNavigate && !onCurrentPath
           ? () => _confirmNavigate(context, ref, node)
           : null,
@@ -180,7 +181,7 @@ class _TreeNodeTile extends ConsumerWidget {
         padding: EdgeInsets.only(
           // 缩进必须封顶:分叉树的 depth 没有上界,线性增长的 padding
           // 会把负约束喂给 Padding,窄屏上直接 assert 崩溃
-          left: 16.0 + math.min(row.depth, 10) * 18,
+          left: indent,
           right: 12,
           top: 5,
           bottom: 5,
@@ -259,6 +260,40 @@ class _TreeNodeTile extends ConsumerWidget {
           ],
         ),
       ),
+    );
+
+    if (node.collapsedBefore <= 0) return tile;
+    // 桌面端剪掉了这段线性历史(见 relay.ts buildTreeSummary)。这里只标数量,
+    // 不给可点的占位 —— 被折叠的节点没有传过来 id,点了没法回退到正确位置。
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.only(left: indent, right: 12, top: 4, bottom: 4),
+          child: Row(
+            children: [
+              SizedBox(
+                height: 20,
+                child: Center(
+                  child: Icon(
+                    Icons.more_vert,
+                    size: 14,
+                    color: colors.onSurfaceVariant.withValues(alpha: 0.6),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '省略 ${node.collapsedBefore} 条',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: colors.onSurfaceVariant.withValues(alpha: 0.7),
+                ),
+              ),
+            ],
+          ),
+        ),
+        tile,
+      ],
     );
   }
 

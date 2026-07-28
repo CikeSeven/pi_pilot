@@ -208,6 +208,7 @@ class SessionTreeNode {
     this.preview = '',
     this.label,
     this.role,
+    this.collapsedBefore = 0,
     this.children = const [],
   });
 
@@ -220,6 +221,13 @@ class SessionTreeNode {
 
   /// message 节点的角色(user/assistant/…)。
   final String? role;
+
+  /// 本节点与上一个保留节点之间被折叠掉的节点数。
+  ///
+  /// 桌面端的 treeSummary 有字节与条数预算,千条会话会剪掉线性中间节点。
+  /// 被剪掉的不插占位节点(占位没有真实 entry id,点下去会回退到错的地方),
+  /// 只把数量记在这里,由界面提示「省略 N 条」。
+  final int collapsedBefore;
   final List<SessionTreeNode> children;
 }
 
@@ -1355,6 +1363,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       role: summary
           ? entry['role'] as String?
           : ((entry['message'] as Map?)?['role'] as String?),
+      collapsedBefore: (node['collapsedBefore'] as num?)?.toInt() ?? 0,
       children: children,
     );
   }
