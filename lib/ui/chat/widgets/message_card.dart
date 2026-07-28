@@ -107,7 +107,9 @@ class MessageCard extends StatelessWidget {
                           if (subtitle case final widget?)
                             DefaultTextStyle.merge(
                               style: titleStyle.copyWith(
-                                color: titleStyle.color?.withValues(alpha: 0.75),
+                                color: titleStyle.color?.withValues(
+                                  alpha: 0.75,
+                                ),
                               ),
                               overflow: TextOverflow.ellipsis,
                               maxLines: 1,

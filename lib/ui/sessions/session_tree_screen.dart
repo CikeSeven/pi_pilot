@@ -191,9 +191,7 @@ class _TreeNodeTile extends ConsumerWidget {
             // 与首行文本垂直居中对齐,而不是随多行文本贴顶
             SizedBox(
               height: 20,
-              child: Center(
-                child: Icon(icon, size: 16, color: iconColor),
-              ),
+              child: Center(child: Icon(icon, size: 16, color: iconColor)),
             ),
             const SizedBox(width: 8),
             Expanded(

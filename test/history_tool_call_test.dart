@@ -29,10 +29,7 @@ void main() {
       expect(block['id'], isNotNull);
       expect(block['name'], 'bash');
       expect(block['arguments'], isA<Map>());
-      expect(
-        (block['arguments'] as Map)['command'],
-        'pwd && ls -la',
-      );
+      expect((block['arguments'] as Map)['command'], 'pwd && ls -la');
     });
 
     test('_clip 对所有分支都截断,不只是 JSON 兜底', () {

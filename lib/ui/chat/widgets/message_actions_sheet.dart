@@ -70,10 +70,7 @@ Future<void> showMessageActions(
                   if (time != null)
                     Padding(
                       padding: const EdgeInsets.only(right: 8),
-                      child: Text(
-                        formatTimeFull(time),
-                        style: timeStyle,
-                      ),
+                      child: Text(formatTimeFull(time), style: timeStyle),
                     ),
                 ],
               ),
@@ -154,9 +151,7 @@ Future<void> showMessageActions(
                         Navigator.pop(sheetContext);
                         final ok = await notifier.forkFrom(item.entryId!);
                         messenger.showSnackBar(
-                          SnackBar(
-                            content: Text(ok ? '已另开一个会话' : '操作失败或被取消'),
-                          ),
+                          SnackBar(content: Text(ok ? '已另开一个会话' : '操作失败或被取消')),
                         );
                       },
                     ),

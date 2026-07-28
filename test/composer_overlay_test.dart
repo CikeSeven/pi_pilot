@@ -48,11 +48,7 @@ void main() {
 
       // 列表视口(Stack 的最底边)与输入卡之间不该有内容的碰撞:
       // 留白至少等于卡高(实测,不是写死的 96)
-      expect(
-        card.height,
-        greaterThan(0),
-        reason: 'inset=$inset 时输入卡没有高度',
-      );
+      expect(card.height, greaterThan(0), reason: 'inset=$inset 时输入卡没有高度');
       expect(
         card.bottom,
         lessThanOrEqualTo(800),
@@ -61,9 +57,7 @@ void main() {
     }
   });
 
-  testWidgets('输入卡是悬浮的(在它和消息流之间有 Stack,不是兄弟关系)', (
-    tester,
-  ) async {
+  testWidgets('输入卡是悬浮的(在它和消息流之间有 Stack,不是兄弟关系)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();

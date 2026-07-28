@@ -50,8 +50,7 @@ class _SessionDrawerState extends ConsumerState<SessionDrawer> {
       error = failure.toString();
     }
     if (ok) return;
-    final reason =
-        error ?? ref.read(piSessionProvider).error ?? '连接这个窗口失败';
+    final reason = error ?? ref.read(piSessionProvider).error ?? '连接这个窗口失败';
     messenger.showSnackBar(SnackBar(content: Text(reason)));
   }
 
@@ -96,7 +95,8 @@ class _SessionDrawerState extends ConsumerState<SessionDrawer> {
                 ),
               ),
             ),
-            Expanded(child: _body(theme, state, connected, windows)),            Divider(
+            Expanded(child: _body(theme, state, connected, windows)),
+            Divider(
               height: 1,
               indent: 28,
               endIndent: 28,

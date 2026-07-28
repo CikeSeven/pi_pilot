@@ -77,9 +77,9 @@ class _AssistantErrorBadge extends StatelessWidget {
           Text(
             '响应已中断',
             style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: colors.error,
-                  fontWeight: FontWeight.w500,
-                ),
+              color: colors.error,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ],
       ),
