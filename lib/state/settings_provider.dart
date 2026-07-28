@@ -18,6 +18,7 @@ class AppSettings {
     this.thinkingLevel,
     this.autoRetry = true,
     this.preferredSourceId,
+    this.preferredSessionId,
     this.recentDirs = const [],
     this.quickPrompts = const [],
     this.notificationsEnabled = true,
@@ -35,6 +36,10 @@ class AppSettings {
   final String? thinkingLevel;
   final bool autoRetry;
   final String? preferredSourceId;
+
+  /// 偏好源所属的会话 id。sourceId 里嵌着桌面 pi 的 PID,重启后必然变化;
+  /// sessionId 不变,用作 sourceId 失配时的回退依据。
+  final String? preferredSessionId;
 
   /// 最近使用的工作目录(MRU,上限 8)。
   final List<String> recentDirs;
@@ -65,6 +70,7 @@ class AppSettings {
     String? thinkingLevel,
     bool? autoRetry,
     String? preferredSourceId,
+    String? preferredSessionId,
     List<String>? recentDirs,
     List<String>? quickPrompts,
     bool? notificationsEnabled,
@@ -82,6 +88,7 @@ class AppSettings {
       thinkingLevel: thinkingLevel ?? this.thinkingLevel,
       autoRetry: autoRetry ?? this.autoRetry,
       preferredSourceId: preferredSourceId ?? this.preferredSourceId,
+      preferredSessionId: preferredSessionId ?? this.preferredSessionId,
       recentDirs: recentDirs ?? this.recentDirs,
       quickPrompts: quickPrompts ?? this.quickPrompts,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
@@ -122,6 +129,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
       thinkingLevel: data.thinkingLevel,
       autoRetry: data.autoRetry,
       preferredSourceId: data.preferredSourceId,
+      preferredSessionId: data.preferredSessionId,
       recentDirs: data.recentDirs,
       quickPrompts: data.quickPrompts,
       notificationsEnabled: data.notificationsEnabled,
@@ -167,9 +175,14 @@ class SettingsNotifier extends Notifier<AppSettings> {
     await _repo.saveAutoRetry(enabled);
   }
 
-  Future<void> setPreferredSourceId(String sourceId) async {
-    state = state.copyWith(preferredSourceId: sourceId);
-    await _repo.savePreferredSourceId(sourceId);
+  /// 记住选中的源。同时存 sessionId:sourceId 包含 PID,桌面 pi 重启后就失效,
+  /// 回退到 sessionId 才能在重启后仍然自动选中同一个会话。
+  Future<void> setPreferredSource(String sourceId, String? sessionId) async {
+    state = state.copyWith(
+      preferredSourceId: sourceId,
+      preferredSessionId: sessionId,
+    );
+    await _repo.savePreferredSource(sourceId, sessionId);
   }
 
   /// 记录最近使用目录(去重置顶,上限 8)。

@@ -883,7 +883,9 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
     if (persist) {
       unawaited(
-        ref.read(settingsProvider.notifier).setPreferredSourceId(selected.id),
+        ref
+            .read(settingsProvider.notifier)
+            .setPreferredSource(selected.id, selected.sessionId),
       );
     }
     await _syncSelectedSource(forceFull: true, generation: gen);
@@ -933,7 +935,9 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 磁盘 IO 不能挡在 select 与 sync 之间
     if (persist) {
       unawaited(
-        ref.read(settingsProvider.notifier).setPreferredSourceId(selected.id),
+        ref
+            .read(settingsProvider.notifier)
+            .setPreferredSource(selected.id, selected.sessionId),
       );
     }
     await _syncSelectedSource(forceFull: true, generation: gen);
@@ -1093,21 +1097,47 @@ class PiSessionNotifier extends Notifier<PiState> {
       return;
     }
     final available = await refreshSources();
-    final preferred = ref.read(settingsProvider).preferredSourceId;
+    final settings = ref.read(settingsProvider);
+    final preferred = settings.preferredSourceId;
+    final preferredSession = settings.preferredSessionId;
+    final connectedDesktops = available
+        .where((source) => source.isDesktop && source.connected)
+        .toList();
+
+    // sourceId 嵌着桌面 pi 的 PID,桌面重启后必然失配。以前失配就直接 clearSource,
+    // App 停在“连接中”且 selectedSourceId 永远为空 —— 后台 watcher 也因此起不来。
+    // 改为逐级回退,并把命中结果重新写回偏好实现自愈。
     SourceInfo? target;
+    var healPreference = false;
+
+    // 1) 精确命中原 sourceId
     if (preferred != null) {
       target = available
           .where((source) => source.id == preferred && source.connected)
           .firstOrNull;
-    } else {
-      final desktops = available
-          .where((source) => source.isDesktop && source.connected)
-          .toList();
-      if (desktops.length == 1) target = desktops.single;
     }
+    // 2) 回退到同一会话:sessionId 跳过重启仍然稳定
+    if (target == null && preferredSession != null) {
+      target = available
+          .where(
+            (source) =>
+                source.connected && source.sessionId == preferredSession,
+          )
+          .firstOrNull;
+      if (target != null) healPreference = true;
+    }
+    // 3) 只有一个桌面端时直接用它(无歧义)
+    if (target == null && connectedDesktops.length == 1) {
+      target = connectedDesktops.single;
+      healPreference = true;
+    }
+
     unawaited(refreshHubSessions());
     if (target != null) {
-      await selectSource(target.id, persist: preferred == null);
+      await selectSource(
+        target.id,
+        persist: healPreference || preferred == null,
+      );
     } else {
       _resetConversation();
       state = state.copyWith(clearSource: true, sources: available);

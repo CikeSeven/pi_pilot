@@ -31,7 +31,7 @@ void main() {
     final repo = SettingsRepository();
     await repo.saveConnection(host: '10.0.0.2', port: 9377, token: 'abc');
     await repo.saveThemeMode('dark');
-    await repo.savePreferredSourceId('desktop:test');
+    await repo.savePreferredSource('desktop:test', 'sess-1');
     await repo.saveModelPreference(
       provider: 'kimi-coding',
       modelId: 'k3',
@@ -44,6 +44,7 @@ void main() {
     expect(data.token, 'abc');
     expect(data.themeMode, 'dark');
     expect(data.preferredSourceId, 'desktop:test');
+    expect(data.preferredSessionId, 'sess-1');
     expect(data.modelId, 'k3');
     expect(data.thinkingLevel, 'high');
   });

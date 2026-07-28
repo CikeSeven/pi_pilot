@@ -16,6 +16,7 @@ typedef SettingsData = ({
   bool notificationsEnabled,
   bool notificationVibrationEnabled,
   String accent,
+  String? preferredSessionId,
 });
 
 /// SharedPreferences 统一持久化层。所有配置键集中在这里。
@@ -29,6 +30,9 @@ class SettingsRepository {
   static const _kThinkingLevel = 'pi.thinkingLevel';
   static const _kAutoRetry = 'pi.autoRetry';
   static const _kPreferredSourceId = 'hub.preferredSourceId';
+  // sourceId 里嵌着桌面 pi 的 PID,重启后必然变化。sessionId 不变,
+  // 用它作为偏好源失配时的回退依据。
+  static const _kPreferredSessionId = 'hub.preferredSessionId';
   static const _kRecentDirs = 'sessions.recentDirs';
   static const _kQuickPrompts = 'ui.quickPrompts';
   static const _kNotificationsEnabled = 'ui.notificationsEnabled';
@@ -54,6 +58,7 @@ class SettingsRepository {
       notificationVibrationEnabled:
           prefs.getBool(_kNotificationVibrationEnabled) ?? false,
       accent: prefs.getString(_kAccent) ?? 'blue',
+      preferredSessionId: prefs.getString(_kPreferredSessionId),
     );
   }
 
@@ -91,9 +96,14 @@ class SettingsRepository {
     await prefs.setBool(_kAutoRetry, enabled);
   }
 
-  Future<void> savePreferredSourceId(String sourceId) async {
+  Future<void> savePreferredSource(String sourceId, String? sessionId) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kPreferredSourceId, sourceId);
+    if (sessionId != null && sessionId.isNotEmpty) {
+      await prefs.setString(_kPreferredSessionId, sessionId);
+    } else {
+      await prefs.remove(_kPreferredSessionId);
+    }
   }
 
   Future<void> saveRecentDirs(List<String> dirs) async {

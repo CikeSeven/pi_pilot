@@ -1625,6 +1625,27 @@ const server = http.createServer((req, res) => {
     );
     return;
   }
+  // 诊断用:列出每条手机连接的身份与订阅目标。
+  // 需要 token —— 这个端点会暴露 sourceId/会话归属,不能像 /health 那样裸奔。
+  if (req.url?.startsWith("/clients")) {
+    if (!tokenMatches(requestUrl(req).searchParams.get("token"), config.token)) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        hubId: sources.hubId,
+        clients: [...mobileClients.values()].map((client) => ({
+          clientId: client.clientId,
+          selectedSourceId: client.selectedSourceId ?? null,
+        })),
+      }),
+    );
+    return;
+  }
   res.writeHead(404);
   res.end();
 });
