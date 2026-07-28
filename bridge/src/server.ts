@@ -273,6 +273,50 @@ function failTreeRequestsForSource(sourceId: string): void {
   if (id) settleTreeRequest(sourceId, id, { ok: false, reason: "桌面端已断开" });
 }
 
+// ---------------------------------------------------------------------------
+// ask_user_question 转交
+//
+// 第三方插件 @juicesharp/rpiv-ask-user-question 把问卷画在电脑端 TUI 的覆盖层里,
+// 不走 pi 的 extension_ui_request 协议,所以手机永远收不到,只能看着一个转不完的圈。
+// relay 改用 `tool_call` 钩子在插件的 execute 之前把整次调用截下来,把题目发到这里,
+// 由 hub 转给正在看这个源的手机作答,再把答案送回去。
+//
+// 两段超时(认领 / 作答)都在 relay 那侧计时 —— 它才是真正被阻塞的一方。hub 只负责
+// 转发、按 requestId 认账、以及在没人看或断线时立刻回绝,让桌面尽快回落到插件自己
+// 的问卷。
+// ---------------------------------------------------------------------------
+
+const LIVE_ASK_CAPABILITY = "ask-user-question-relay";
+
+interface InFlightAsk {
+  requestId: string;
+  toolCallId: string;
+  epoch: string;
+  questions: JsonObject[];
+  claimed: boolean;
+}
+
+/// 每个源最多一份在途问卷:桌面的 agent 循环卡在 beforeToolCall 上,
+/// 同一个源不可能并发弹出第二份。
+const asksBySource = new Map<string, InFlightAsk>();
+
+/// 撤卡也要进重放环。否则断线重连的手机会从环里读出那条 ask 事件,
+/// 把一份早就由电脑接手的问卷重新画出来。
+function retractAsk(sourceId: string, requestId: string): void {
+  const event = sources.recordLocalEvent(sourceId, {
+    type: "ask_user_question_retracted",
+    requestId,
+  });
+  if (event.ok) broadcastSourceEvent(event.event);
+}
+
+function clearAskForSource(sourceId: string, retract: boolean): void {
+  const ask = asksBySource.get(sourceId);
+  if (!ask) return;
+  asksBySource.delete(sourceId);
+  if (retract) retractAsk(sourceId, ask.requestId);
+}
+
 function requestDesktopTree(
   sourceId: string,
   timeoutMs = config.snapshotRequestTimeoutMs,
@@ -824,7 +868,92 @@ function requireLease(
   return { fence: result.lease.fence };
 }
 
+/**
+ * 手机侧的问卷三帧:认领 / 应答 / 交还。
+ *
+ * 认账一律按 `requestId` 走,不看谁发的:同一个源上的观看者都是同一个人
+ * (手机与电脑前的是同一双手),而 requestId 只有 hub 推过去的那一份能对上。
+ */
+function handleAskFrame(client: MobileClient, msg: BridgeMessage): void {
+  const sourceId = client.selectedSourceId;
+  if (!sourceId) {
+    respond(client.ws, msg, false, undefined, "select a source first");
+    return;
+  }
+  const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+  const ask = asksBySource.get(sourceId);
+  // 对不上就说清是「过期」而不是「失败」—— 电脑那侧很可能已经接手作答了。
+  if (!requestId || !ask || ask.requestId !== requestId) {
+    respond(client.ws, msg, false, undefined, "这份问卷已经结束或已由电脑接手");
+    return;
+  }
+  const desktop = desktopBySource.get(sourceId);
+  if (!desktop) {
+    clearAskForSource(sourceId, true);
+    respond(client.ws, msg, false, undefined, "桌面端已断开");
+    return;
+  }
+
+  if (msg.type === "ask_claim") {
+    // 卡片已经画在前台、有人在看。relay 收到后把秒级的认领窗口换成分钟级的作答窗口。
+    if (!ask.claimed) {
+      ask.claimed = true;
+      sendObject(desktop.ws, { type: "desktop_ask_claimed", requestId });
+    }
+    respond(client.ws, msg, true, { claimed: true });
+    return;
+  }
+
+  if (msg.type === "ask_decline") {
+    // 用户点了「在电脑上作答」:立刻放行 relay,让插件在电脑上弹它那套完整问卷。
+    const sent = sendObject(desktop.ws, { type: "desktop_ask_declined", requestId });
+    clearAskForSource(sourceId, true);
+    respond(
+      client.ws,
+      msg,
+      sent,
+      sent ? { declined: true } : undefined,
+      sent ? undefined : "桌面端连接不可用",
+    );
+    return;
+  }
+
+  // ask_response
+  const answers = Array.isArray(msg.answers)
+    ? msg.answers.filter((item): item is JsonObject => Boolean(item) && typeof item === "object")
+    : [];
+  if (answers.length === 0) {
+    respond(client.ws, msg, false, undefined, "answers is required");
+    return;
+  }
+  const sent = sendObject(desktop.ws, {
+    type: "desktop_ask_result",
+    requestId,
+    epoch: ask.epoch,
+    answers,
+  });
+  if (!sent) {
+    respond(client.ws, msg, false, undefined, "桌面端连接不可用");
+    return;
+  }
+  // 撤卡:这一份已经答完,其他在看同一个源的客户端要同步收起卡片。
+  clearAskForSource(sourceId, true);
+  respond(client.ws, msg, true, { delivered: true });
+}
+
 function handleSourceCommand(client: MobileClient, msg: BridgeMessage): void {
+  // 问卷三帧最先处理:它们只可能来自桌面源,绝不该触发下面的休眠唤醒
+  // (那会为一份问卷 spawn 一个 pi 进程)。也不要求租约 —— 这份问卷是 hub
+  // 主动推给这台手机的,谁先答谁算,按 requestId 认账就够;要租约反而会在
+  // App 没自动取到控制权时,把「作答」变成一句「需要先取得控制」。
+  if (
+    msg.type === "ask_claim" ||
+    msg.type === "ask_response" ||
+    msg.type === "ask_decline"
+  ) {
+    handleAskFrame(client, msg);
+    return;
+  }
   // headless 的 prompt 会展开扩展命令。用户以为自己在发一句话,pi 却执行了一条
   // 命令 —— 这是既有的静默 bug,在这里堵掉。
   if (
@@ -1707,6 +1836,60 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
       );
       return;
 
+    case "desktop_ask_request": {
+      // relay 拦下了一次 ask_user_question,把题目转给正在看这个源的手机。
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+      const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : "";
+      const source = sources.get(sourceId);
+      const questions = Array.isArray(msg.questions)
+        ? msg.questions.filter(
+            (item): item is JsonObject => Boolean(item) && typeof item === "object",
+          )
+        : [];
+      if (!requestId) return;
+      if (typeof msg.epoch !== "string" || msg.epoch !== source?.epoch) {
+        sendObject(desktop.ws, { type: "desktop_ask_declined", requestId });
+        return;
+      }
+      if (questions.length === 0) {
+        sendObject(desktop.ws, { type: "desktop_ask_declined", requestId });
+        return;
+      }
+      // relay 已经按 selectedClients 门控过,但那个计数是推送的快照。手机恰好在
+      // 推送与本帧之间离开时就会落到这里 —— 立刻回绝,别让桌面白等一个认领超时。
+      if (watchersOf(sourceId) === 0) {
+        sendObject(desktop.ws, { type: "desktop_ask_declined", requestId });
+        return;
+      }
+      // 同一源的旧问卷(理论上不应存在)先撤干净,免得手机上叠两张卡。
+      clearAskForSource(sourceId, true);
+      asksBySource.set(sourceId, {
+        requestId,
+        toolCallId,
+        epoch: msg.epoch,
+        questions,
+        claimed: false,
+      });
+      // 进重放环:断线重连的手机能从重放里拿到这份问卷,不依赖广播的时机。
+      const event = sources.recordLocalEvent(sourceId, {
+        type: "ask_user_question_request",
+        requestId,
+        toolCallId,
+        questions,
+      });
+      if (event.ok) broadcastSourceEvent(event.event);
+      return;
+    }
+
+    case "desktop_ask_cancel": {
+      // relay 超时或作废了这次转交(已经回落到桌面问卷)。
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+      const ask = asksBySource.get(sourceId);
+      if (!requestId || !ask || ask.requestId !== requestId) return;
+      clearAskForSource(sourceId, true);
+      return;
+    }
+
     case "desktop_event": {
       if (
         typeof msg.epoch !== "string" ||
@@ -1855,6 +2038,8 @@ wss.on("connection", (ws, req) => {
       streamingBySource.delete(sourceId);
       failSnapshotRequestsForSource(sourceId);
       failTreeRequestsForSource(sourceId);
+      // 桌面走了,那份问卷再也没人接答案 —— 撤掉手机上的卡片。
+      clearAskForSource(sourceId, true);
       failPendingForSource(sourceId, "desktop source disconnected");
       // 释放会话占用:电脑端走了之后,这个会话应该能重新在 bridge 上打开。
       // (不释放的话 claim 表会永久堵住它。)

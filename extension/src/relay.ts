@@ -22,6 +22,129 @@ const MAX_COMMAND_QUEUE = 32;
 const MAX_COMMAND_RESULTS = 256;
 /** Hub 用它判断 relay 是否支持独立的按需会话树帧。 */
 const LIVE_TREE_CAPABILITY = "tree-summary-on-demand";
+/** Hub 用它判断 relay 是否会把 ask_user_question 问卷转给手机。 */
+const LIVE_ASK_CAPABILITY = "ask-user-question-relay";
+
+/**
+ * 第三方插件 @juicesharp/rpiv-ask-user-question 注册的工具名。
+ *
+ * 它的问卷是电脑端 TUI 的覆盖层(`ctx.ui.custom()`),不走 pi 的
+ * extension_ui_request 协议,所以手机永远收不到;插件本身也是严格单向的
+ * (全仓只有两处 `pi.events.emit`、零处 `pi.events.on`),没有任何可编程
+ * 应答入口。于是手机上只能看着一个转不完的圈。
+ *
+ * 同名注册顶不掉它 —— runner.js 的规则是**先注册者赢**,而 settings.json 里
+ * 插件(第 10 位)排在 PiPilot relay(最后一位)之前。所以只能在它的
+ * `execute` 跑起来之前用 `tool_call` 钩子把整次调用截下来。
+ */
+const ASK_TOOL_NAME = "ask_user_question";
+const MAX_ASK_QUESTIONS = 4;
+const MAX_ASK_OPTIONS = 8;
+const MAX_ASK_PREVIEW = 2_000;
+
+/**
+ * 答案信封的开头。
+ *
+ * **必须**留着。`tool_call` 钩子能返回的只有 `{block, reason}`,而
+ * agent-loop.js 里 block 那一支是:
+ *
+ * ```js
+ * return { kind: "immediate", result: createErrorToolResult(reason), isError: true };
+ * ```
+ *
+ * `isError: true` 是常量,钩子改不了,所以一次**成功**的作答会被协议层标成
+ * 失败。这段话是唯一能纠正它的地方 —— 少了它,模型会把用户的选择当成工具
+ * 报错,然后重试或者放弃。
+ *
+ * (想干净地把 isError 改回 false 只能用 `tool_result` 钩子,但 block 走的是
+ * `kind: "immediate"`,而 `afterToolCall` 只在 `else` 分支的
+ * `finalizeExecutedToolCall` 里调 —— block 之后它根本不触发。)
+ */
+const ASK_ANSWER_HEADER =
+  "The user answered this questionnaire on their phone through PiPilot. " +
+  "This is a SUCCESSFUL answer, NOT an error and NOT a decline: the error " +
+  "envelope around it is a transport artifact of intercepting the desktop " +
+  "questionnaire, not a failure. Treat the answers below as the user's " +
+  "decision and continue. Do not retry the tool.";
+
+function clipText(value: string, limit: number): string {
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`;
+}
+
+/**
+ * 把插件的问卷参数收成手机端渲染够用的最小形状。
+ *
+ * 这些字段是**模型**写的,长度不可预期,而它们要过 WebSocket,所以逐项截断;
+ * 结构不合法(没题干、没选项)的直接丢掉 —— 一道都不剩就返回 undefined,
+ * 让插件照常在电脑上问,别把一个空问卷推到手机上。
+ */
+function normalizeAskQuestions(input: unknown): JsonObject[] | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = (input as JsonObject).questions;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const questions: JsonObject[] = [];
+  for (const item of raw.slice(0, MAX_ASK_QUESTIONS)) {
+    if (!item || typeof item !== "object") continue;
+    const q = item as JsonObject;
+    const text = typeof q.question === "string" ? q.question.trim() : "";
+    if (!text) continue;
+    const rawOptions = Array.isArray(q.options) ? q.options : [];
+    const options: JsonObject[] = [];
+    for (const opt of rawOptions.slice(0, MAX_ASK_OPTIONS)) {
+      if (!opt || typeof opt !== "object") continue;
+      const o = opt as JsonObject;
+      const label = typeof o.label === "string" ? o.label.trim() : "";
+      if (!label) continue;
+      const description = typeof o.description === "string" ? o.description.trim() : "";
+      const preview = typeof o.preview === "string" ? o.preview : "";
+      options.push({
+        label: clipText(label, 200),
+        ...(description ? { description: clipText(description, 600) } : {}),
+        ...(preview ? { preview: clipText(preview, MAX_ASK_PREVIEW) } : {}),
+      });
+    }
+    if (options.length === 0) continue;
+    const header = typeof q.header === "string" ? q.header.trim() : "";
+    questions.push({
+      question: clipText(text, 1_000),
+      ...(header ? { header: clipText(header, 60) } : {}),
+      ...(q.multiSelect === true ? { multiSelect: true } : {}),
+      options,
+    });
+  }
+  return questions.length > 0 ? questions : undefined;
+}
+
+/** 把手机回来的结构化答案摊成模型读的文本。空答案返回 undefined(按回落处理)。 */
+function formatAskAnswers(raw: unknown): string | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const lines: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const a = item as JsonObject;
+    const question = typeof a.question === "string" ? a.question.trim() : "";
+    const labels = Array.isArray(a.labels)
+      ? a.labels.filter((l): l is string => typeof l === "string" && l.trim().length > 0)
+      : [];
+    const text = typeof a.text === "string" ? a.text.trim() : "";
+    // 自定义输入(插件的 "Type something." 那一行)走 text,选项走 labels
+    const answer = labels.length > 0 ? labels.join(", ") : text;
+    if (!question || !answer) continue;
+    lines.push(`Q: ${question}`);
+    lines.push(`A: ${clipText(answer, 2_000)}`);
+    const notes = typeof a.notes === "string" ? a.notes.trim() : "";
+    if (notes) lines.push(`Note: ${clipText(notes, 1_000)}`);
+  }
+  if (lines.length === 0) return undefined;
+  return [ASK_ANSWER_HEADER, "", ...lines].join("\n");
+}
+
+/** 一次在途的问卷转交。`timer` 会在认领前后换一次(认领窗口 → 作答窗口)。 */
+interface PendingAsk {
+  resolve: (answer: string | undefined) => void;
+  timer: NodeJS.Timeout;
+  claimed: boolean;
+}
 
 function serializeModel(model: ExtensionContext["model"]): JsonObject | null {
   if (!model) return null;
@@ -436,6 +559,10 @@ export class DesktopRelay {
   private readonly followUpMirror: string[] = [];
   private lastSnapshotAt = 0;
   private lastSnapshotSeq = 0;
+  /// 有多少手机端正在看这个源(hub 的 desktop_status 推来)。
+  /// 问卷转交的门控:为 0 时不拦截,插件照常在电脑上弹它那套完整问卷。
+  private selectedClients = 0;
+  private pendingAsks = new Map<string, PendingAsk>();
 
   readonly sourceId = sanitizeSourceId(`${os.hostname()}:${process.pid}`);
 
@@ -682,6 +809,7 @@ export class DesktopRelay {
 
       case "desktop_status": {
         const selected = typeof msg.selectedClients === "number" ? msg.selectedClients : 0;
+        this.selectedClients = selected;
         const owner = msg.owner && typeof msg.owner === "object" ? (msg.owner as JsonObject) : {};
         const nextOwnerActive = owner.owned === true;
         const nextOwnerFence =
@@ -764,6 +892,40 @@ export class DesktopRelay {
         }
         return;
       }
+
+      case "desktop_ask_claimed": {
+        // 手机确认卡片已经显示在前台。认领窗口(秒级)换成作答窗口(分钟级)——
+        // 人读题选项要时间,但「手机在口袋里」不能让桌面干等那么久。
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+        const entry = this.pendingAsks.get(requestId);
+        if (!entry || entry.claimed) return;
+        entry.claimed = true;
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(
+          () => this.settleAsk(requestId, undefined),
+          this.config.askAnswerMs,
+        );
+        entry.timer.unref?.();
+        this.notify("PiPilot: 问卷已转到手机作答", "info");
+        return;
+      }
+
+      case "desktop_ask_result": {
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+        // 换过 epoch 说明会话已经不是发问那一个了,这份答案不能算。
+        if (typeof msg.epoch === "string" && msg.epoch !== this.epoch) return;
+        // 解析不出内容(空答案/形状不对)按回落处理,不能把空信封交给模型。
+        this.settleAsk(requestId, formatAskAnswers(msg.answers));
+        return;
+      }
+
+      case "desktop_ask_declined":
+        // 手机主动交还(用户点了「在电脑上作答」),或 hub 发现没人在看。
+        this.settleAsk(
+          typeof msg.requestId === "string" ? msg.requestId : "",
+          undefined,
+        );
+        return;
 
       case "desktop_resync_required":
         this.resnapshot(typeof msg.reason === "string" ? msg.reason : "hub requested resync");
@@ -937,7 +1099,7 @@ export class DesktopRelay {
           sessionId: ctx.sessionManager.getSessionId(),
           sessionFile: ctx.sessionManager.getSessionFile(),
           sessionName: ctx.sessionManager.getSessionName(),
-          capabilities: [...SAFE_REMOTE_COMMANDS, LIVE_TREE_CAPABILITY],
+          capabilities: [...SAFE_REMOTE_COMMANDS, LIVE_TREE_CAPABILITY, LIVE_ASK_CAPABILITY],
         },
         snapshot,
       },
@@ -1155,6 +1317,9 @@ export class DesktopRelay {
   private stopInternal(clearStatus: boolean): void {
     this.active = false;
     this.registered = false;
+    // 在途问卷必须放行,否则那个 await 永远不返回,整个 agent 回合卡死。
+    this.failPendingAsks();
+    this.selectedClients = 0;
     this.controlGeneration++;
     this.ownerActive = false;
     this.ownerFence = 0;
@@ -1170,6 +1335,82 @@ export class DesktopRelay {
     socket?.close(1000, "desktop runtime stopped");
     if (clearStatus) this.setStatus(undefined);
     this.ctx = undefined;
+  }
+
+  /**
+   * 拦下 `ask_user_question`,把问卷转给手机作答。
+   *
+   * 返回 `undefined` = 不拦,插件照常在电脑上弹它那套完整问卷(标签页、备注、
+   * 预览、折叠、九种语言)。所以所有「转不过去」的情形都走这条路,手机端的
+   * 这套东西永远只是加法,不会让桌面变差。
+   *
+   * 返回 `{block, reason}` = 插件的 `execute` 整个不跑,模型直接收到手机上的
+   * 选择。注意 reason 会被 pi 包进错误信封(见 ASK_ANSWER_HEADER)。
+   */
+  async interceptAsk(
+    event: { toolName: string; toolCallId: string; input: unknown },
+    ctx: ExtensionContext,
+  ): Promise<{ block: true; reason: string } | undefined> {
+    if (event.toolName !== ASK_TOOL_NAME) return undefined;
+    if (!this.isCurrent(ctx) || !this.registered) return undefined;
+    // 没有手机在看这个源:不拦。这是「桌面不许因为装了 PiPilot 而变差」的保证。
+    if (this.selectedClients <= 0) return undefined;
+    const questions = normalizeAskQuestions(event.input);
+    if (!questions) return undefined;
+
+    const requestId = `ask:${crypto.randomUUID()}`;
+    const sent = this.sendFrame(
+      {
+        type: "desktop_ask_request",
+        requestId,
+        epoch: this.epoch,
+        toolCallId: event.toolCallId,
+        questions,
+      },
+      MAX_SNAPSHOT_BYTES,
+    );
+    if (!sent) return undefined;
+
+    const answer = await new Promise<string | undefined>((resolve) => {
+      // 先给认领窗口:手机得先确认「卡片在前台、有人在看」。
+      const timer = setTimeout(
+        () => this.settleAsk(requestId, undefined),
+        this.config.askClaimMs,
+      );
+      timer.unref?.();
+      this.pendingAsks.set(requestId, { resolve, timer, claimed: false });
+    });
+
+    if (answer === undefined) {
+      // 撤掉手机上可能已经画出来的卡片,免得它停在一个已经由电脑接手的问卷上。
+      this.sendFrame({ type: "desktop_ask_cancel", requestId });
+      return undefined;
+    }
+    return { block: true, reason: answer };
+  }
+
+  private settleAsk(requestId: string, answer: string | undefined): void {
+    const entry = this.pendingAsks.get(requestId);
+    if (!entry) return;
+    this.pendingAsks.delete(requestId);
+    clearTimeout(entry.timer);
+    entry.resolve(answer);
+  }
+
+  private failPendingAsks(): void {
+    for (const requestId of [...this.pendingAsks.keys()]) {
+      this.settleAsk(requestId, undefined);
+    }
+  }
+
+  private notify(message: string, level: "info" | "warning" | "error"): void {
+    // ctx 会在会话替换/reload 之后失效,那时读它的任何 getter 都抛 ——
+    // 而这个方法是被 socket 回调驱动的,可能正好落在之后。
+    try {
+      this.ctx?.ui.notify(message, level);
+    } catch {
+      // stale ctx after session replacement; nothing to notify
+    }
   }
 
   private setStatus(text: string | undefined): void {

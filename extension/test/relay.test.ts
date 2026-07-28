@@ -126,6 +126,8 @@ test("relay registers, coalesces updates, and fences commands", async () => {
     reconnectMaxMs: 100,
     streamSnapshotEvents: 192,
     streamSnapshotMaxMs: 15_000,
+    askClaimMs: 8_000,
+    askAnswerMs: 300_000,
   });
 
   try {
@@ -392,6 +394,8 @@ test("on-demand snapshot keeps the epoch and lands exactly on the last event", a
     reconnectMaxMs: 100,
     streamSnapshotEvents: 192,
     streamSnapshotMaxMs: 15_000,
+    askClaimMs: 8_000,
+    askAnswerMs: 300_000,
   });
 
   try {

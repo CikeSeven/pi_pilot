@@ -103,6 +103,18 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   pi.on("input", emit);
   pi.on("user_bash", emit);
 
+  // ask_user_question 拦截。
+  //
+  // 第三方插件 @juicesharp/rpiv-ask-user-question 把问卷画在 TUI 覆盖层
+  // (`ctx.ui.custom()`),不走 pi 的 extension_ui_request 协议,所以手机上只看得到
+  // 一个转不完的圈。它又是严格单向的(全仓两处 emit、零处 on),没有任何可编程
+  // 应答入口;同名注册也顶不掉它(runner.js 是先注册者赢,而它在 settings.json 里
+  // 排在 PiPilot 之前)。所以唯一的口子是在它的 execute 跑起来之前拦下整次调用。
+  //
+  // 钩子里 await 是安全的:agent-loop 的 beforeToolCall 本就是被 await 的且无超时,
+  // 插件自己也同样卡在等人敲键盘。
+  pi.on("tool_call", async (event, ctx) => await relay?.interceptAsk(event, ctx));
+
   registerNavCommands(pi, navCache, (result, ctx) => {
     relay?.emitNavResult(result, ctx);
   });

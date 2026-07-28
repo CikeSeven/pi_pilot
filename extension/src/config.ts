@@ -12,6 +12,12 @@ export interface RelayConfig {
   streamSnapshotEvents: number;
   /// 流式期间距上次快照超过这么久就自发一次(即使事件不多)。
   streamSnapshotMaxMs: number;
+  /// 问卷转手机后等「手机确认看到了」的窗口。超时就回落到插件
+  /// 自己的桌面 TUI 问卷 —— 手机在口袋里时不能让桌面干等。
+  askClaimMs: number;
+  /// 手机已确认在看之后,等作答的窗口。人读题选项要时间,
+  /// 这个得宽得多;超时同样回落桌面。
+  askAnswerMs: number;
 }
 
 interface FileConfig {
@@ -22,6 +28,8 @@ interface FileConfig {
   reconnectMaxMs?: number;
   streamSnapshotEvents?: number;
   streamSnapshotMaxMs?: number;
+  askClaimMs?: number;
+  askAnswerMs?: number;
 }
 
 export const RELAY_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "pipilot-sync.json");
@@ -61,5 +69,7 @@ export function loadRelayConfig(): RelayConfig | undefined {
     reconnectMaxMs: positiveInt(file.reconnectMaxMs, 15_000),
     streamSnapshotEvents: positiveInt(file.streamSnapshotEvents, 192),
     streamSnapshotMaxMs: positiveInt(file.streamSnapshotMaxMs, 15_000),
+    askClaimMs: positiveInt(file.askClaimMs, 8_000),
+    askAnswerMs: positiveInt(file.askAnswerMs, 300_000),
   };
 }

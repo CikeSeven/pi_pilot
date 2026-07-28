@@ -337,6 +337,57 @@ class UiRequest {
   final int? timeoutMs;
 }
 
+/// 问卷里的一个选项。
+///
+/// `preview` 的**内容**不过网:那是电脑上并排对比用的大段 markdown,
+/// 手机上只标一下「含预览」。
+class AskOption {
+  const AskOption({
+    required this.label,
+    this.description,
+    this.hasPreview = false,
+  });
+
+  final String label;
+  final String? description;
+  final bool hasPreview;
+}
+
+/// 问卷里的一道题。
+class AskQuestion {
+  const AskQuestion({
+    required this.question,
+    this.header,
+    this.multiSelect = false,
+    this.options = const [],
+  });
+
+  final String question;
+  final String? header;
+  final bool multiSelect;
+  final List<AskOption> options;
+}
+
+/// 电脑端转过来的一份 `ask_user_question` 问卷,等着手机作答。
+///
+/// 插件 `@juicesharp/rpiv-ask-user-question` 把问卷画在电脑端 TUI 的覆盖层里
+/// (`ctx.ui.custom()`),不走 pi 的 extension_ui_request 协议,也没有任何可编程
+/// 应答入口。所以 relay 改用 `tool_call` 钩子在插件的 execute 之前把整次调用
+/// 截下来,把题目经 hub 转到这里;手机答完再送回去,插件那套 TUI 从不出现。
+class AskRequest {
+  const AskRequest({
+    required this.requestId,
+    required this.toolCallId,
+    required this.questions,
+  });
+
+  final String requestId;
+
+  /// 对应的工具调用 id —— 问卷卡片要靠它认出自己该变成可作答的那张。
+  final String toolCallId;
+  final List<AskQuestion> questions;
+}
+
 /// 用户消息的投递语义。
 enum PiDelivery {
   /// 插队:当前这一轮结束后立刻处理。**不是中断**,文案不要写成"打断"。
@@ -383,6 +434,7 @@ class PiState {
     this.sourceEpoch,
     this.rttMs,
     this.pendingUiRequest,
+    this.pendingAsk,
     this.contextUsage,
     this.pendingMessageCount,
     this.snapshotTruncated = false,
@@ -459,6 +511,9 @@ class PiState {
   /// 扩展等待用户输入的对话框(headless 源手机端可交互应答)。
   final UiRequest? pendingUiRequest;
 
+  /// 电脑端转过来、等手机作答的 ask_user_question 问卷。
+  final AskRequest? pendingAsk;
+
   /// 上下文占用(桌面快照直给;headless 由 get_session_stats 补拉)。
   final ContextUsage? contextUsage;
   final int? pendingMessageCount;
@@ -533,12 +588,14 @@ class PiState {
     String? backgroundFinishName,
     int? rttMs,
     UiRequest? pendingUiRequest,
+    AskRequest? pendingAsk,
     ContextUsage? contextUsage,
     int? pendingMessageCount,
     bool? snapshotTruncated,
     bool clearError = false,
     bool clearSource = false,
     bool clearUiRequest = false,
+    bool clearAsk = false,
     bool clearNotice = false,
   }) {
     return PiState(
@@ -583,6 +640,9 @@ class PiState {
       pendingUiRequest: clearSource || clearUiRequest
           ? null
           : (pendingUiRequest ?? this.pendingUiRequest),
+      pendingAsk: clearSource || clearAsk
+          ? null
+          : (pendingAsk ?? this.pendingAsk),
       contextUsage: clearSource ? null : (contextUsage ?? this.contextUsage),
       pendingMessageCount: clearSource
           ? null
@@ -2606,6 +2666,11 @@ class PiSessionNotifier extends Notifier<PiState> {
         _addSystem('扩展错误: ${event['error']}', SystemKind.error);
       case 'extension_ui_request':
         _onExtensionUi(event);
+      case 'ask_user_question_request':
+        _onAskRequest(event);
+      case 'ask_user_question_retracted':
+        // 电脑那侧已经接手(超时、断线、或已由其他客户端答完)。
+        if (state.pendingAsk?.requestId == event['requestId']) _clearAsk();
       case 'entry_appended':
         final entry = event['entry'];
         if (entry is Map<String, dynamic>) {
@@ -2911,6 +2976,129 @@ class PiSessionNotifier extends Notifier<PiState> {
       return true;
     }
     return false;
+  }
+
+  // -- ask_user_question -------------------------------------------------------
+
+  /// App 是否在前台。问卷认领的门控 —— 手机在口袋里时不能认领,
+  /// 让电脑白等几分钟比立刻回落到插件自己的桌面问卷糟糕得多。
+  bool _foreground = true;
+
+  /// 由 AppLifecycleHandler 推过来。不在 notifier 里读
+  /// `WidgetsBinding.instance.lifecycleState`:纯 `test()` 里没有 binding 会抛。
+  bool get debugForeground => _foreground;
+
+  void setForeground(bool value) {
+    if (_foreground == value) return;
+    _foreground = value;
+    // 回到前台时手上正好有一份问卷,补一次认领(桥对重复认领是幂等的)。
+    final ask = state.pendingAsk;
+    if (value && ask != null) unawaited(_claimAsk(ask.requestId));
+  }
+
+  /// 电脑端转来一份问卷。
+  void _onAskRequest(Map<String, dynamic> event) {
+    final requestId = event['requestId'];
+    if (requestId is! String || requestId.isEmpty) return;
+    final questions = _parseAskQuestions(event['questions']);
+    // 读不出题目时宁可不接:画一张空白可作答卡片比回落到桌面问卷更糟。
+    if (questions.isEmpty) return;
+    final toolCallId = event['toolCallId'];
+    state = state.copyWith(
+      pendingAsk: AskRequest(
+        requestId: requestId,
+        toolCallId: toolCallId is String ? toolCallId : '',
+        questions: questions,
+      ),
+    );
+    if (_foreground) unawaited(_claimAsk(requestId));
+  }
+
+  /// 告诉电脑「卡片已在前台、有人在看」,它才把秒级的认领窗口换成分钟级的作答窗口。
+  Future<void> _claimAsk(String requestId) async {
+    final resp = await _request('ask_claim', {'requestId': requestId});
+    // 认领失败通常意味着电脑那侧已经收回了这份问卷,跟着撤卡。
+    if (resp?['success'] != true && state.pendingAsk?.requestId == requestId) {
+      _clearAsk();
+    }
+  }
+
+  void _clearAsk() {
+    if (state.pendingAsk != null) state = state.copyWith(clearAsk: true);
+  }
+
+  /// 提交问卷答案。
+  ///
+  /// 不要求控制权(租约):这份问卷是电脑主动推给这台手机的,按 requestId
+  /// 认账就够;要租约反而会在没自动取到控制权时把「作答」变成一句报错。
+  Future<bool> respondAsk(List<Map<String, dynamic>> answers) async {
+    final ask = state.pendingAsk;
+    if (ask == null || answers.isEmpty) return false;
+    final resp = await _request('ask_response', {
+      'requestId': ask.requestId,
+      'answers': answers,
+    });
+    if (resp?['success'] == true) {
+      _clearAsk();
+      return true;
+    }
+    return false;
+  }
+
+  /// 交还给电脑作答。relay 收到后立刻放行,插件在电脑上弹它那套完整问卷。
+  Future<bool> declineAsk() async {
+    final ask = state.pendingAsk;
+    if (ask == null) return false;
+    final resp = await _request('ask_decline', {'requestId': ask.requestId});
+    // 无论成败都撤卡:用户已经表达了「我去电脑上答」。
+    _clearAsk();
+    return resp?['success'] == true;
+  }
+
+  @visibleForTesting
+  static List<AskQuestion> debugParseAskQuestions(dynamic raw) =>
+      _parseAskQuestions(raw);
+
+  static List<AskQuestion> _parseAskQuestions(dynamic raw) {
+    if (raw is! List) return const [];
+    final questions = <AskQuestion>[];
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final text = entry['question'];
+      if (text is! String || text.isEmpty) continue;
+      final options = <AskOption>[];
+      final rawOptions = entry['options'];
+      if (rawOptions is List) {
+        for (final opt in rawOptions) {
+          if (opt is! Map) continue;
+          final label = opt['label'];
+          if (label is! String || label.isEmpty) continue;
+          final description = opt['description'];
+          final preview = opt['preview'];
+          options.add(
+            AskOption(
+              label: label,
+              description: description is String && description.isNotEmpty
+                  ? description
+                  : null,
+              hasPreview: preview is String && preview.isNotEmpty,
+            ),
+          );
+        }
+      }
+      // 无选项的题无法作答,丢掉。
+      if (options.isEmpty) continue;
+      final header = entry['header'];
+      questions.add(
+        AskQuestion(
+          question: text,
+          header: header is String && header.isNotEmpty ? header : null,
+          multiSelect: entry['multiSelect'] == true,
+          options: options,
+        ),
+      );
+    }
+    return questions;
   }
 
   // -- entries ------------------------------------------------------------------
