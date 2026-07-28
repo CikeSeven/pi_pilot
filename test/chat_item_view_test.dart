@@ -51,6 +51,34 @@ void main() {
         expect(find.byType(DiffView), findsOneWidget);
       });
 
+      // 回归:多块 edit 的 output 只是 "Successfully replaced N block(s)" 文案,
+      // 不含任何 diff。以前只认单块,多块会掉到默认分支把这句文案直接显示出来。
+      testWidgets('多块 edit 仍渲染 DiffView 而不是成功文案', (tester) async {
+        final item = ToolItem('tool:multi', toolCallId: 'm', name: 'edit')
+          ..args = {
+            'path': 'a.dart',
+            'edits': [
+              {'oldText': 'alpha', 'newText': 'ALPHA'},
+              {'oldText': 'beta', 'newText': 'BETA'},
+            ],
+          }
+          ..output = 'Successfully replaced 2 block(s) in a.dart.'
+          ..done = true;
+        await tester.pumpWidget(_wrap(ChatItemView(item: item), dark: dark));
+        await tester.tap(find.text('edit'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(DiffView), findsOneWidget);
+        expect(find.textContaining('Successfully replaced'), findsNothing);
+        expect(find.textContaining('-alpha'), findsOneWidget);
+        expect(find.textContaining('+ALPHA'), findsOneWidget);
+        expect(find.textContaining('-beta'), findsOneWidget);
+        expect(find.textContaining('+BETA'), findsOneWidget);
+        // 两块之间应有分隔用的 hunk 头
+        expect(find.textContaining('第 1/2 处修改'), findsOneWidget);
+        expect(find.textContaining('第 2/2 处修改'), findsOneWidget);
+      });
+
       testWidgets('read 工具卡渲染带行号 CodeBlock', (tester) async {
         final item = ToolItem('tool:2', toolCallId: '2', name: 'read')
           ..args = {'path': 'a.dart', 'offset': 5}

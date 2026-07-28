@@ -180,7 +180,11 @@ class _ToolCardState extends ConsumerState<ToolCard> {
     return content is String && content.isNotEmpty ? content : null;
   }
 
-  /// 从 edit 参数(oldText/newText 或单条 edits)现算行级 diff。
+  /// 从 edit 参数(oldText/newText 或 edits 列表)现算行级 diff。
+  ///
+  /// 多块编辑必须逐块算再拼起来:工具的 output 只是
+  /// "Successfully replaced N block(s)" 这类成功文案,不含任何 diff 内容。
+  /// 以前只处理单块,多块就返回 null 掉到默认分支,把那句文案直接显示出来。
   static List<DiffLine>? _diffFromArgs(ToolItem item) {
     final args = item.args;
     if (args == null) return null;
@@ -190,17 +194,27 @@ class _ToolCardState extends ConsumerState<ToolCard> {
       return computeLineDiff(oldText, newText);
     }
     final edits = args['edits'];
-    if (edits is List && edits.length == 1) {
-      final edit = edits.first;
-      if (edit is Map &&
-          edit['oldText'] is String &&
-          edit['newText'] is String) {
-        return computeLineDiff(
-          edit['oldText'] as String,
-          edit['newText'] as String,
-        );
-      }
+    if (edits is! List || edits.isEmpty) return null;
+
+    final blocks = <List<DiffLine>>[];
+    for (final edit in edits) {
+      if (edit is! Map) continue;
+      final from = edit['oldText'];
+      final to = edit['newText'];
+      if (from is! String || to is! String) continue;
+      blocks.add(computeLineDiff(from, to));
     }
-    return null;
+    if (blocks.isEmpty) return null;
+    if (blocks.length == 1) return blocks.single;
+
+    // 多块之间插 hunk 头,让用户看清这是第几处修改(DiffView 会给它浅底)
+    final merged = <DiffLine>[];
+    for (var i = 0; i < blocks.length; i++) {
+      merged.add(
+        DiffLine(DiffLineKind.hunk, '@@ 第 ${i + 1}/${blocks.length} 处修改 @@'),
+      );
+      merged.addAll(blocks[i]);
+    }
+    return merged;
   }
 }
