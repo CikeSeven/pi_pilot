@@ -26,6 +26,19 @@ const LIVE_TREE_CAPABILITY = "tree-summary-on-demand";
 const LIVE_ASK_CAPABILITY = "ask-user-question-relay";
 
 /**
+ * 补进命令表的 pi 内置命令。
+ *
+ * pi 的内置斜杠命令住在 dist/core/slash-commands.js,只给交互模式的自动补全用,
+ * `getCommands()` 只返回扩展注册的命令 —— 所以手机上以前根本看不见 /compact。
+ * `source` 标成 builtin,App 靠它决定派发成远程命令而不是当文本发出去。
+ */
+const BUILTIN_COMPACT = {
+  name: "compact",
+  description: "压缩上下文(在电脑端执行)",
+  source: "builtin",
+} as const;
+
+/**
  * 第三方插件 @juicesharp/rpiv-ask-user-question 注册的工具名。
  *
  * 它的问卷是电脑端 TUI 的覆盖层(`ctx.ui.custom()`),不走 pi 的
@@ -999,6 +1012,10 @@ export class DesktopRelay {
           pi: this.pi,
           ctx,
           navigate: (entryId) => this.navigate(entryId, ctx),
+          // ctx.compact() 不 await,失败只会走 onError 回调 ——
+          // 不把它转给手机的话,手机会永远停在「正在压缩」。
+          onCompactError: (message) =>
+            this.emitEvent({ type: "system_message", level: "error", text: `压缩失败:${message}` }, ctx),
         });
         const delivery = (result as { delivery?: unknown } | undefined)?.delivery;
         if (delivery === "steer" || delivery === "followUp") {
@@ -1165,6 +1182,16 @@ export class DesktopRelay {
         description: command.description ?? null,
         source: command.source,
       }));
+      // pi 的 22 个内置斜杠命令住在 dist/core/slash-commands.js,只给交互模式的
+      // 自动补全用,getCommands() 拿不到 —— 所以手机上以前根本看不见 /compact,
+      // 硬敲进去也只会当普通文本发给模型。
+      //
+      // 只补 compact 一个:model / thinking / name / tree 在 App 里已经有原生入口,
+      // settings / hotkeys / export / share / login / quit 是电脑本地的事,
+      // new / resume / fork / clone 永不开放 —— 那会换掉人正在用的会话。
+      if (!commands.some((command) => command.name === BUILTIN_COMPACT.name)) {
+        commands.push({ ...BUILTIN_COMPACT });
+      }
     } catch {
       commands = undefined;
     }

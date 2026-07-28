@@ -23,6 +23,7 @@ export interface RemoteCommand {
   modelId?: unknown;
   level?: unknown;
   name?: unknown;
+  instructions?: unknown;
 }
 
 export interface CommandRuntime {
@@ -30,9 +31,12 @@ export interface CommandRuntime {
     ExtensionAPI,
     "sendUserMessage" | "setModel" | "getThinkingLevel" | "setThinkingLevel" | "setSessionName"
   >;
-  ctx: Pick<ExtensionContext, "abort" | "isIdle" | "modelRegistry">;
+  ctx: Pick<ExtensionContext, "abort" | "isIdle" | "modelRegistry" | "compact">;
   /// 会话回退:relay 用缓存的命令上下文执行(普通 ExtensionContext 上没有 navigateTree)。
   navigate?: (entryId: string | undefined) => Promise<unknown>;
+  /// 压缩出错时告知手机。ctx.compact() 不 await,错误只会走 onError 回调,
+  /// 不接的话手机会永远停在「正在压缩」。
+  onCompactError?: (message: string) => void;
 }
 
 export async function executeRemoteCommand(
@@ -65,9 +69,31 @@ export async function executeRemoteCommand(
       runtime.ctx.abort();
       return { aborted: true };
 
-    case "compact":
-      // pi 没有把 compact 暴露到 ExtensionAPI 上,只能走用户消息通道的斜杠命令。
-      throw new Error("compact is not available on the desktop relay");
+    case "compact": {
+      // pi 确实把 compact 挂在 ExtensionContext 上(types.d.ts:240),
+      // 以前这里直接抛错是误判。
+      //
+      // 它的声明就是「Trigger compaction without awaiting completion」—— 返回 void,
+      // 所以这里只能报「已受理」。进展靠 session_before_compact /
+      // session_compact 两个钩子事件流向手机,App 已经在听了。
+      if (!runtime.ctx.isIdle()) {
+        // 正在跑的一回合里发起压缩,pi 自己也不允许;报清楚总比默默失败好。
+        throw new Error("desktop is busy; compact after this turn finishes");
+      }
+      const instructions =
+        typeof command.instructions === "string" && command.instructions.trim().length > 0
+          ? command.instructions.trim()
+          : undefined;
+      if (instructions && instructions.length > 10_000) {
+        throw new Error("compact instructions are too large");
+      }
+      runtime.ctx.compact({
+        ...(instructions ? { customInstructions: instructions } : {}),
+        onError: (error) =>
+          runtime.onCompactError?.(error instanceof Error ? error.message : String(error)),
+      });
+      return { accepted: true, ...(instructions ? { instructions } : {}) };
+    }
 
     case "navigate_tree": {
       if (!runtime.navigate) {

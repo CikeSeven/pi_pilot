@@ -194,8 +194,23 @@ class SlashCommand {
   final String name;
   final String? description;
 
-  /// 'extension' | 'prompt' | 'skill'
+  /// 'extension' | 'prompt' | 'skill' | 'builtin'
+  ///
+  /// builtin 是 relay 补进来的 pi 内置命令(目前只有 compact)。这类命令
+  /// **不能当文本发给模型** —— pi 的 session.prompt() 只解析扩展注册的命令,
+  /// 内置命令发过去就是一句字面文本。
   final String source;
+
+  bool get isBuiltin => source == 'builtin';
+}
+
+/// 输入文本里识别出的内置命令。
+class BuiltinInvocation {
+  const BuiltinInvocation({required this.name, this.argument});
+  final String name;
+
+  /// 命令名之后的余下部分(compact 拿它当自定义压缩要求)。
+  final String? argument;
 }
 
 /// 会话内 entry 树节点(归一化后的 get_tree / treeSummary)。
@@ -843,6 +858,16 @@ class PiSessionNotifier extends Notifier<PiState> {
   Future<void> sendPrompt(String text, {PiDelivery? delivery}) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
+
+    // 内置斜杠命令必须在这里被截住。pi 的 session.prompt() 只解析**扩展注册**的
+    // 命令,内置命令(compact 等)发过去就是一句字面文本,模型会当普通话来读。
+    // 拦在 sendPrompt 开头,快捷面板补全后回车、和用户自己把命令打全,两条路都覆盖。
+    final builtin = parseBuiltinCommand(trimmed);
+    if (builtin != null) {
+      await _runBuiltinCommand(builtin);
+      return;
+    }
+
     // 目标源在整个流程里必须钉死:唤醒会话要几秒,期间用户可能已经切走了。
     // 用 `state.selectedSourceId` 重新解析会把消息发进另一个会话。
     final sourceId = state.selectedSourceId;
@@ -908,6 +933,51 @@ class PiSessionNotifier extends Notifier<PiState> {
   void _failSend(String text, String reason) {
     _addSystem('$reason:$text', SystemKind.error);
     _write(state.copyWith(error: reason));
+  }
+
+  /// 手机上可用的 pi 内置斜杠命令。
+  ///
+  /// 只有 compact。model / thinking / name / tree 在 App 里已经有原生入口;
+  /// settings / hotkeys / export / share / login / quit 是电脑本地的事;
+  /// new / resume / fork / clone 永不开放 —— 那会换掉人在电脑上正用的会话。
+  static const builtinCommandNames = {'compact'};
+
+  /// 从输入文本里识别内置命令;不是内置命令就返回 null。
+  ///
+  /// 存在的意义是守住边界:`/compacting` 不是 `/compact`,
+  /// `/compact 保留报错信息` 要把后半句当自定义压缩要求传下去,
+  /// 而 `请帮我 /compact` 这种普通句子绝不能被误判成命令。
+  @visibleForTesting
+  static BuiltinInvocation? parseBuiltinCommand(String text) {
+    final trimmed = text.trim();
+    if (!trimmed.startsWith('/')) return null;
+    final body = trimmed.substring(1);
+    if (body.isEmpty) return null;
+    final space = body.indexOf(RegExp(r'\s'));
+    final name = space < 0 ? body : body.substring(0, space);
+    if (!builtinCommandNames.contains(name)) return null;
+    final rest = space < 0 ? '' : body.substring(space).trim();
+    return BuiltinInvocation(name: name, argument: rest.isEmpty ? null : rest);
+  }
+
+  Future<void> _runBuiltinCommand(BuiltinInvocation invocation) async {
+    switch (invocation.name) {
+      case 'compact':
+        // 压缩期间再发一次只会被桌面端抢报错,提前抦下来说清楚。
+        if (state.isCompacting) {
+          _write(state.copyWith(transientNotice: '桌面端已经在压缩上下文了'));
+          return;
+        }
+        _addSystem('已请求桌面端压缩上下文…');
+        final ok = await compact(instructions: invocation.argument);
+        // ctx.compact() 不 await 完成,所以这里的 ok 只代表「已受理」。
+        // 真正的进展靠 session_before_compact / session_compact 事件流回来。
+        if (!ok) {
+          _addSystem('压缩请求没能发出去', SystemKind.error);
+        }
+      default:
+        _addSystem('不支持的内置命令:/${invocation.name}', SystemKind.error);
+    }
   }
 
   /// 唤醒当前选中的休眠会话(拉起 pi 进程)。
@@ -1722,10 +1792,15 @@ class PiSessionNotifier extends Notifier<PiState> {
   }
 
   /// 手动压缩会话上下文(耗时较长,走 4 分钟超时)。
-  Future<bool> compact() async {
+  ///
+  /// [instructions] 对应 pi 的 CompactOptions.customInstructions。
+  Future<bool> compact({String? instructions}) async {
+    final extra = instructions == null || instructions.trim().isEmpty
+        ? const <String, dynamic>{}
+        : {'instructions': instructions.trim()};
     final resp = await _mutatingRequest(
       'compact',
-      const {},
+      extra,
       const Duration(seconds: 240),
     );
     return resp?['success'] == true;

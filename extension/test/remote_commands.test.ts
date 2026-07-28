@@ -138,3 +138,72 @@ test("set_session_name rejects empty and oversized names", async () => {
     /too long/,
   );
 });
+
+// pi 确实把 compact 挂在 ExtensionContext 上(types.d.ts:240),
+// 以前「not available on the desktop relay」是误判。
+function compactRuntime(idle: boolean) {
+  const calls: Array<{ name: string; value?: unknown }> = [];
+  const value = {
+    pi: {
+      sendUserMessage() {},
+      async setModel() {
+        return false;
+      },
+      getThinkingLevel: () => "low",
+      setThinkingLevel() {},
+    },
+    ctx: {
+      abort() {},
+      isIdle: () => idle,
+      compact(options?: { customInstructions?: string; onError?: (e: Error) => void }) {
+        calls.push({ name: "compact", value: options });
+      },
+      modelRegistry: { find: () => undefined },
+    },
+    onCompactError(message: string) {
+      calls.push({ name: "compactError", value: message });
+    },
+  } as unknown as CommandRuntime;
+  return { value, calls };
+}
+
+test("compact invokes ctx.compact without awaiting completion", async () => {
+  const { value, calls } = compactRuntime(true);
+  const result = await executeRemoteCommand({ type: "compact" }, value);
+  // 只能报「已受理」:pi 的声明就是 trigger without awaiting。
+  assert.deepEqual(result, { accepted: true });
+  assert.equal(calls[0]?.name, "compact");
+  assert.equal((calls[0]?.value as { customInstructions?: unknown }).customInstructions, undefined);
+});
+
+test("compact passes custom instructions through", async () => {
+  const { value, calls } = compactRuntime(true);
+  const result = await executeRemoteCommand(
+    { type: "compact", instructions: " 保留报错 " },
+    value,
+  );
+  assert.deepEqual(result, { accepted: true, instructions: "保留报错" });
+  assert.equal(
+    (calls[0]?.value as { customInstructions?: string }).customInstructions,
+    "保留报错",
+  );
+});
+
+test("compact is rejected while the desktop is busy", async () => {
+  const { value, calls } = compactRuntime(false);
+  await assert.rejects(
+    () => executeRemoteCommand({ type: "compact" }, value),
+    /busy/,
+  );
+  assert.equal(calls.length, 0, "忙的时候绝不能触发压缩");
+});
+
+test("compact errors reach the phone through onCompactError", async () => {
+  const { value, calls } = compactRuntime(true);
+  await executeRemoteCommand({ type: "compact" }, value);
+  // ctx.compact() 不 await,失败只会走 onError 回调 ——
+  // 不接的话手机会永远停在「正在压缩」。
+  const options = calls[0]?.value as { onError?: (error: Error) => void };
+  options.onError?.(new Error("boom"));
+  assert.deepEqual(calls[1], { name: "compactError", value: "boom" });
+});

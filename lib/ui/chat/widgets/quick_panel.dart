@@ -85,11 +85,13 @@ class _QuickPanelState extends ConsumerState<QuickPanel> {
                     visualDensity: VisualDensity.compact,
                     leading: PiToolAvatar(
                       icon: switch (command.source) {
+                        'builtin' => Icons.compress_outlined,
                         'skill' => Icons.bolt_outlined,
                         'prompt' => Icons.notes_outlined,
                         _ => Icons.extension_outlined,
                       },
                       category: switch (command.source) {
+                        'builtin' => PiToolCategory.terminal,
                         'skill' => PiToolCategory.search,
                         'prompt' => PiToolCategory.read,
                         _ => PiToolCategory.extension,
