@@ -15,6 +15,9 @@ import 'message_card.dart';
 
 const _kOutputMaxHeight = 280.0;
 
+/// 插件 `@juicesharp/rpiv-ask-user-question` 注入的问卷工具。
+const _kAskUserQuestion = 'ask_user_question';
+
 /// 工具调用卡片:按工具类型选择结构化渲染(read 行号/edit diff/write 代码)。
 class ToolCard extends ConsumerStatefulWidget {
   const ToolCard({super.key, required this.item});
@@ -34,6 +37,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
     'write' || 'edit' => Icons.edit_note,
     'grep' || 'find' => Icons.search,
     'ls' => Icons.folder_outlined,
+    _kAskUserQuestion => Icons.help_outline,
     _ => Icons.build_outlined,
   };
 
@@ -42,7 +46,12 @@ class _ToolCardState extends ConsumerState<ToolCard> {
     final colors = Theme.of(context).colorScheme;
     final piColors = PiColors.of(context);
     final item = widget.item;
-    final hasBody = item.output.isNotEmpty || _writeContent(item) != null;
+    // 问卷的内容全在**参数**里,不在 output 里。不把它算进 hasBody,
+    // 卡片就永远不可展开 —— 手机上只剩一个转不完的圈,看不出在等什么。
+    final hasBody =
+        item.output.isNotEmpty ||
+        _writeContent(item) != null ||
+        _questions(item) != null;
     final category = PiToolAvatar.categoryForTool(item.name);
     // 整条身份行铺类别色 —— 之前这 7 组色只染了一个 36dp 头像,
     // 埋在灰卡里根本看不出 bash / 读 / 写 / 搜索的区别。
@@ -121,9 +130,17 @@ class _ToolCardState extends ConsumerState<ToolCard> {
   }
 
   Widget _buildBody(BuildContext context, ToolItem item) {
-    final piColors = PiColors.of(context);
     final path = item.args?['path'];
     switch (item.name) {
+      case _kAskUserQuestion:
+        final questions = _questions(item);
+        if (questions != null) {
+          return _QuestionnaireView(
+            questions: questions,
+            answered: item.done,
+            output: item.output,
+          );
+        }
       case 'read':
         return CodeBlock(
           code: item.output,
@@ -154,22 +171,20 @@ class _ToolCardState extends ConsumerState<ToolCard> {
         }
     }
     // 默认:mono + ANSI 解析的输出井(固定井底,保证前景对比度与主题无关)
-    return Container(
-      width: double.infinity,
-      constraints: const BoxConstraints(maxHeight: _kOutputMaxHeight),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: piColors.codeWellBg,
-        borderRadius: BorderRadius.circular(PiShape.md),
-        border: Border.all(color: piColors.codeWellBorder),
-      ),
-      child: SingleChildScrollView(
-        child: AnsiText(
-          text: item.output,
-          style: AppType.monoSmall(color: piColors.codeWellFg),
-        ),
-      ),
-    );
+    return _outputWell(context, item.output);
+  }
+
+  /// 问卷题目。只在参数确实带着题目列表时返回,否则回落到普通工具卡渲染 ——
+  /// 参数在断层里丢了(历史 toolResult 常常没有 args)也不能把卡片搞坏。
+  static List<Map<String, dynamic>>? _questions(ToolItem item) {
+    if (item.name != _kAskUserQuestion) return null;
+    final raw = item.args?['questions'];
+    if (raw is! List || raw.isEmpty) return null;
+    final parsed = [
+      for (final entry in raw)
+        if (entry is Map) Map<String, dynamic>.from(entry),
+    ];
+    return parsed.isEmpty ? null : parsed;
   }
 
   /// write 工具的落盘内容:参数里叫 content 或 text。
@@ -216,5 +231,233 @@ class _ToolCardState extends ConsumerState<ToolCard> {
       merged.addAll(blocks[i]);
     }
     return merged;
+  }
+}
+
+/// 默认输出井:mono + ANSI 解析,固定井底保证前景对比度与主题无关。
+Widget _outputWell(BuildContext context, String text) {
+  final piColors = PiColors.of(context);
+  return Container(
+    width: double.infinity,
+    constraints: const BoxConstraints(maxHeight: _kOutputMaxHeight),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: piColors.codeWellBg,
+      borderRadius: BorderRadius.circular(PiShape.md),
+      border: Border.all(color: piColors.codeWellBorder),
+    ),
+    child: SingleChildScrollView(
+      child: AnsiText(
+        text: text,
+        style: AppType.monoSmall(color: piColors.codeWellFg),
+      ),
+    ),
+  );
+}
+
+/// 问卷的只读呈现。
+///
+/// 插件 `@juicesharp/rpiv-ask-user-question` 的问卷是电脑端 TUI 的覆盖层
+/// (`ctx.ui.custom()`),**不走** pi 的 select/confirm/input/editor 对话框协议,
+/// 所以手机既收不到 `extension_ui_request`,也没有任何可编程的应答入口 ——
+/// 插件全仓只有两处 `pi.events.emit`、零处 `pi.events.on`,答案唯一入口是
+/// TUI 组件内部的键盘输入。
+///
+/// 因此手机能做的只有一件事:把电脑正在等什么如实显示出来。题目和选项本来就
+/// 随 `tool_execution_start` 的 args 一起到了手机,以前只是没人渲染,于是卡片
+/// 上只剩一个转不完的圈,看不出在等人作答。
+class _QuestionnaireView extends StatelessWidget {
+  const _QuestionnaireView({
+    required this.questions,
+    required this.answered,
+    required this.output,
+  });
+
+  final List<Map<String, dynamic>> questions;
+  final bool answered;
+  final String output;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!answered) _WaitingHint(),
+        for (var i = 0; i < questions.length; i++) ...[
+          if (i > 0) const SizedBox(height: 12),
+          _QuestionBlock(question: questions[i], index: i),
+        ],
+        // 作答结果是模型看到的那份信封,答完了才有意义
+        if (answered && output.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _outputWell(context, output),
+        ],
+      ],
+    );
+  }
+}
+
+/// 「去电脑上作答」提示。手机上无法应答是硬约束,必须说清楚,
+/// 否则用户会一直等这张卡自己动。
+class _WaitingHint extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: colors.tertiaryContainer,
+        borderRadius: BorderRadius.circular(PiShape.sm),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.keyboard_outlined,
+            size: 18,
+            color: colors.onTertiaryContainer,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '电脑端正在等你作答 · 手机上只能查看',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colors.onTertiaryContainer,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 单个问题:序号 + header 标签 + 题干 + 选项。
+class _QuestionBlock extends StatelessWidget {
+  const _QuestionBlock({required this.question, required this.index});
+
+  final Map<String, dynamic> question;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final header = question['header'];
+    final text = question['question'];
+    final multi = question['multiSelect'] == true;
+    final options = question['options'];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${index + 1}.',
+              style: AppType.monoLabel(color: colors.onSurfaceVariant),
+            ),
+            const SizedBox(width: 8),
+            if (header is String && header.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(PiShape.xs),
+                ),
+                child: Text(
+                  header,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            if (multi) ...[
+              const SizedBox(width: 6),
+              Text(
+                '可多选',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: colors.primary,
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (text is String && text.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(text, style: theme.textTheme.bodyMedium),
+          ),
+        if (options is List)
+          for (final option in options)
+            if (option is Map) _OptionRow(option: option),
+      ],
+    );
+  }
+}
+
+/// 一个选项:标签 + 说明。带 preview 的额外标一下,
+/// 那是电脑上才看得到的并排对比内容。
+class _OptionRow extends StatelessWidget {
+  const _OptionRow({required this.option});
+
+  final Map option;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final label = option['label'];
+    final description = option['description'];
+    final preview = option['preview'];
+    final hasPreview = preview is String && preview.isNotEmpty;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, left: 24),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(Icons.circle, size: 6, color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        label is String ? label : '',
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                    ),
+                    if (hasPreview)
+                      Text(
+                        '含预览',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
+                ),
+                if (description is String && description.isNotEmpty)
+                  Text(
+                    description,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

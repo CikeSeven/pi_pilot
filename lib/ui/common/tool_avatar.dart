@@ -25,6 +25,8 @@ class PiToolAvatar extends StatelessWidget {
     'write' || 'edit' => PiToolCategory.edit,
     'grep' || 'find' => PiToolCategory.search,
     'ls' => PiToolCategory.files,
+    // 扩展注入的工具:与内置工具区分开,一眼看出这不是 pi 自己在读写文件。
+    'ask_user_question' => PiToolCategory.extension,
     _ => PiToolCategory.generic,
   };
 

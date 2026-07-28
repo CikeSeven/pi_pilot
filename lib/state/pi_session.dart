@@ -3268,6 +3268,11 @@ class PiSessionNotifier extends Notifier<PiState> {
       if (command is String) return _clip(command);
       final path = args['path'];
       if (path is String) return _clip(path);
+      // 问卷的第一个键是 questions,一个嵌套 List<Map>。落到下面那条
+      // 通用分支会把整个 Dart Map 的 toString 堵进副行 —— 一堆 {label: ...,
+      // description: ...} 噪声。这里只取题目的 header 当摘要。
+      final summary = _summarizeQuestions(args['questions']);
+      if (summary != null) return _clip(summary);
       if (args.isNotEmpty) {
         final first = args.entries.first;
         return _clip('${first.key}: ${first.value}');
@@ -3275,6 +3280,20 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     if (args == null) return '';
     return _clip(args.toString());
+  }
+
+  /// `ask_user_question` 的副行摘要:题目的 header 依次拼接,
+  /// 没有 header 就退回计数。不是问卷时返回 null 交回通用分支。
+  static String? _summarizeQuestions(dynamic raw) {
+    if (raw is! List || raw.isEmpty) return null;
+    final headers = <String>[];
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final header = entry['header'];
+      if (header is String && header.isNotEmpty) headers.add(header);
+    }
+    if (headers.isNotEmpty) return headers.join(' · ');
+    return '${raw.length} 个问题';
   }
 
   /// 单行摘要的长度上限。换行也一并压掉 —— 副行只有一行的位置。
@@ -3286,4 +3305,9 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 测试入口:截断规则决定工具卡会不会撑爆,值得钉住。
   @visibleForTesting
   static String debugClip(String value, [int max = 120]) => _clip(value, max);
+
+  /// 测试入口:副行摘要是问卷卡上唯一的一行状态文字,
+  /// 回落到通用分支就会变成一坨 Dart Map 的 toString。
+  @visibleForTesting
+  static String debugSummarizeArgs(dynamic args) => _summarizeArgs(args);
 }
