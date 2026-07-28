@@ -127,7 +127,14 @@ test("pong echo, desktop snapshot reads, and extension_ui_response gating", asyn
           label: "Test desktop",
           cwd: "/tmp/pipilot-ext-test",
           sessionId: "session-test",
-          capabilities: ["prompt", "abort", "set_model", "set_thinking_level", "set_session_name"],
+          capabilities: [
+            "prompt",
+            "abort",
+            "set_model",
+            "set_thinking_level",
+            "set_session_name",
+            "tree-summary-on-demand",
+          ],
         },
         snapshot: {
           epoch: "epoch-test",
@@ -138,7 +145,7 @@ test("pong echo, desktop snapshot reads, and extension_ui_response gating", asyn
           leafId: "leaf-1",
           stats: { tokens: { input: 10, output: 5, total: 15 }, cost: 0.12 },
           commands: [{ name: "commit", description: "commit changes", source: "extension" }],
-          treeSummary: [{ id: "leaf-1", parentId: null, type: "message", timestamp: 1 }],
+          // 故意不带 treeSummary:真实长会话的快照正是这个形态。
         },
       }),
     );
@@ -167,11 +174,45 @@ test("pong echo, desktop snapshot reads, and extension_ui_response gating", asyn
     assert.equal(commands.success, true);
     assert.equal(commands.data.commands[0].name, "commit");
 
-    const tree = await phone.request("get_tree");
+    // 快照没有 treeSummary 时,Hub 必须向桌面 relay 独立取树,不能再直接报
+    // "desktop snapshot does not include a tree"。
+    const treePromise = phone.request("get_tree");
+    const treeRequest = await desktop.waitFor(
+      (frame) => frame.type === "desktop_tree_request",
+    );
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_tree",
+        requestId: treeRequest.requestId,
+        epoch: "epoch-test",
+        tree: [{ id: "leaf-1", type: "message", timestamp: 1, children: [] }],
+        leafId: "leaf-1",
+      }),
+    );
+    const tree = await treePromise;
     assert.equal(tree.success, true);
     assert.equal(tree.data.summary, true);
     assert.equal(tree.data.tree[0].id, "leaf-1");
     assert.equal(tree.data.leafId, "leaf-1");
+
+    // 取树失败必须带回 relay 给的原因。全部塌缩成一句「不可用」的话,
+    // 手机上看不出到底是超预算、ctx 失效还是 epoch 不一致。
+    const failPromise = phone.request("get_tree");
+    // waitFor 是从累积帧里从头找的,必须排除上一次已结算的 requestId。
+    const failRequest = await desktop.waitFor(
+      (frame) =>
+        frame.type === "desktop_tree_request" && frame.requestId !== treeRequest.requestId,
+    );
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_tree_unavailable",
+        requestId: failRequest.requestId,
+        reason: "stale_ctx",
+      }),
+    );
+    const failed = await failPromise;
+    assert.equal(failed.success, false);
+    assert.match(failed.error, /stale_ctx/);
 
     // extension_ui_response:无 lease 拒绝
     const noLease = await phone.request("extension_ui_response", {

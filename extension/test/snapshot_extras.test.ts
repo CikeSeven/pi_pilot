@@ -87,11 +87,36 @@ test("buildTreeSummary degrades instead of dropping the whole tree", () => {
   assert.ok(summary, "超预算也不能返回 undefined");
   // 全部都是根节点,结构上无可剪,只能靠缩预览压下来
   assert.equal(summary.length, 3000);
-  assert.ok(JSON.stringify(summary).length <= 256 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(summary)) <= 256 * 1024);
   assert.equal((summary[0] as any).preview, undefined);
   // id 必须完整保留,否则回退会跳到错的节点
   assert.equal((summary[0] as any).id, "node-0");
   assert.equal((summary[2999] as any).id, "node-2999");
+});
+
+/// 预算是 WebSocket 的 UTF-8 字节,不能拿 JS string.length 代替。
+/// 900 个中文节点的 code unit 数量仍在预算内,UTF-8 却会越界。降级必须按
+/// 真字节数缩短预览,同时保住全部可回退 id。
+test("buildTreeSummary measures Chinese previews in UTF-8 bytes", () => {
+  const tree = Array.from({ length: 900 }, (_, i) => ({
+    entry: {
+      id: `节点-${i}`,
+      parentId: null,
+      type: "message",
+      timestamp: i,
+      message: { role: "user", content: "树".repeat(120) },
+    },
+    children: [],
+  }));
+  const summary = buildTreeSummary(tree)! as any[];
+  const encoded = JSON.stringify(summary);
+
+  assert.equal(summary.length, 900);
+  assert.ok(Buffer.byteLength(encoded) <= 256 * 1024);
+  // 120 字预览装不下,必须降级;按字符数计算会错误地保留 120 字。
+  assert.ok(summary[0].preview.length < 121);
+  assert.equal(summary[0].id, "节点-0");
+  assert.equal(summary[899].id, "节点-899");
 });
 
 /// 长线性会话(没有分叉)是最常见的形态:一条单链几千节点。
@@ -114,7 +139,7 @@ test("buildTreeSummary prunes a long linear chain but keeps root/leaf/marks", ()
 
   const summary = buildTreeSummary([root])!;
   assert.ok(summary, "长单链也必须给出一棵树");
-  assert.ok(JSON.stringify(summary).length <= 256 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(summary)) <= 256 * 1024);
 
   // 展开看留下了什么
   const ids = new Set<string>();

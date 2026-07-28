@@ -220,6 +220,99 @@ function failSnapshotRequestsForSource(sourceId: string): void {
   if (id) settleSnapshotRequest(sourceId, id, false);
 }
 
+const LIVE_TREE_CAPABILITY = "tree-summary-on-demand";
+
+interface DesktopTreeResult {
+  tree: JsonObject[];
+  leafId: string | null;
+}
+
+/**
+ * 失败必须带上原因。relay 侧 stale_epoch / stale_ctx / 超预算是完全不同的故障,
+ * 全部塌缩成一句「不可用」时,手机和排查者都无从下手。
+ */
+type DesktopTreeOutcome =
+  | ({ ok: true } & DesktopTreeResult)
+  | { ok: false; reason: string };
+
+interface TreeWaiter {
+  resolve: (outcome: DesktopTreeOutcome) => void;
+  timer: NodeJS.Timeout;
+}
+
+const treeRequests = new Map<string, { sourceId: string; waiters: TreeWaiter[] }>();
+const treeInFlight = new Map<string, string>();
+
+function settleTreeRequest(
+  sourceId: string,
+  requestId: string | undefined,
+  outcome: DesktopTreeOutcome = { ok: false, reason: "桌面端超时未回应" },
+): void {
+  const id = requestId ?? treeInFlight.get(sourceId);
+  if (!id) return;
+  const entry = treeRequests.get(id);
+  // 另一条桌面连接不能用猜到/拿错的 requestId 兑现本源请求。
+  if (!entry || entry.sourceId !== sourceId) return;
+  treeRequests.delete(id);
+  if (treeInFlight.get(sourceId) === id) treeInFlight.delete(sourceId);
+  for (const waiter of entry.waiters) {
+    clearTimeout(waiter.timer);
+    waiter.resolve(outcome);
+  }
+}
+
+function failTreeRequestsForSource(sourceId: string): void {
+  const id = treeInFlight.get(sourceId);
+  if (id) settleTreeRequest(sourceId, id, { ok: false, reason: "桌面端已断开" });
+}
+
+function requestDesktopTree(
+  sourceId: string,
+  timeoutMs = config.snapshotRequestTimeoutMs,
+): Promise<DesktopTreeOutcome> {
+  const source = sources.get(sourceId);
+  if (!source || source.kind !== "desktop" || !source.connected) {
+    return Promise.resolve({ ok: false, reason: "桌面端未连接" });
+  }
+  if (!source.capabilities.includes(LIVE_TREE_CAPABILITY)) {
+    // 老版 relay 只会把树塞在快照里,发这一帧只会白等一个超时。
+    return Promise.resolve({
+      ok: false,
+      reason: "桌面端插件版本较旧,请在桌面 pi 里执行 /reload",
+    });
+  }
+  const existing = treeInFlight.get(sourceId);
+  if (existing) {
+    return new Promise((resolve) => {
+      const entry = treeRequests.get(existing);
+      if (!entry) {
+        resolve({ ok: false, reason: "桌面端请求已失效" });
+        return;
+      }
+      const timer = setTimeout(
+        () => resolve({ ok: false, reason: "桌面端超时未回应" }),
+        timeoutMs,
+      );
+      timer.unref();
+      entry.waiters.push({ resolve, timer });
+    });
+  }
+
+  const requestId = `tree:${crypto.randomUUID()}`;
+  const sent = sources.transport(sourceId)?.send({
+    type: "desktop_tree_request",
+    requestId,
+    epoch: source.epoch,
+  });
+  if (sent !== true) return Promise.resolve({ ok: false, reason: "发送失败,桌面端连接不可用" });
+  treeInFlight.set(sourceId, requestId);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => settleTreeRequest(sourceId, requestId), timeoutMs);
+    timer.unref();
+    treeRequests.set(requestId, { sourceId, waiters: [{ resolve, timer }] });
+  });
+}
+
 function requestDesktopSnapshot(
   sourceId: string,
   timeoutMs = config.snapshotRequestTimeoutMs,
@@ -623,7 +716,36 @@ function dispatchSourceCommand(
   });
 }
 
+async function handleDesktopTreeRead(
+  client: MobileClient,
+  source: SourceDescriptor,
+  msg: BridgeMessage,
+): Promise<void> {
+  // treeSummary 是大快照里的兼容缓存。缓存存在就立即返回;缺失时实时向
+  // relay 取树。用户主动打开会话树才付这 30~50ms,不再让每次历史同步
+  // 背一棵深树,老版 relay 也不会让已有缓存白等 4 秒。
+  const cached = sources.getSnapshot(source.id);
+  if (cached?.treeSummary) {
+    respond(client.ws, msg, true, {
+      tree: cached.treeSummary,
+      leafId: cached.leafId,
+      summary: true,
+    });
+    return;
+  }
+  const live = await requestDesktopTree(source.id);
+  if (live.ok) {
+    respond(client.ws, msg, true, { tree: live.tree, leafId: live.leafId, summary: true });
+    return;
+  }
+  respond(client.ws, msg, false, undefined, `会话树读取失败:${live.reason}`);
+}
+
 function handleDesktopRead(client: MobileClient, source: SourceDescriptor, msg: BridgeMessage): void {
+  if (msg.type === "get_tree") {
+    void handleDesktopTreeRead(client, source, msg);
+    return;
+  }
   const snapshot = sources.getSnapshot(source.id);
   if (!snapshot) {
     respond(client.ws, msg, false, undefined, "desktop snapshot is not available yet");
@@ -658,17 +780,6 @@ function handleDesktopRead(client: MobileClient, source: SourceDescriptor, msg: 
       return;
     case "get_commands":
       respond(client.ws, msg, true, { commands: snapshot.commands ?? [] });
-      return;
-    case "get_tree":
-      if (!snapshot.treeSummary) {
-        respond(client.ws, msg, false, undefined, "desktop snapshot does not include a tree");
-        return;
-      }
-      respond(client.ws, msg, true, {
-        tree: snapshot.treeSummary,
-        leafId: snapshot.leafId,
-        summary: true,
-      });
       return;
     case "get_available_thinking_levels":
       respond(client.ws, msg, true, {
@@ -1553,6 +1664,41 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
       );
       return;
 
+    case "desktop_tree": {
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
+      const source = sources.get(sourceId);
+      const tree = Array.isArray(msg.tree)
+        ? msg.tree.filter(
+            (node): node is JsonObject => Boolean(node) && typeof node === "object",
+          )
+        : undefined;
+      const leafId =
+        typeof msg.leafId === "string" || msg.leafId === null ? msg.leafId : undefined;
+      if (!requestId || msg.epoch !== source?.epoch || !tree || leafId === undefined) {
+        settleTreeRequest(sourceId, requestId, {
+          ok: false,
+          reason:
+            msg.epoch !== source?.epoch
+              ? "桌面端会话已重建(epoch 不一致),请重新进入会话树"
+              : "桌面端返回的树结构无效",
+        });
+        return;
+      }
+      settleTreeRequest(sourceId, requestId, { ok: true, tree, leafId });
+      return;
+    }
+
+    case "desktop_tree_unavailable":
+      settleTreeRequest(
+        sourceId,
+        typeof msg.requestId === "string" ? msg.requestId : undefined,
+        {
+          ok: false,
+          reason: typeof msg.reason === "string" && msg.reason ? msg.reason : "桌面端无法生成会话树",
+        },
+      );
+      return;
+
     case "desktop_event": {
       if (
         typeof msg.epoch !== "string" ||
@@ -1695,6 +1841,7 @@ wss.on("connection", (ws, req) => {
       sources.setConnected(sourceId, false);
       streamingBySource.delete(sourceId);
       failSnapshotRequestsForSource(sourceId);
+      failTreeRequestsForSource(sourceId);
       failPendingForSource(sourceId, "desktop source disconnected");
       // 释放会话占用:电脑端走了之后,这个会话应该能重新在 bridge 上打开。
       // (不释放的话 claim 表会永久堵住它。)

@@ -20,6 +20,8 @@ const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
 const MAX_COMMAND_QUEUE = 32;
 const MAX_COMMAND_RESULTS = 256;
+/** Hub 用它判断 relay 是否支持独立的按需会话树帧。 */
+const LIVE_TREE_CAPABILITY = "tree-summary-on-demand";
 
 function serializeModel(model: ExtensionContext["model"]): JsonObject | null {
   if (!model) return null;
@@ -40,7 +42,7 @@ function sanitizeSourceId(value: string): string {
   return value.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 128);
 }
 
-/** treeSummary 的字节预算;超出直接从快照剔除。 */
+/** treeSummary 的 UTF-8 字节预算。既用于快照兼容字段,也用于按需树响应。 */
 const TREE_SUMMARY_BYTE_BUDGET = 256 * 1024;
 
 /// treeSummary 的最大嵌套深度。
@@ -349,7 +351,9 @@ export function buildTreeSummary(tree: unknown[]): JsonObject[] | undefined {
   // 完全一样。所以先量深度,超了就直接进剪枝层把链压短。
   const fits = (summary: JsonObject[]) => {
     try {
-      return JSON.stringify(summary).length <= TREE_SUMMARY_BYTE_BUDGET;
+      // 协议限制是字节而不是 JS UTF-16 code unit。中文预览通常是 3 字节,
+      // 用 string.length 会把实际负载低估到约三分之一。
+      return Buffer.byteLength(JSON.stringify(summary)) <= TREE_SUMMARY_BYTE_BUDGET;
     } catch {
       return false;
     }
@@ -722,6 +726,45 @@ export class DesktopRelay {
         return;
       }
 
+      case "desktop_tree_request": {
+        // 会话树不再依赖大快照里的可选 treeSummary 字段。长会话快照会降级,
+        // 而树是用户主动打开时才需要的,按需生成既新鲜又不会拖累每次同步。
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+        const ctx = this.liveCtx();
+        if (!requestId || !this.registered || !ctx || msg.epoch !== this.epoch) {
+          if (requestId) {
+            this.sendFrame({
+              type: "desktop_tree_unavailable",
+              requestId,
+              reason: !this.registered
+                ? "not_registered"
+                : !ctx
+                  ? "stale_ctx"
+                  : "stale_epoch",
+            });
+          }
+          return;
+        }
+        try {
+          const tree = buildTreeSummary(ctx.sessionManager.getTree());
+          if (!tree) throw new Error("tree summary exceeds its byte budget");
+          this.sendFrame({
+            type: "desktop_tree",
+            requestId,
+            epoch: this.epoch,
+            leafId: ctx.sessionManager.getLeafId(),
+            tree,
+          });
+        } catch (error) {
+          this.sendFrame({
+            type: "desktop_tree_unavailable",
+            requestId,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+
       case "desktop_resync_required":
         this.resnapshot(typeof msg.reason === "string" ? msg.reason : "hub requested resync");
         return;
@@ -894,7 +937,7 @@ export class DesktopRelay {
           sessionId: ctx.sessionManager.getSessionId(),
           sessionFile: ctx.sessionManager.getSessionFile(),
           sessionName: ctx.sessionManager.getSessionName(),
-          capabilities: [...SAFE_REMOTE_COMMANDS],
+          capabilities: [...SAFE_REMOTE_COMMANDS, LIVE_TREE_CAPABILITY],
         },
         snapshot,
       },
@@ -963,13 +1006,6 @@ export class DesktopRelay {
     } catch {
       commands = undefined;
     }
-    let treeSummary: JsonObject[] | undefined;
-    try {
-      treeSummary = buildTreeSummary(ctx.sessionManager.getTree());
-    } catch {
-      treeSummary = undefined;
-    }
-
     const makeSnapshot = (): JsonObject => ({
       epoch: this.epoch,
       baseSeq: this.seq,
@@ -982,19 +1018,17 @@ export class DesktopRelay {
       ...(this.inFlightMessage ? { inFlightMessage: this.inFlightMessage } : {}),
       ...(stats ? { stats } : {}),
       ...(commands ? { commands } : {}),
-      ...(treeSummary ? { treeSummary } : {}),
     });
 
-    // 超限丢弃顺序:treeSummary → commands → 截断 entries
+    // 会话树走 desktop_tree_request 独立按需读取,不再塞进每一份快照。
+    // 快照超限时先丢可重建的命令列表,再截断最老的历史 entries。
     let snapshot = makeSnapshot();
     for (;;) {
       try {
         encodeForWire(snapshot, MAX_SNAPSHOT_BYTES);
         return snapshot;
       } catch {
-        if (treeSummary) {
-          treeSummary = undefined;
-        } else if (commands) {
+        if (commands) {
           commands = undefined;
         } else if (entries.length > 1) {
           const removeCount = Math.max(1, Math.floor(entries.length / 4));

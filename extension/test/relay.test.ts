@@ -88,6 +88,18 @@ test("relay registers, coalesces updates, and fences commands", async () => {
           message: { role: "user", content: "existing", timestamp: 1 },
         },
       ],
+      getTree: () => [
+        {
+          entry: {
+            type: "message",
+            id: "entry-1",
+            parentId: null,
+            timestamp: 1,
+            message: { role: "user", content: "existing", timestamp: 1 },
+          },
+          children: [],
+        },
+      ],
       getSessionId: () => "in-memory-session",
       getSessionFile: () => undefined,
       getSessionName: () => "Test",
@@ -123,6 +135,21 @@ test("relay registers, coalesces updates, and fences commands", async () => {
     );
     assert.equal(registration.snapshot.entries[0].id, "entry-1");
     await waitFor(() => frames.find((frame) => frame.type === "desktop_snapshot"));
+
+    // 会话树走独立按需帧,不依赖快照里的可选 treeSummary 字段。
+    sourceSocket!.send(
+      JSON.stringify({
+        type: "desktop_tree_request",
+        requestId: "tree-1",
+        epoch: registration.snapshot.epoch,
+      }),
+    );
+    const tree = await waitFor(() =>
+      frames.find((frame) => frame.type === "desktop_tree" && frame.requestId === "tree-1"),
+    );
+    assert.equal(tree.epoch, registration.snapshot.epoch);
+    assert.equal(tree.leafId, "entry-1");
+    assert.equal(tree.tree[0].id, "entry-1");
 
     relay.emitMessageUpdate(
       { type: "message_update", message: { role: "assistant", content: "a" } },
