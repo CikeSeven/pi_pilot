@@ -53,7 +53,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            '主机地址格式不正确,示例:10.183.39.204 或 http://10.183.39.204:9377',
+            '主机地址格式不正确,示例:192.168.1.100 或 http://192.168.1.100:9377',
           ),
         ),
       );
@@ -95,7 +95,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
                     controller: _host,
                     decoration: const InputDecoration(
                       labelText: '主机',
-                      hintText: '10.183.39.204',
+                      hintText: '192.168.1.100',
                       prefixIcon: Icon(Icons.dns_outlined),
                     ),
                   ),

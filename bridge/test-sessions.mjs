@@ -1,5 +1,6 @@
 // P3 smoke test: bridge session-management commands.
 // Usage: PIPILOT_TEST_URL='ws://127.0.0.1:9377?token=...' node test-sessions.mjs
+import os from "node:os";
 import WebSocket from "ws";
 
 const url = process.argv[2] ?? process.env.PIPILOT_TEST_URL;
@@ -39,8 +40,9 @@ ws.on("open", async () => {
       console.log(`  ${d.sessionCount}\t${d.cwd}`);
     }
 
-    const homeDir = dirs.data.dirs.find((d) => d.cwd === "/home/sisct");
-    const sessions = await request("bridge_list_sessions", { cwd: "/home/sisct" });
+    const home = os.homedir();
+    const homeDir = dirs.data.dirs.find((d) => d.cwd === home);
+    const sessions = await request("bridge_list_sessions", { cwd: home });
     console.log("list_sessions success:", sessions.success,
       "count:", sessions.data.sessions.length,
       "expected:", homeDir?.sessionCount);
@@ -51,7 +53,8 @@ ws.on("open", async () => {
     console.log("get_config:", JSON.stringify(cfg.data));
 
     // Switch to the PiPilot project dir, then switch back.
-    const target = "/home/sisct/Code/projects/FlutterProjects/PiPilot";
+    // 换一个确实有会话的目录:取列表里第一个非 home 目录,回退到 piCwd
+    const target = dirs.data.dirs.find((d) => d.cwd !== home)?.cwd ?? cfg.data.piCwd;
     const sw = await request("bridge_switch_dir", { cwd: target });
     console.log("switch_dir success:", sw.success, "->", sw.data?.cwd);
     await sleep(1200);

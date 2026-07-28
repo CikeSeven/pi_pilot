@@ -4,9 +4,9 @@ import 'package:pi_pilot/core/pi_connection.dart';
 void main() {
   group('parseHostInput', () {
     test('误粘贴完整 http URL(带路径与端口)', () {
-      final r = parseHostInput('http://10.183.39.204:9377/health');
+      final r = parseHostInput('http://192.168.1.100:9377/health');
       expect(r, isNotNull);
-      expect(r!.host, '10.183.39.204');
+      expect(r!.host, '192.168.1.100');
       expect(r.port, 9377);
     });
 
@@ -18,26 +18,26 @@ void main() {
     });
 
     test('纯 IPv4', () {
-      final r = parseHostInput('10.183.39.204');
-      expect(r!.host, '10.183.39.204');
+      final r = parseHostInput('192.168.1.100');
+      expect(r!.host, '192.168.1.100');
       expect(r.port, isNull);
     });
 
     test('IPv4:port', () {
-      final r = parseHostInput('10.183.39.204:9377');
-      expect(r!.host, '10.183.39.204');
+      final r = parseHostInput('192.168.1.100:9377');
+      expect(r!.host, '192.168.1.100');
       expect(r.port, 9377);
     });
 
     test('误带路径(无 scheme)', () {
-      final r = parseHostInput('10.183.39.204/health');
-      expect(r!.host, '10.183.39.204');
+      final r = parseHostInput('192.168.1.100/health');
+      expect(r!.host, '192.168.1.100');
       expect(r.port, isNull);
     });
 
     test('前后空格 trim', () {
-      final r = parseHostInput('  10.183.39.204  ');
-      expect(r!.host, '10.183.39.204');
+      final r = parseHostInput('  192.168.1.100  ');
+      expect(r!.host, '192.168.1.100');
     });
 
     test('主机名', () {

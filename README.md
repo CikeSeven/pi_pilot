@@ -69,10 +69,10 @@ flutter run
 
 设置页填写电脑的 LAN/Tailscale 地址、端口 `9377` 和 `PIPILOT_TOKEN`。连接后选一个会话就能直接说话——没有额外的授权步骤。
 
-同一 WiFi 下使用真实 LAN 地址，例如 `10.183.39.204`，不要使用 Docker bridge 地址。若 UFW 默认拒绝入站，需要按当前子网开放 9377：
+同一 WiFi 下使用真实 LAN 地址，例如 `192.168.1.100`，不要使用 Docker bridge 地址。若 UFW 默认拒绝入站，需要按当前子网开放 9377：
 
 ```bash
-sudo ufw allow from 10.183.39.0/24 to any port 9377 proto tcp
+sudo ufw allow from 192.168.1.0/24 to any port 9377 proto tcp
 ```
 
 ## 安全与会话完整性

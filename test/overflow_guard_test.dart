@@ -100,8 +100,8 @@ void main() {
   /// 这里量的是几何位置,不是「有没有抛异常」—— 那个 bug 从不抛异常。
   testWidgets('状态位贴在身份行最右侧,而不是中间', (tester) async {
     final item = ToolItem('tool:right', toolCallId: 'r', name: 'bash')
-      ..argsSummary = 'cd /home/sisct/Code/projects/FlutterProjects/PiPilot'
-      ..args = {'command': 'cd /home/sisct/Code'}
+      ..argsSummary = 'cd /home/user/Code/projects/FlutterProjects/PiPilot'
+      ..args = {'command': 'cd /home/user/Code'}
       ..output = 'ok'
       ..done = true;
     await pumpNarrow(tester, ChatItemView(item: item));
