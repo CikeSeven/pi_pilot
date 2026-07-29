@@ -229,11 +229,13 @@ class _ComposerState extends State<Composer> {
                               const EdgeInsets.symmetric(vertical: 10),
                         ),
                       ),
-                      // 第二行:模型选择胶囊 + 发送键
+                      // 第二行:模型选择胶囊 + 上下文环 + 发送键
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
                           const ModelPicker(),
+                          const SizedBox(width: 8),
+                          const _ContextRing(),
                           const Spacer(),
                           _SendButton(
                             showStop: showStop,
@@ -653,6 +655,60 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
                 ),
         ),
       ],
+    );
+  }
+}
+
+/// 上下文占用圆环:30px 小环,和模型胶囊并排。
+///
+/// 颜色语义:<60% 主题色(安全),60-85% 琥珀(注意),>85% 砖红(快满)。
+/// 中间放百分比数字(mono 等宽,8.5px 塞得下三位数)。
+class _ContextRing extends ConsumerWidget {
+  const _ContextRing();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final colors = Theme.of(context).colorScheme;
+    final usage = ref.watch(piSessionProvider.select((s) => s.contextUsage));
+    final percent = usage?.percent;
+    if (percent == null) return const SizedBox.shrink();
+
+    final color = percent < 60
+        ? colors.primary
+        : percent < 85
+            ? const Color(0xFFB8860B) // 琥珀:复古色系里的「注意」
+            : colors.error;
+
+    final label = percent >= 100 ? '满' : '$percent';
+
+    return Tooltip(
+      message: '上下文占用 $percent%',
+      child: SizedBox(
+        width: 30,
+        height: 30,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            CircularProgressIndicator(
+              value: (percent / 100).clamp(0.0, 1.0),
+              strokeWidth: 2.5,
+              strokeCap: StrokeCap.round,
+              backgroundColor: colors.outlineVariant.withValues(alpha: 0.3),
+              color: color,
+            ),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 8.5,
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.w600,
+                color: color,
+                height: 1,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
