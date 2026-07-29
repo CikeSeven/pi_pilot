@@ -21,6 +21,14 @@ class KeepAliveService : Service() {
         private const val notificationId = 1
         private const val actionStart = "com.pipilot.pi_pilot.KEEP_ALIVE_START"
 
+        @Volatile private var running = false
+
+        /// Dart 推下来的连接与会话计数。sessionCount=-1 表示还没收到过推送,
+        /// 常驻通知保持初始文案。
+        @Volatile private var hubConnected = false
+        @Volatile private var sessionCount = -1
+        @Volatile private var workingCount = 0
+
         fun start(context: Context) {
             val intent = Intent(context, KeepAliveService::class.java).setAction(actionStart)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -33,13 +41,64 @@ class KeepAliveService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, KeepAliveService::class.java))
         }
+
+        /// Dart 侧在连接状态或会话计数变化时调用。服务没跑就只记录,
+        /// 下次 startForeground 时会用上最新值。
+        fun updateStatus(context: Context, connected: Boolean, sessions: Int, working: Int) {
+            hubConnected = connected
+            sessionCount = sessions
+            workingCount = working
+            if (!running) return
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager.notify(notificationId, buildNotification(context))
+        }
+
+        private fun buildNotification(context: Context): Notification {
+            val openApp = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                openApp,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(context, channelId)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(context)
+            }
+            val (title, text) = when {
+                sessionCount < 0 ->
+                    "PiPilot 连接中" to "保持与 bridge 的连接，后台可接收任务完成提醒"
+                !hubConnected ->
+                    "PiPilot 连接中" to "与 bridge 的连接已断开，正在自动重连…"
+                workingCount > 0 ->
+                    "已连接 PiPilot" to "${sessionCount}个会话已连接，${workingCount}个会话正在工作中"
+                else ->
+                    "已连接 PiPilot" to "${sessionCount}个会话已连接，所有会话均空闲中"
+            }
+            return builder
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setContentIntent(pendingIntent)
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setPriority(Notification.PRIORITY_LOW)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .build()
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
-        val notification = buildNotification()
+        val notification = buildNotification(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 notificationId,
@@ -50,6 +109,7 @@ class KeepAliveService : Service() {
             startForeground(notificationId, notification)
         }
         acquireWakeLock()
+        running = true
         Log.i(tag, "started: wakeLock=${wakeLock?.isHeld == true}")
         return START_NOT_STICKY
     }
@@ -67,6 +127,7 @@ class KeepAliveService : Service() {
 
     override fun onDestroy() {
         releaseWakeLock()
+        running = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         Log.i(tag, "stopped")
         super.onDestroy()
@@ -89,36 +150,6 @@ class KeepAliveService : Service() {
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
         manager.createNotificationChannel(channel)
-    }
-
-    private fun buildNotification(): Notification {
-        val openApp = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            openApp,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, channelId)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-        return builder
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("PiPilot 连接中")
-            .setContentText("保持与 bridge 的连接，后台可接收任务完成提醒")
-            .setContentIntent(pendingIntent)
-            .setCategory(Notification.CATEGORY_SERVICE)
-            .setPriority(Notification.PRIORITY_LOW)
-            .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .build()
     }
 
     @SuppressLint("WakelockTimeout")

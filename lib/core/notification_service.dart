@@ -38,6 +38,10 @@ class NotificationService {
   /// 复用 Dart 侧身份会让两条连接互相顶掉。
   static const String _watcherClientId = 'pipilot-native-watcher';
 
+  /// FGS 常驻通知的 id(在 KeepAliveService.kt 里固定为 1)。全扫取消任务
+  /// 通知时必须跳过它,否则前台服务可能因通知被撤而被系统降级。
+  static const int _keepAliveNotificationId = 1;
+
   static const _quietTaskChannelDefinition = AndroidNotificationChannel(
     _quietTaskChannelId,
     '任务提醒（无震动）',
@@ -248,6 +252,47 @@ class NotificationService {
       await logDiagnostic('watcher stopped');
     } on PlatformException catch (error) {
       await logDiagnostic('watcher stop failed: $error');
+    }
+  }
+
+  /// 更新 FGS 常驻通知的标题与会话计数。服务未运行时原生只记录、不刷新,
+  /// 下次启动服务时会用上最新值。
+  Future<void> updateKeepAliveStatus({
+    required bool connected,
+    required int sessions,
+    required int working,
+  }) async {
+    try {
+      await _systemChannel.invokeMethod<void>('updateKeepAlive', {
+        'connected': connected,
+        'sessions': sessions,
+        'working': working,
+      });
+    } on PlatformException {
+      // engine teardown 期间通道可能不可用,状态刷新不该影响功能。
+    }
+  }
+
+  /// 回前台时清掉所有任务通知:Dart 的 100+、原生 watcher 的 200+,
+  /// 以及进程被杀后残留在通知栏的孤儿通知。只保留 FGS 常驻通知 id=1。
+  Future<void> cancelTaskNotifications() async {
+    await init();
+    if (!_initialized) return;
+    try {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+      final active =
+          await android?.getActiveNotifications() ??
+          const <ActiveNotification>[];
+      for (final notification in active) {
+        final id = notification.id;
+        if (id == null || id == _keepAliveNotificationId) continue;
+        await _plugin.cancel(id: id);
+      }
+    } catch (error) {
+      await logDiagnostic('cancel task notifications failed: $error');
     }
   }
 

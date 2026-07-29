@@ -26,6 +26,16 @@ class MainActivity : FlutterActivity() {
                         KeepAliveService.stop(applicationContext)
                         result.success(null)
                     }
+                    // Dart 在连接状态或会话计数变化时推送,常驻通知跟着刷新
+                    "updateKeepAlive" -> {
+                        KeepAliveService.updateStatus(
+                            applicationContext,
+                            call.argument<Boolean>("connected") ?: false,
+                            call.argument<Int>("sessions") ?: -1,
+                            call.argument<Int>("working") ?: 0,
+                        )
+                        result.success(null)
+                    }
                     // 切后台时由 Dart 交出连接参数,之后连接由原生线程独立维护
                     "startWatcher" -> {
                         val host = call.argument<String>("host")

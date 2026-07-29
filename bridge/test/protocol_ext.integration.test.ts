@@ -673,3 +673,100 @@ test("mobile snapshots are clipped to a byte budget and older history pages back
     ]);
   }
 });
+
+test("streaming flips broadcast refreshed sessions so keepalive counts stay fresh", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:stream",
+          label: "Stream desktop",
+          cwd: "/tmp/pipilot-stream",
+          sessionId: "session-stream",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-stream",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-stream", isStreaming: false },
+          entries: [],
+          leafId: "leaf-1",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    // select 会触发一次 notifySessionsChanged(streaming=false 的基准帧)。
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:stream" })).success,
+      true,
+    );
+
+    const streamingOf = (frame: Frame): boolean | undefined => {
+      if (frame.type !== "hub_sessions_changed") return undefined;
+      const sessions = Array.isArray(frame.sessions) ? frame.sessions : [];
+      const found = sessions.find((s) => s?.sessionId === "session-stream");
+      return found ? found.streaming === true : undefined;
+    };
+
+    // agent_start → streaming 翻成 true,sessions 广播必须立刻跟上,
+    // 否则手机常驻通知的「工作中」计数停在 0。
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_event",
+        sourceId: "desktop:stream",
+        epoch: "epoch-stream",
+        seq: 1,
+        event: { type: "agent_start" },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_ack" && frame.seq === 1);
+    const startBroadcast = await phone.waitFor(
+      (frame) => streamingOf(frame) === true,
+    );
+
+    // agent_end → 翻回 false。注意 150ms 防抖:等 true 那轮广播结算完再发,
+    // 否则两个翻转合并成一轮,中间态永远见不着。
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_event",
+        sourceId: "desktop:stream",
+        epoch: "epoch-stream",
+        seq: 2,
+        event: { type: "agent_end" },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_ack" && frame.seq === 2);
+    // waitFor 从头扫累积帧:select 时的基准帧也是 streaming=false,
+    // 必须排除掉 startBroadcast 之前(含)的所有帧。
+    const startIdx = phone.frames.indexOf(startBroadcast);
+    await phone.waitFor(
+      (frame) => phone.frames.indexOf(frame) > startIdx && streamingOf(frame) === false,
+    );
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});

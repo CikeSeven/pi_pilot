@@ -59,6 +59,10 @@ object BridgeWatcher {
     private var attempt = 0
     private var notificationId = notificationIdBase
 
+    /// 已发出的任务完成通知 id,stop 时逐个取消 —— 用户回到 App 后通知栏里
+    /// 不该还躺着「任务完成」。
+    private val postedNotificationIds = mutableSetOf<Int>()
+
     /// 已经为当前一轮生成发过完成通知,避免 agent_end 与 agent_settled 重复触发。
     private var endNotified = false
 
@@ -91,13 +95,23 @@ object BridgeWatcher {
 
     @Synchronized
     fun stop() {
-        if (!running && socket == null) return
+        if (!running && socket == null && postedNotificationIds.isEmpty()) return
         running = false
         config = null
         attempt = 0
         reconnectPending = false
         closeSocket()
+        cancelPostedNotifications()
         Log.i(tag, "stopped")
+    }
+
+    private fun cancelPostedNotifications() {
+        if (postedNotificationIds.isEmpty()) return
+        val manager = appContext?.getSystemService(NotificationManager::class.java) ?: return
+        for (id in postedNotificationIds) {
+            manager.cancel(id)
+        }
+        postedNotificationIds.clear()
     }
 
     private fun closeSocket() {
@@ -217,6 +231,7 @@ object BridgeWatcher {
             .setAutoCancel(true)
             .build()
         manager.notify(id, notification)
+        postedNotificationIds.add(id)
         Log.i(tag, "task complete notification posted: id=$id vibrate=$vibrate")
     }
 

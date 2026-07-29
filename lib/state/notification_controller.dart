@@ -7,6 +7,24 @@ import '../core/notification_service.dart';
 import 'pi_session.dart';
 import 'settings_provider.dart';
 
+/// 常驻通知要展示的会话计数:已连接(dormant 不算)与正在工作中的会话数。
+/// sessions 还没就绪(空列表)时返回 null —— 不推状态,原生保留上一份文案。
+/// 断开源上残留的 streaming 标记不算工作中。
+@visibleForTesting
+({int connected, int working})? keepAliveSessionCounts(
+  List<HubSession> sessions,
+) {
+  if (sessions.isEmpty) return null;
+  var connected = 0;
+  var working = 0;
+  for (final session in sessions) {
+    if (!session.connected) continue;
+    connected++;
+    if (session.streaming) working++;
+  }
+  return (connected: connected, working: working);
+}
+
 /// 监听 pi 状态,在需要时发本地通知并保活后台连接:
 /// - **前台服务(FGS)保活**:连上 bridge 时启动 dataSync 前台服务,把进程提到前台
 ///   优先级。这样后台时 Dart isolate 仍能响应 bridge 的 10s 协议 ping,连接不至于
@@ -16,9 +34,10 @@ import 'settings_provider.dart';
 ///   若进程曾被杀、回前台才补收到完成(_streamingWhenBackgrounded 兜底),也补发通知。
 /// - 扩展等待输入、连接中断:后台时通知。
 ///
-/// 通知 id 策略:FGS 常驻通知固定 id=1;任务通知从 100 起自增,回前台时只取消
-/// 任务通知(逐个 cancel),绝不动 FGS 常驻通知(cancelAll 会把前台服务通知一起干掉,
-/// 可能导致服务被系统杀)。
+/// 通知 id 策略:FGS 常驻通知固定 id=1;任务通知 Dart 侧从 100 起、原生
+/// watcher 从 200 起。回前台时用 getActiveNotifications 全扫取消(只留 id=1),
+/// 进程被杀后残留的孤儿通知也一并清掉 —— 绝不能用 cancelAll(会把前台
+/// 服务通知一起干掉,可能导致服务被系统杀)。
 class NotificationController extends ConsumerStatefulWidget {
   const NotificationController({super.key, required this.child});
 
@@ -33,7 +52,6 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     with WidgetsBindingObserver {
   AppLifecycleState _lifecycle = AppLifecycleState.resumed;
   int _notificationId = 99; // 任务通知 id 从 100 起,避开 FGS 常驻通知 id=1
-  final List<int> _taskIds = [];
 
   /// 进入后台时是否正在 streaming。用于进程被杀后回前台补收到完成时兜底发通知。
   bool _streamingWhenBackgrounded = false;
@@ -115,10 +133,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   }
 
   void _cancelTaskNotifications() {
-    for (final id in _taskIds) {
-      NotificationService.instance.cancelById(id);
-    }
-    _taskIds.clear();
+    unawaited(NotificationService.instance.cancelTaskNotifications());
   }
 
   /// 首次连上后启动保活。瞬时断线时 [hasSession] 仍为 true,服务必须继续
@@ -127,16 +142,33 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     final session = ref.read(piSessionProvider);
     if (session.hasSession && !_inBackground) {
       unawaited(NotificationService.instance.startForeground());
+      // 服务(重)启动后立刻推一份状态,不能只等 listener 的下一次变化。
+      _pushKeepAliveStatus();
     } else if (!session.hasSession) {
       unawaited(NotificationService.instance.stopForeground());
     }
+  }
+
+  /// 把当前连接与会话计数推给原生常驻通知。FGS 没在跑(hasSession=false)
+  /// 或 sessions 还没就绪时不推 —— 原生侧只记录不刷新,保留上一份文案。
+  void _pushKeepAliveStatus() {
+    final session = ref.read(piSessionProvider);
+    if (!session.hasSession) return;
+    final counts = keepAliveSessionCounts(session.sessions);
+    if (counts == null) return;
+    unawaited(
+      NotificationService.instance.updateKeepAliveStatus(
+        connected: session.status == PiConnStatus.connected,
+        sessions: counts.connected,
+        working: counts.working,
+      ),
+    );
   }
 
   void _notify(String title, [String? body]) {
     if (!_enabled) return;
     if (!_inBackground) return;
     final id = ++_notificationId;
-    _taskIds.add(id);
     unawaited(
       NotificationService.instance.show(
         id: id,
@@ -163,7 +195,6 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     var snippet = lastAssistant?.text ?? '';
     if (snippet.length > 120) snippet = '${snippet.substring(0, 120)}…';
     final id = ++_notificationId;
-    _taskIds.add(id);
     unawaited(
       NotificationService.instance.show(
         id: id,
@@ -181,6 +212,14 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   @override
   Widget build(BuildContext context) {
+    // 常驻通知文案:连接状态或会话计数变化时推给原生刷新。
+    ref.listen(
+      piSessionProvider.select(
+        (s) => (s.status, keepAliveSessionCounts(s.sessions)),
+      ),
+      (prev, next) => _pushKeepAliveStatus(),
+    );
+
     // 任务完成:isStreaming true -> false
     ref.listen(piSessionProvider.select((s) => s.isStreaming), (prev, next) {
       if (prev == true && next == false) {

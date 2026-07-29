@@ -467,10 +467,19 @@ const SESSION_MUTATING_COMMANDS = new Set([
 const streamingBySource = new Map<string, boolean>();
 
 function noteStreamingFromEvent(sourceId: string, eventType: unknown): void {
-  if (eventType === "agent_start") streamingBySource.set(sourceId, true);
-  else if (eventType === "agent_end" || eventType === "agent_settled") {
-    streamingBySource.set(sourceId, false);
-  }
+  const next =
+    eventType === "agent_start"
+      ? true
+      : eventType === "agent_end" || eventType === "agent_settled"
+        ? false
+        : undefined;
+  if (next === undefined) return;
+  // 值没真翻就不广播 —— 每个 desktop_event 都会过这里,不能每次都刷。
+  if ((streamingBySource.get(sourceId) ?? false) === next) return;
+  streamingBySource.set(sourceId, next);
+  // streaming 翻转要改变手机常驻通知上的「工作中」计数(也会刷新
+  // App 侧 state.sessions 的 streaming 标记,后台会话完成检测靠它)。
+  notifySessionsChanged();
 }
 
 function sourceIsStreaming(sourceId: string): boolean {
