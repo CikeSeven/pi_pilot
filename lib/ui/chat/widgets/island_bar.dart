@@ -8,7 +8,7 @@ import '../../../state/pi_session.dart';
 import '../../sessions/session_tree_screen.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
-import 'chat_app_bar.dart' show StatusDot;
+import '../../theme/semantic_colors.dart';
 import 'session_sheet.dart';
 
 /// 灵动岛顶栏:**平时小胶囊只显示标题,点击丝滑展开成完整信息卡**。
@@ -476,6 +476,74 @@ class _StreamTimerState extends State<_StreamTimer> {
         color: Theme.of(context).colorScheme.primary,
         fontFamily: 'monospace',
         fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
+  }
+}
+
+/// 连接状态圆点;连接中带呼吸脉冲。
+///
+/// 原在 chat_app_bar.dart,旧顶栏被灵动岛取代后挪到这里
+/// (灵动岛是唯一使用点)。
+class StatusDot extends StatefulWidget {
+  const StatusDot({super.key, required this.status});
+
+  final PiConnStatus status;
+
+  @override
+  State<StatusDot> createState() => _StatusDotState();
+}
+
+class _StatusDotState extends State<StatusDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _syncPulse();
+  }
+
+  @override
+  void didUpdateWidget(StatusDot oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncPulse();
+  }
+
+  void _syncPulse() {
+    if (widget.status == PiConnStatus.connecting) {
+      _pulse.repeat(reverse: true);
+    } else {
+      _pulse.stop();
+      _pulse.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final piColors = PiColors.of(context);
+    final color = switch (widget.status) {
+      PiConnStatus.connected => piColors.success,
+      PiConnStatus.connecting => piColors.warning,
+      PiConnStatus.failed => colors.error,
+      PiConnStatus.disconnected => colors.outline,
+    };
+    return FadeTransition(
+      opacity: Tween(begin: 1.0, end: 0.35).animate(_pulse),
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
       ),
     );
   }
