@@ -34,6 +34,12 @@ class SessionTreeScreen extends ConsumerStatefulWidget {
 
 class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
   late Future<SessionTree?> _future;
+  final ScrollController _scroll = ScrollController();
+  final GlobalKey _leafKey = GlobalKey();
+  SessionTree? _treeSnapshot;
+  List<_TreeRow>? _rows;
+  int? _leafIndex;
+  int _locateToken = 0;
 
   @override
   void initState() {
@@ -41,10 +47,55 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
     _future = ref.read(piSessionProvider.notifier).getTree();
   }
 
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
   void _reload() {
+    _locateToken++;
+    _treeSnapshot = null;
+    _rows = null;
+    _leafIndex = null;
     setState(() {
       _future = ref.read(piSessionProvider.notifier).getTree();
     });
+  }
+
+  /// 定位到当前会话所在行。懒加载列表里目标行多半没挂载,先按行数占比
+  /// 估算偏移跳过去(maxScrollExtent 随已构建的内容逐步变准,多步收敛),
+  /// 挂载后再用 ensureVisible 精修 —— 和 chat_body 的底部定位链一个思路。
+  void _locateToLeaf({bool animate = false}) {
+    final token = ++_locateToken;
+    var steps = 0;
+    void step() {
+      if (!mounted || token != _locateToken) return;
+      final leafContext = _leafKey.currentContext;
+      if (leafContext != null) {
+        Scrollable.ensureVisible(
+          leafContext,
+          alignment: 0.5,
+          duration: animate ? const Duration(milliseconds: 250) : Duration.zero,
+        );
+        return;
+      }
+      final rows = _rows;
+      final index = _leafIndex;
+      if (steps++ >= 8 ||
+          !_scroll.hasClients ||
+          rows == null ||
+          rows.isEmpty ||
+          index == null) {
+        return;
+      }
+      final max = _scroll.position.maxScrollExtent;
+      final fraction = (index + 0.5) / rows.length;
+      _scroll.jumpTo((fraction * max).clamp(0.0, max).toDouble());
+      WidgetsBinding.instance.addPostFrameCallback((_) => step());
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => step());
   }
 
   @override
@@ -54,6 +105,13 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
       appBar: AppBar(
         title: const Text('会话树'),
         actions: [
+          IconButton(
+            tooltip: '定位到当前位置',
+            icon: const Icon(Icons.my_location),
+            onPressed: _leafIndex == null
+                ? null
+                : () => _locateToLeaf(animate: true),
+          ),
           IconButton(
             tooltip: '刷新',
             icon: const Icon(Icons.refresh),
@@ -91,6 +149,24 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
             }
           }
 
+          // 同一份树快照只在第一次构建时接入定位:_rows 每次 build 都会
+          // 重建,不做快照守卫会让 post-frame 的 setState 触发无限循环。
+          if (!identical(_treeSnapshot, tree)) {
+            _treeSnapshot = tree;
+            _rows = rows;
+            final idx = locateCurrentRow(
+              rows.map((r) => r.node.id).toList(),
+              tree.leafId,
+              path,
+            );
+            _leafIndex = idx < 0 ? null : idx;
+            // 首帧后刷新 AppBar 定位按钮的可用态,并自动定位一次。
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) setState(() {});
+              _locateToLeaf();
+            });
+          }
+
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -112,14 +188,22 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
                 ),
               ),
               Expanded(
-                child: ListView.builder(
-                  padding: const EdgeInsets.only(bottom: 24),
-                  itemCount: rows.length,
-                  itemBuilder: (context, index) => _TreeNodeTile(
-                    row: rows[index],
-                    onCurrentPath: path.contains(rows[index].node.id),
-                    isLeaf: rows[index].node.id == tree.leafId,
-                    onChanged: _reload,
+                child: Scrollbar(
+                  controller: _scroll,
+                  // 常显 + 可拖:几千行的树没有可抓的滑块基本没法粗定位
+                  thumbVisibility: true,
+                  interactive: true,
+                  child: ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.only(bottom: 24),
+                    itemCount: rows.length,
+                    itemBuilder: (context, index) => _TreeNodeTile(
+                      key: index == _leafIndex ? _leafKey : null,
+                      row: rows[index],
+                      onCurrentPath: path.contains(rows[index].node.id),
+                      isLeaf: rows[index].node.id == tree.leafId,
+                      onChanged: _reload,
+                    ),
                   ),
                 ),
               ),
@@ -129,6 +213,21 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
       ),
     );
   }
+}
+
+/// 当前会话所在行的下标:优先 leaf 本身;leaf 不在摘要里(被投影/剪枝
+/// 丢掉)时退到当前路径上的最后一行。都找不到返回 -1(不猜最后一行 ——
+/// 多分支树里最后一行可能是别的分支,跳过去反而误导)。
+int locateCurrentRow(List<String> rowIds, String? leafId, Set<String> pathIds) {
+  final leaf = leafId;
+  if (leaf != null && leaf.isNotEmpty) {
+    final idx = rowIds.indexOf(leaf);
+    if (idx >= 0) return idx;
+  }
+  for (var i = rowIds.length - 1; i >= 0; i--) {
+    if (pathIds.contains(rowIds[i])) return i;
+  }
+  return -1;
 }
 
 class _TreeRow {
@@ -157,6 +256,7 @@ class _NodeLook {
 
 class _TreeNodeTile extends ConsumerWidget {
   const _TreeNodeTile({
+    super.key,
     required this.row,
     required this.onCurrentPath,
     required this.isLeaf,
@@ -270,11 +370,18 @@ class _TreeNodeTile extends ConsumerWidget {
           ? () => _confirmFork(context, ref, node)
           : null,
       child: Container(
-        // 当前路径链铺一层极浅的底:一眼看出“现在在哪条分支上”,
-        // 而不靠逐行比对文字颜色
-        color: onCurrentPath
-            ? colors.primary.withValues(alpha: 0.06)
-            : Colors.transparent,
+        decoration: BoxDecoration(
+          // 当前路径链铺一层极浅的底:一眼看出“现在在哪条分支上”;
+          // 当前位置(leaf)再加重一档 + 左侧色条,滚到哪儿都能一眼找回
+          color: isLeaf
+              ? colors.primary.withValues(alpha: 0.14)
+              : (onCurrentPath
+                    ? colors.primary.withValues(alpha: 0.06)
+                    : Colors.transparent),
+          border: isLeaf
+              ? Border(left: BorderSide(color: colors.primary, width: 3))
+              : null,
+        ),
         padding: EdgeInsets.only(
           // 缩进必须封顶:分叉树的 depth 没有上界,线性增长的 padding
           // 会把负约束喂给 Padding,窄屏上直接 assert 崩溃

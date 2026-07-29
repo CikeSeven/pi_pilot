@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/state/pi_session.dart';
+import 'package:pi_pilot/ui/sessions/session_tree_screen.dart'
+    show locateCurrentRow;
 
 void main() {
   SessionTreeNode node(
@@ -135,5 +137,28 @@ void main() {
       tools: ['bash', 'read'],
     );
     expect(withCalls.tools, ['bash', 'read']);
+  });
+
+  locateRowCases();
+}
+
+void locateRowCases() {
+  group('locateCurrentRow', () {
+    test('leaf 在列表里:直接命中', () {
+      expect(locateCurrentRow(['a', 'b', 'c'], 'b', {'a', 'b'}), 1);
+    });
+
+    test('leaf 不在摘要里:退到当前路径最后一行', () {
+      expect(locateCurrentRow(['a', 'b', 'c'], 'zzz', {'a', 'b'}), 1);
+    });
+
+    test('leaf 为空:也退到当前路径最后一行', () {
+      expect(locateCurrentRow(['a', 'b', 'c'], null, {'b', 'c'}), 2);
+      expect(locateCurrentRow(['a', 'b', 'c'], '', {'a'}), 0);
+    });
+
+    test('leaf 和路径都找不到:返回 -1,不猜最后一行', () {
+      expect(locateCurrentRow(['a', 'b', 'c'], 'zzz', {}), -1);
+    });
   });
 }
