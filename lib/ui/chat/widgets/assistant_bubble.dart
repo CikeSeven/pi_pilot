@@ -39,6 +39,13 @@ class AssistantBubble extends ConsumerWidget {
     final colors = theme.colorScheme;
     final streaming = !item.complete;
 
+    // 空回复不渲染:AI 直接调用工具时会产生一个 text 和 thinking 都空的
+    // AssistantItem,署名行 + 空白卡片是个「空壳」,没有信息价值。
+    // streaming 时除外——那是初始态,要显示打字指示器。
+    if (!streaming && item.text.isEmpty && item.thinking.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
     final bodyStyle = theme.textTheme.bodyLarge?.copyWith(
       color: colors.onSurface,
     );
@@ -75,8 +82,9 @@ class AssistantBubble extends ConsumerWidget {
     }
 
     return Padding(
-      // 左右 10 + ListView padding 4 = 总边距 14(收窄,更紧凑)。
-      padding: const EdgeInsets.fromLTRB(10, 12, 10, 14),
+      // top/bottom 各 4:和工具卡/用户消息的间距 = 4+4 = 8,
+      // 同一轮内部间距统一。轮切换由 user_bubble 的 top 20 承担。
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 4),
       child: GestureDetector(
         onLongPress: item.text.isEmpty
             ? null
@@ -84,18 +92,20 @@ class AssistantBubble extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 署名行:星芒 + PI 栏目名 + 延伸细线。编辑式版头语言。
-            _Byline(streaming: streaming),
-            const SizedBox(height: 8),
+            // 署名行只在有正文时显示:纯思考(无正文卡)不需要署名。
+            if (item.text.isNotEmpty || streaming) ...[
+              _Byline(streaming: streaming),
+              const SizedBox(height: 8),
+            ],
             // 思考块在卡外:它是「过程」,正文卡是「结论」,不该混在一张纸上。
             if (item.thinking.isNotEmpty) ...[
               ThinkingBlock(thinking: item.thinking, streaming: streaming),
               const SizedBox(height: 8),
             ],
-            // 正文纸卡:描边 + 奶油面 + 零阴影
-            // 用 Material + SquircleBorder 统一圆角语言(替代 BoxDecoration 的普通圆角)。
-            // 加微阴影让卡片从背景浮起,增加层次感。
-            Material(
+            // 正文纸卡:只在有内容或正在生成时渲染。
+            // text 为空且非 streaming = AI 纯思考/纯工具调用,不画空壳。
+            if (item.text.isNotEmpty || streaming)
+              Material(
               color: colors.surfaceContainerLow,
               shape: SquircleBorder(
                 borderRadius: BorderRadius.circular(PiShape.md),

@@ -28,7 +28,9 @@ class UserBubble extends ConsumerWidget {
     final colors = theme.colorScheme;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+      // top 20:和前一个元素(AI 回复/工具卡)间距 = 4+20 = 24,轮切换大间距。
+      // bottom 4:和后面的工具卡/AI 回复间距 = 4+4 = 8,同一轮内部。
+      padding: const EdgeInsets.fromLTRB(10, 20, 10, 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [

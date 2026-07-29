@@ -157,9 +157,8 @@ class MessageCard extends StatelessWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: maxContentWidth),
         child: Card(
-          // 左右边距 10 + ListView padding 4 = 总边距 14,
-          // 和 assistant_bubble / user_bubble 对齐,三种卡片宽度统一。
-          margin: const EdgeInsets.symmetric(vertical: 7, horizontal: 10),
+          // 上下各 4:工具卡↔工具卡 = 4+4 = 8,和思考↔正文的间距一致。
+          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 10),
           color: color,
           // 微阴影(elevation 1):不是零也不是 M3 默认的 6。
           // 用户反馈「简陋、没层次感」-- 纯零阴影让卡片融进背景,
