@@ -10,6 +10,7 @@ import {
   type NavCommandContextCache,
   type NavResult,
 } from "./nav_commands.js";
+import { sourceLabel } from "./git_branch.js";
 import { executeRemoteCommand, SAFE_REMOTE_COMMANDS, type RemoteCommand } from "./remote_commands.js";
 import { cloneForWire, encodeForWire, MAX_SNAPSHOT_BYTES } from "./serialization.js";
 
@@ -1110,8 +1111,9 @@ export class DesktopRelay {
         type: "desktop_register",
         source: {
           sourceId: this.sourceId,
+          // 目录名 + git 分支(非 git 仓库就只有目录名)。PID 对人是噪音。
           label:
-            this.config.label ?? `${path.basename(ctx.cwd) || ctx.cwd} · PID ${process.pid}`,
+            this.config.label ?? sourceLabel(ctx.cwd),
           cwd: ctx.cwd,
           sessionId: ctx.sessionManager.getSessionId(),
           sessionFile: ctx.sessionManager.getSessionFile(),
