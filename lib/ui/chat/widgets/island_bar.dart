@@ -108,29 +108,6 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     return '生成中';
   }
 
-  Future<void> _confirmDisconnect(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('断开连接?'),
-        content: const Text('会话仍会保留在电脑上,下次连接可增量恢复。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('断开'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true && context.mounted) {
-      ref.read(piSessionProvider.notifier).disconnect();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(piSessionProvider);
@@ -298,7 +275,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 第一行:字标 + 会话名(点击切会话) + 中断 + 菜单
+          // 第一行:字标 + 会话名(点击切会话) + 撤销 + 会话树
           Row(
             children: [
               Expanded(
@@ -349,56 +326,34 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
                   ),
                 ),
               ),
-              if (state.isStreaming)
-                IconButton(
-                  tooltip: '中断',
-                  icon: const Icon(Icons.stop_circle_outlined),
-                  color: colors.error,
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () => unawaited(notifier.abort()),
-                ),
-              MenuAnchor(
-                builder: (context, controller, _) => IconButton(
-                  tooltip: '更多',
-                  icon: const Icon(Icons.more_vert),
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () => controller.isOpen
-                      ? controller.close()
-                      : controller.open(),
-                ),
-                menuChildren: [
-                  MenuItemButton(
-                    leadingIcon: const Icon(Icons.undo_rounded),
-                    onPressed: canUndo
-                        ? () async {
-                            final messenger = ScaffoldMessenger.of(context);
-                            final ok = await notifier.undoLastTurn();
-                            messenger.showSnackBar(
-                              SnackBar(content: Text(ok ? '已撤销上一轮' : '撤销失败')),
-                            );
-                          }
-                        : null,
-                    child: const Text('撤销上一轮'),
-                  ),
-                  MenuItemButton(
-                    leadingIcon: const Icon(Icons.account_tree_outlined),
-                    onPressed: state.hasSelectedSource
-                        ? () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => const SessionTreeScreen(),
-                            ),
-                          )
-                        : null,
-                    child: const Text('会话树'),
-                  ),
-                  MenuItemButton(
-                    leadingIcon: const Icon(Icons.link_off),
-                    onPressed: state.hasSession
-                        ? () => unawaited(_confirmDisconnect(context))
-                        : null,
-                    child: const Text('断开连接'),
-                  ),
-                ],
+              // 原菜单三项:撤销、会话树直接摆成图标按钮;断开连接整项删除
+              // (设置页仍有断开入口)。生成中的中断按钮也删了 —— 它和输入框
+              // 的停止键是重复入口,留一个就够。
+              IconButton(
+                tooltip: '撤销上一轮',
+                icon: const Icon(Icons.undo_rounded),
+                visualDensity: VisualDensity.compact,
+                onPressed: canUndo
+                    ? () async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        final ok = await notifier.undoLastTurn();
+                        messenger.showSnackBar(
+                          SnackBar(content: Text(ok ? '已撤销上一轮' : '撤销失败')),
+                        );
+                      }
+                    : null,
+              ),
+              IconButton(
+                tooltip: '会话树',
+                icon: const Icon(Icons.account_tree_outlined),
+                visualDensity: VisualDensity.compact,
+                onPressed: state.hasSelectedSource
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const SessionTreeScreen(),
+                        ),
+                      )
+                    : null,
               ),
             ],
           ),
