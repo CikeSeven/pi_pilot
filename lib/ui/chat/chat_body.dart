@@ -6,7 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
 import '../settings/settings_screen.dart';
+import '../theme/paper.dart';
 import '../theme/shapes.dart';
+import '../theme/typography.dart';
 import 'widgets/chat_item_view.dart';
 import 'widgets/composer.dart';
 import 'widgets/message_timestamp.dart';
@@ -479,10 +481,12 @@ class _NotConnectedView extends ConsumerWidget {
     final hasConn = ref.watch(settingsProvider.select((s) => s.hasConnection));
     final colors = Theme.of(context).colorScheme;
 
-    final (icon, message) = switch (status) {
-      PiConnStatus.connecting => (Icons.sync, '正在连接…'),
-      PiConnStatus.failed => (Icons.cloud_off_outlined, '连接失败'),
-      _ => (Icons.cloud_off_outlined, '尚未连接'),
+    // 空状态用场景插画而不是图标 —— 设计规范要的「安静等待」气质:
+    // 「中央留白插画 + 标题 + 副文案 + 稳重主按钮」。
+    final (message, hint) = switch (status) {
+      PiConnStatus.connecting => ('正在连接…', '正在唤醒你的电脑。'),
+      PiConnStatus.failed => ('连接失败', '检查一下 bridge 地址和 token。'),
+      _ => ('尚未连接', '连接到你的电脑,开始远程协作。'),
     };
 
     // Center 包 SCSV:内容矮时居中,内容比视口高时(横屏/大字体/长错误
@@ -494,25 +498,32 @@ class _NotConnectedView extends ConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CircleAvatar(
-                radius: 44,
-                backgroundColor: colors.surfaceContainerHighest,
-                foregroundColor: colors.onSurfaceVariant,
-                child: Icon(icon, size: 38),
+              // 矢量装饰:素材 PNG 自带象牙纸底,在奶油页面上会露出一圈更亮的
+              // 白边(看着像廉价贴图)。CustomPaint 天然透明,干净。
+              const EditorialOrnament(size: 156),
+              const SizedBox(height: 26),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: AppType.displayTitle(size: 27, color: colors.onSurface),
               ),
-              const SizedBox(height: 16),
-              Text(message, style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 10),
+              Text(
+                hint,
+                textAlign: TextAlign.center,
+                style: AppType.serifItalic(color: colors.onSurfaceVariant),
+              ),
               if (error != null) ...[
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 Text(
                   error,
                   textAlign: TextAlign.center,
                   style: Theme.of(
                     context,
-                  ).textTheme.bodyMedium?.copyWith(color: colors.error),
+                  ).textTheme.bodySmall?.copyWith(color: colors.error),
                 ),
               ],
-              const SizedBox(height: 24),
+              const SizedBox(height: 28),
               Wrap(
                 spacing: 12,
                 runSpacing: 8,
@@ -623,7 +634,7 @@ class _LivenessBanner extends ConsumerWidget {
     if (text.isEmpty && queueParts.isEmpty) return const SizedBox.shrink();
 
     return Card(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 2),
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 2),
       color: bg,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -846,25 +857,24 @@ class _EmptyHint extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CircleAvatar(
-                radius: 44,
-                backgroundColor: colors.primaryContainer,
-                foregroundColor: colors.onPrimaryContainer,
-                child: const Icon(Icons.auto_awesome, size: 38),
-              ),
-              const SizedBox(height: 20),
+              const EditorialOrnament(size: 150),
+              const SizedBox(height: 26),
               Text(
                 '开始一段对话',
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleLarge,
+                style: AppType.displayTitle(size: 27, color: colors.onSurface),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
               Text(
-                '给 pi 下达你的第一个指令,例如「看看当前目录结构」',
+                '给 pi 下达你的第一个指令,\n例如「看看当前目录结构」',
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colors.onSurfaceVariant,
-                ),
+                style: AppType.serifItalic(color: colors.onSurfaceVariant),
+              ),
+              const SizedBox(height: 22),
+              // 页脚一条编辑式短线,替代原来那枚带白底的印章 PNG
+              SizedBox(
+                width: 56,
+                child: EditorialRule(color: colors.outlineVariant),
               ),
             ],
           ),

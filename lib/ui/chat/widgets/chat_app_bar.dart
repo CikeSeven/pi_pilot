@@ -6,22 +6,33 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
 import '../../sessions/session_tree_screen.dart';
+import '../../theme/paper.dart';
 import '../../theme/semantic_colors.dart';
 import '../../theme/shapes.dart';
+import '../../theme/typography.dart';
 import 'session_sheet.dart';
 
-/// 对话页顶栏。
+/// 对话页顶栏:**PiPilot 衬线字标 + 编辑式状态副行**。
 ///
-/// 相比旧版:**删掉了 48dp 的等宽字体芯片行**(终端风最后的残留),高度
-/// 104 → 72;背景改用 `primaryContainer` 实色块(用户要的「顶栏大色块」);
-/// action 从最多 4 个图标收敛到 2 个,其余进溢出菜单。
+/// Editorial Retro 改版。旧版顶栏是一整块 `primaryContainer` 实色,
+/// 那是「顶栏大色块」的现代 App 语言;新设计里顶栏与内容**同一张纸**,
+/// 靠衬线字标和一条细线分隔——像刊物的报头。
+///
+/// 结构:
+/// ```
+/// ✦ PiPilot                    [中断] [⋯]
+///   ● pi_pilot · glm-5.2 · ctx 32%
+/// ─────────────────────────────────────  ← 细线
+/// ```
+/// 字标用衬线(气质位),状态副行用无衬线小字(信息位)——
+/// 这是「衬线负责文艺,无衬线负责效率」在顶栏的落点。
 class ChatAppBar extends ConsumerWidget implements PreferredSizeWidget {
   const ChatAppBar({super.key});
 
-  static const _height = 72.0;
+  static const _height = 76.0;
 
   @override
-  Size get preferredSize => const Size.fromHeight(_height);
+  Size get preferredSize => const Size.fromHeight(_height + 1);
 
   /// 副标题:目录 · 模型 · 上下文占用,一行讲完。
   /// 这三条信息以前各占一个等宽芯片,吃掉整整 48dp。
@@ -81,53 +92,75 @@ class ChatAppBar extends ConsumerWidget implements PreferredSizeWidget {
 
     return AppBar(
       toolbarHeight: _height,
-      // 「顶栏大色块」:整条顶栏是 primaryContainer 实色,不再是灰白底
-      backgroundColor: colors.primaryContainer,
-      foregroundColor: colors.onPrimaryContainer,
-      surfaceTintColor: colors.surfaceTint,
+      // 顶栏就是纸本身 —— 与内容同底,靠字标和底部细线分隔。
+      backgroundColor: colors.surface,
+      foregroundColor: colors.onSurface,
+      surfaceTintColor: Colors.transparent,
       centerTitle: false,
       titleSpacing: 4,
+      // 底部细线:编辑式版头的分隔语言,替代滚动阴影。
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: EditorialRule(color: colors.outlineVariant),
+      ),
       title: InkWell(
-        borderRadius: BorderRadius.circular(PiShape.md),
+        borderRadius: BorderRadius.circular(PiShape.sm),
         onTap: () {
           HapticFeedback.selectionClick();
           showSessionSheet(context, ref);
         },
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              StatusDot(status: state.status),
-              const SizedBox(width: 10),
-              Flexible(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
+              // 报头行:星芒 + 衬线字标 + 会话名 + 展开箭头
+              Row(
+                children: [
+                  Icon(Icons.auto_awesome, size: 14, color: colors.primary),
+                  const SizedBox(width: 7),
+                  Text(
+                    'PiPilot',
+                    style: AppType.wordmark(size: 20, color: colors.onSurface),
+                  ),
+                  const SizedBox(width: 10),
+                  // 会话名跟在字标后,用无衬线中号 —— 它是信息不是气质
+                  Flexible(
+                    child: Text(
                       _title(state),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        color: colors.onPrimaryContainer,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: colors.onSurfaceVariant,
                       ),
                     ),
-                    Text(
+                  ),
+                  Icon(
+                    Icons.expand_more,
+                    size: 18,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 3),
+              // 状态副行:圆点 + 目录 · 模型 · 上下文
+              Row(
+                children: [
+                  StatusDot(status: state.status),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
                       _subtitle(state),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: colors.onPrimaryContainer.withValues(alpha: 0.8),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: colors.onSurfaceVariant,
+                        letterSpacing: 0.3,
                       ),
                     ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 4),
-              Icon(
-                Icons.expand_more,
-                size: 20,
-                color: colors.onPrimaryContainer,
+                  ),
+                ],
               ),
             ],
           ),
@@ -245,8 +278,8 @@ class _StatusDotState extends State<StatusDot>
     return FadeTransition(
       opacity: Tween(begin: 1.0, end: 0.35).animate(_pulse),
       child: Container(
-        width: 10,
-        height: 10,
+        width: 8,
+        height: 8,
         decoration: BoxDecoration(color: color, shape: BoxShape.circle),
       ),
     );

@@ -22,6 +22,9 @@ const _kAskUserQuestion = 'ask_user_question';
 const _kAskAnswerMarker = 'The user answered this questionnaire on their phone';
 
 /// 工具调用卡片:按工具类型选择结构化渲染(read 行号/edit diff/write 代码)。
+///
+/// Editorial Retro:整条身份行铺**复古类别色**(赤陶/橄榄/灰蓝/麦黄…),
+/// 头像是方正印章而不是圆头像 —— 工具是「操作记录」,像盖在纸上的戳。
 class ToolCard extends ConsumerStatefulWidget {
   const ToolCard({super.key, required this.item});
 
@@ -452,26 +455,31 @@ class _AnswerableQuestionnaireState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // 问卷头:编辑式提示条,像刊物里的编者按
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
           decoration: BoxDecoration(
             color: colors.primaryContainer,
             borderRadius: BorderRadius.circular(PiShape.sm),
+            border: Border.all(
+              color: colors.onPrimaryContainer.withValues(alpha: 0.16),
+            ),
           ),
           child: Row(
             children: [
               Icon(
                 Icons.touch_app_outlined,
-                size: 18,
+                size: 17,
                 color: colors.onPrimaryContainer,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 9),
               Expanded(
                 child: Text(
                   '电脑端在等这份问卷 · 在手机上选就行',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: colors.onPrimaryContainer,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
               ),
@@ -585,8 +593,18 @@ class _AnswerableQuestion extends StatelessWidget {
           ],
         ),
         Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text(question.question, style: theme.textTheme.bodyMedium),
+          padding: const EdgeInsets.only(top: 6, bottom: 2),
+          child: Text(
+            question.question,
+            // 题干用衬线 —— 它是「PiPilot 在征求你的决策」,不是表单字段标签。
+            // 走 headlineSmall 字阶再上衬线族,不手写字号。
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontFamily: AppType.serifFamily,
+              fontFamilyFallback: AppType.serifFallback,
+              color: colors.onSurface,
+              height: 1.4,
+            ),
+          ),
         ),
         for (var i = 0; i < question.options.length; i++)
           _SelectableOption(
@@ -662,15 +680,23 @@ class _SelectableOption extends StatelessWidget {
               : Icons.radio_button_unchecked);
 
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.only(top: 6),
       child: InkWell(
         onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(PiShape.sm),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
           decoration: BoxDecoration(
-            color: selected ? colors.secondaryContainer : null,
+            // 选项是可选卡片:未选也有描边,选中转主色底 + 主色描边。
+            // 比「未选无边框」更像编辑式选择题,层次也更清楚。
+            color: selected
+                ? colors.primaryContainer
+                : colors.surfaceContainerHighest.withValues(alpha: 0.5),
             borderRadius: BorderRadius.circular(PiShape.sm),
+            border: Border.all(
+              color: selected ? colors.primary : colors.outlineVariant,
+              width: selected ? 1.4 : 1,
+            ),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -692,8 +718,11 @@ class _SelectableOption extends StatelessWidget {
                             option.label,
                             style: theme.textTheme.bodyMedium?.copyWith(
                               color: selected
-                                  ? colors.onSecondaryContainer
+                                  ? colors.onPrimaryContainer
                                   : colors.onSurface,
+                              fontWeight: selected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
                             ),
                           ),
                         ),

@@ -5,8 +5,10 @@ import '../theme/shapes.dart';
 
 enum PiToolCategory { terminal, read, edit, search, files, extension, generic }
 
-/// Material 3 色调头像:每个工具类别一对固定的 container / on-container。
-/// 取代旧的 iOS 设置风纯色方块(那个把白字硬编码在里面)。
+/// 工具类别印章:每个工具类别一对固定的 container / on-container 复古色。
+///
+/// Editorial Retro:方正圆角 + 细描边 —— 像盖在纸上的分类戳,
+/// 不是圆头像(圆头像是「人」的语言,工具是「操作」)。
 class PiToolAvatar extends StatelessWidget {
   const PiToolAvatar({
     super.key,
@@ -104,6 +106,8 @@ class PiToolAvatar extends StatelessWidget {
       decoration: BoxDecoration(
         color: background,
         borderRadius: BorderRadius.circular(PiShape.sm),
+        // 印章描边:与纸卡同一套骨架线语言
+        border: Border.all(color: foreground.withValues(alpha: 0.22)),
       ),
       child: Icon(icon, size: size * 0.5, color: foreground),
     );

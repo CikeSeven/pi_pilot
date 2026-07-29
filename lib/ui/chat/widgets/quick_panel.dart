@@ -48,7 +48,8 @@ class _QuickPanelState extends ConsumerState<QuickPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
     final text = widget.inputText;
 
     if (text.startsWith('/')) {
@@ -60,16 +61,15 @@ class _QuickPanelState extends ConsumerState<QuickPanel> {
       if (matches.isEmpty) return const SizedBox(width: double.infinity);
       // 这个列表悬浮在消息流上方,必须自带不透明底色。
       // 之前直接铺 ListView,背景是透明的,文字和正文糊在一起没法读。
-      // 底色与输入卡一致(surfaceContainerHigh),再加描边和投影压住下层内容。
+      // Editorial Retro:零阴影 —— 靠不透明底色 + 1px 描边压住下层内容,
+      // 而不是投影。这里用比输入卡更高一档的纸面做层次。
       return Padding(
         padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
         child: Material(
-          color: colors.surfaceContainerHigh,
-          elevation: 3,
-          shadowColor: colors.shadow,
-          surfaceTintColor: colors.surfaceTint,
+          color: theme.colorScheme.surfaceContainerHighest,
+          elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(PiShape.xl),
+            borderRadius: BorderRadius.circular(PiShape.lg),
             side: BorderSide(color: colors.outlineVariant),
           ),
           clipBehavior: Clip.antiAlias,

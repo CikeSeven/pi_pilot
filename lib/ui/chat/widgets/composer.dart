@@ -2,9 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/motion.dart';
-import '../../theme/shapes.dart';
 
-/// 输入条:M3 输入框 + 真 FAB 发送键 + 可插拔快捷面板槽位。
+/// 输入条:**胶囊纸卡 + 圆形陶土橙发送键**。
+///
+/// Editorial Retro 改版。参考图的输入区是一颗完整的胶囊,右端一个实心圆形
+/// 发送键——「更像纸上的输入区域」而不是聊天软件的方框。
+///
+/// 与旧版差异:
+/// - 输入卡从 28 圆角方卡改成 **stadium 胶囊**;
+/// - 发送键从 `IconButton.filled`(方角)改成 **正圆**,陶土橙实心;
+/// - 投递方式 chip 行保留,但改编辑式描边标签。
 class Composer extends StatelessWidget {
   const Composer({
     super.key,
@@ -78,7 +85,7 @@ class Composer extends StatelessWidget {
                       width: double.infinity,
                       child: SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
                         child: Row(
                           children: [
                             ActionChip(
@@ -121,9 +128,10 @@ class Composer extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
               child: Material(
-                color: colors.surfaceContainerHigh,
-                shape: const RoundedRectangleBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(PiShape.xxl)),
+                color: colors.surfaceContainerLow,
+                // 胶囊 + 1px 描边:纸上的书写区,不是方框控件。
+                shape: StadiumBorder(
+                  side: BorderSide(color: colors.outlineVariant),
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: Padding(
@@ -160,17 +168,20 @@ class Composer extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      // M3 原生的实心图标按钮:比 FAB 更适合这个位置,
-                      // 也不用再为 hero tag 冲突打补丁。
+                      // 正圆实心发送键。参考图里它是输入胶囊右端的一颗圆点,
+                      // 陶土橙实心 —— 全屏最明确的「动作」信号。
                       IconButton.filled(
-                        iconSize: 24,
+                        iconSize: 22,
                         style: IconButton.styleFrom(
-                          minimumSize: const Size(48, 48),
+                          minimumSize: const Size(46, 46),
+                          maximumSize: const Size(46, 46),
+                          padding: EdgeInsets.zero,
+                          shape: const CircleBorder(),
                           backgroundColor: showStop
-                              ? colors.errorContainer
+                              ? colors.error
                               : colors.primary,
                           foregroundColor: showStop
-                              ? colors.onErrorContainer
+                              ? colors.onError
                               : colors.onPrimary,
                         ),
                         onPressed: !sendEnabled

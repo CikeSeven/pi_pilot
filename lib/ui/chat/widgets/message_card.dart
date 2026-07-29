@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../../theme/shapes.dart';
+
 /// 所有消息共用的卡片外壳。
 ///
-/// 重构前 `chat/` 目录里**一个 `Card` 都没有** —— 七种消息各自手搓
-/// `Container(margin) → Material(color, shape)`,elevation 全是隐含的 0,
-/// 所以 `surfaceTint` 永远不生效、深浅两个主题都是纯平的。左右边距还不对称
-/// (用户气泡 `left: 56`,其余 `right: 20`),平板上更是没有任何宽度约束。
+/// Editorial Retro:纸卡语言 —— **描边 + 零阴影 + 方正圆角**,
+/// 身份行与正文之间用一条细线分隔(编辑式版式,不靠色块分区)。
 ///
-/// 这里统一成:真 `Card` + 对称边距 + 最大宽度 + 卡内身份行。
+/// 统一提供:描边纸卡 + 对称边距 + 最大宽度 + 卡内身份行。
 class MessageCard extends StatelessWidget {
   const MessageCard({
     super.key,
@@ -137,6 +137,12 @@ class MessageCard extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         ?header,
+        // 身份行与正文之间的细线:编辑式分隔,替代靠底色分区。
+        if (hasHeader)
+          Container(
+            height: 1,
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
         Padding(
           padding: hasHeader
               ? contentPadding
@@ -151,9 +157,16 @@ class MessageCard extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: maxContentWidth),
         child: Card(
           // 对称边距 —— 不再是 left56 / right20 那种一边倒的观感
-          margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+          margin: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
           color: color,
           elevation: elevation,
+          // 显式描边:color 被调用方覆盖时(工具卡类别色)仍要有骨架线
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(PiShape.lg),
+            side: BorderSide(
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+          ),
           child: onTap == null && onLongPress == null
               ? body
               : InkWell(onTap: onTap, onLongPress: onLongPress, child: body),
@@ -178,8 +191,14 @@ class MessageNotice extends StatelessWidget {
         child: Card(
           margin: EdgeInsets.zero,
           color: color,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(PiShape.md),
+            side: BorderSide(
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+          ),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
             child: child,
           ),
         ),

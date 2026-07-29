@@ -60,7 +60,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    // 默认蓝色 + 浅色
-    expect(find.textContaining('蓝色'), findsOneWidget);
+    // 默认赤陶 + 浅色
+    expect(find.textContaining('赤陶'), findsOneWidget);
   });
 }

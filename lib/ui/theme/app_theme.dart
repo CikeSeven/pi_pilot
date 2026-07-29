@@ -7,20 +7,29 @@ import 'semantic_colors.dart';
 import 'shapes.dart';
 import 'typography.dart';
 
-ThemeData buildLightTheme([AppAccent accent = AppAccent.blue]) => _build(
+ThemeData buildLightTheme([AppAccent accent = AppAccent.terracotta]) => _build(
   PiPalette.lightScheme(accent),
   PiColors.light,
   SystemUiOverlayStyle.dark,
 );
 
-ThemeData buildDarkTheme([AppAccent accent = AppAccent.blue]) => _build(
+ThemeData buildDarkTheme([AppAccent accent = AppAccent.terracotta]) => _build(
   PiPalette.darkScheme(accent),
   PiColors.dark,
   SystemUiOverlayStyle.light,
 );
 
-/// Material 3:大圆角、色调表面、真实 elevation + surfaceTint、水波纹回归。
-/// 深浅两套走**同一份**规格——不再有 `isDark ? … : …` 的阴影/描边分支。
+/// Editorial Retro 主题。
+///
+/// 三条铁律,贯穿所有组件默认样式:
+/// 1. **零阴影**。全 app 没有一处 elevation > 0(除 scrim 类必须的浮层),
+///    层次由「纸的深浅 + 1px 描边」承担。设计规范原话:
+///    「卡片不需要太多阴影」「更像印刷排版」。
+/// 2. **细描边**。卡片、井、chip、按钮一律 1px outlineVariant 描边。
+///    这是编辑式版式的骨架线。
+/// 3. **方正圆角**。见 [PiShape]——卡片 14,只有胶囊类走 stadium。
+///
+/// 与旧版(M3 fromSeed + 大圆角 + surfaceTint)的关系:整套推翻。
 ThemeData _build(
   ColorScheme scheme,
   PiColors piColors,
@@ -37,6 +46,9 @@ ThemeData _build(
     },
   );
 
+  final border = scheme.outlineVariant;
+  final isDark = scheme.brightness == Brightness.dark;
+
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
@@ -44,127 +56,162 @@ ThemeData _build(
     textTheme: AppType.textTheme,
     extensions: [piColors],
     pageTransitionsTheme: transitions,
-    // splashFactory 不设置 → M3 默认水波纹回归
+    // 水波纹保留,但复古纸面上要更含蓄:用 splashColor 压低。
+    splashColor: scheme.primary.withValues(alpha: 0.07),
+    highlightColor: scheme.primary.withValues(alpha: 0.04),
+
     appBarTheme: AppBarTheme(
+      // 顶栏就是纸本身,不再是 primaryContainer 实色块——
+      // 参考图里顶栏与内容同底,靠字标和一条细线分隔。
       backgroundColor: scheme.surface,
       foregroundColor: scheme.onSurface,
       elevation: 0,
-      // 顶栏是 primaryContainer 实色块,滚动阴影既看不出层次又显旧
       scrolledUnderElevation: 0,
       centerTitle: false,
-      titleTextStyle: AppType.textTheme.titleLarge?.copyWith(
-        color: scheme.onSurface,
-      ),
+      titleTextStyle: AppType.wordmark(color: scheme.onSurface),
       systemOverlayStyle: overlayStyle.copyWith(
         statusBarColor: Colors.transparent,
       ),
     ),
-    // **内容区一律不投影**。上一版把 elevation 打开,结果一屏几十张卡片各带
-    // 一层阴影,观感是上个年代的 UI。层次改由 surfaceContainer* 色阶承担:
-    // scaffold 是 surface,卡片是 surfaceContainerLow,天然差一档。
+
+    // 纸卡:ivory 面 + 1px 描边 + 零阴影。
     cardTheme: CardThemeData(
       color: scheme.surfaceContainerLow,
       elevation: 0,
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
-      shape: PiShape.messageCard,
+      shape: PiShape.outlinedCard(border),
     ),
+
+    // 输入框:纸上的书写区。深一档纸底 + 描边,聚焦时描边转主色。
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: scheme.surfaceContainerHigh,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
       border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(PiShape.xxl),
-        borderSide: BorderSide(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(PiShape.md),
+        borderSide: BorderSide(color: border),
       ),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(PiShape.xxl),
-        borderSide: BorderSide(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(PiShape.md),
+        borderSide: BorderSide(color: border),
       ),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(PiShape.xxl),
-        borderSide: BorderSide(color: scheme.primary, width: 2),
+        borderRadius: BorderRadius.circular(PiShape.md),
+        borderSide: BorderSide(color: scheme.primary, width: 1.6),
       ),
       errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(PiShape.xxl),
+        borderRadius: BorderRadius.circular(PiShape.md),
         borderSide: BorderSide(color: scheme.error),
       ),
       focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(PiShape.xxl),
-        borderSide: BorderSide(color: scheme.error, width: 2),
+        borderRadius: BorderRadius.circular(PiShape.md),
+        borderSide: BorderSide(color: scheme.error, width: 1.6),
       ),
       hintStyle: TextStyle(color: scheme.onSurfaceVariant),
       labelStyle: TextStyle(color: scheme.onSurfaceVariant),
     ),
+
+    // 主按钮:陶土橙实心,方正圆角(不是胶囊)——编辑式按钮更像印章。
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        minimumSize: const Size(64, 48),
-        padding: const EdgeInsets.symmetric(horizontal: 24),
+        minimumSize: const Size(64, 50),
+        padding: const EdgeInsets.symmetric(horizontal: 26),
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(PiShape.md),
+        ),
+        textStyle: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.2,
+        ),
       ),
     ),
+
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size(64, 48),
+        minimumSize: const Size(64, 50),
+        padding: const EdgeInsets.symmetric(horizontal: 22),
         side: BorderSide(color: scheme.outline),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(PiShape.md),
+        ),
+        textStyle: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.2,
+        ),
       ),
     ),
+
     textButtonTheme: TextButtonThemeData(
-      style: TextButton.styleFrom(minimumSize: const Size(48, 40)),
+      style: TextButton.styleFrom(
+        minimumSize: const Size(48, 42),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(PiShape.sm),
+        ),
+      ),
     ),
+
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(minimumSize: const Size(44, 44)),
     ),
+
+    // chip:编辑式标签,方正 + 描边。
     chipTheme: ChipThemeData(
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(PiShape.sm),
       ),
-      side: BorderSide(color: scheme.outlineVariant),
-      backgroundColor: scheme.surfaceContainerHigh,
-      selectedColor: scheme.secondaryContainer,
+      side: BorderSide(color: border),
+      backgroundColor: scheme.surfaceContainerLow,
+      selectedColor: scheme.primaryContainer,
       labelStyle: TextStyle(
         fontSize: 13,
-        fontWeight: FontWeight.w500,
+        fontWeight: FontWeight.w600,
         color: scheme.onSurface,
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
     ),
+
     segmentedButtonTheme: SegmentedButtonThemeData(
       style: SegmentedButton.styleFrom(
-        selectedBackgroundColor: scheme.secondaryContainer,
-        selectedForegroundColor: scheme.onSecondaryContainer,
+        selectedBackgroundColor: scheme.primaryContainer,
+        selectedForegroundColor: scheme.onPrimaryContainer,
         side: BorderSide(color: scheme.outline),
-        minimumSize: const Size(0, 44),
+        minimumSize: const Size(0, 46),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(PiShape.sm),
+        ),
       ),
     ),
+
     searchBarTheme: SearchBarThemeData(
       elevation: const WidgetStatePropertyAll(0),
       backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHigh),
       shape: WidgetStatePropertyAll(
         RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(PiShape.xxl),
+          borderRadius: BorderRadius.circular(PiShape.md),
+          side: BorderSide(color: border),
         ),
       ),
       padding: const WidgetStatePropertyAll(
         EdgeInsets.symmetric(horizontal: 16),
       ),
-      constraints: const BoxConstraints(minHeight: 48),
+      constraints: const BoxConstraints(minHeight: 50),
     ),
+
     badgeTheme: BadgeThemeData(
-      // 默认是中性的强调色,不是错误红。角标最常见的用途是「标记此处」
-      // (当前会话、未读数),那不是错误;之前默认 error 的结果是抽屉里
-      // 「当前」两个字被涂成警告红,读起来像出了问题。
-      // 真正表示错误的角标(bash 非零退出码、有新消息的红点)都在各自
-      // 现场显式指定 error 色,所以这里改默认不会动到它们。
       backgroundColor: scheme.primary,
       textColor: scheme.onPrimary,
-      // M3 默认 16dp 会纵向裁切 12sp 等宽字——这是必需项不是装饰
-      largeSize: 22,
+      largeSize: 21,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       textStyle: AppType.monoLabel(),
     ),
+
     expansionTileTheme: ExpansionTileThemeData(
-      shape: PiShape.card,
-      collapsedShape: PiShape.card,
+      shape: PiShape.outlinedCard(border),
+      collapsedShape: PiShape.outlinedCard(border),
       backgroundColor: scheme.surfaceContainerLow,
       collapsedBackgroundColor: scheme.surfaceContainerLow,
       tilePadding: const EdgeInsets.symmetric(horizontal: 16),
@@ -172,121 +219,180 @@ ThemeData _build(
       iconColor: scheme.primary,
       collapsedIconColor: scheme.onSurfaceVariant,
     ),
+
+    // 浮层:允许极轻阴影(需要和底纸分离),但形状和描边保持一致。
     dialogTheme: DialogThemeData(
-      // 浮层只留一丝阴影帮助分离,重影会破坏扁平的高级感
-      elevation: 1,
-      backgroundColor: scheme.surfaceContainerHigh,
-      shape: PiShape.dialog,
-      titleTextStyle: AppType.textTheme.headlineSmall?.copyWith(
+      elevation: 0,
+      backgroundColor: scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(PiShape.xl),
+        side: BorderSide(color: border),
+      ),
+      titleTextStyle: AppType.serif(
+        size: 22,
+        weight: FontWeight.w600,
         color: scheme.onSurface,
       ),
       contentTextStyle: AppType.textTheme.bodyMedium?.copyWith(
         color: scheme.onSurfaceVariant,
       ),
     ),
+
     bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: scheme.surfaceContainerLow,
       modalBackgroundColor: scheme.surfaceContainerLow,
-      elevation: 1,
-      modalElevation: 1,
-      dragHandleColor: scheme.onSurfaceVariant.withValues(alpha: 0.4),
-      dragHandleSize: const Size(32, 4),
+      elevation: 0,
+      modalElevation: 0,
+      dragHandleColor: scheme.onSurfaceVariant.withValues(alpha: 0.35),
+      dragHandleSize: const Size(36, 4),
       clipBehavior: Clip.antiAlias,
       shape: PiShape.sheet,
       showDragHandle: true,
     ),
+
     snackBarTheme: SnackBarThemeData(
-      elevation: 1,
+      elevation: 0,
       behavior: SnackBarBehavior.floating,
       backgroundColor: scheme.inverseSurface,
-      contentTextStyle: TextStyle(color: scheme.onInverseSurface),
+      contentTextStyle: TextStyle(color: scheme.onInverseSurface, fontSize: 14),
       actionTextColor: scheme.inversePrimary,
       insetPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(PiShape.md),
+        borderRadius: BorderRadius.circular(PiShape.sm),
       ),
     ),
-    dividerTheme: DividerThemeData(
-      color: scheme.outlineVariant,
-      thickness: 1,
-      space: 1,
-    ),
+
+    dividerTheme: DividerThemeData(color: border, thickness: 1, space: 1),
+
     progressIndicatorTheme: ProgressIndicatorThemeData(
       color: scheme.primary,
       linearTrackColor: scheme.surfaceContainerHighest,
       circularTrackColor: scheme.surfaceContainerHighest,
+      linearMinHeight: 2,
     ),
+
     popupMenuTheme: PopupMenuThemeData(
-      color: scheme.surfaceContainer,
-      elevation: 1,
+      color: scheme.surfaceContainerLow,
+      elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(PiShape.md),
+        side: BorderSide(color: border),
       ),
     ),
+
     menuTheme: MenuThemeData(
       style: MenuStyle(
-        backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainer),
-        elevation: const WidgetStatePropertyAll(1),
+        backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerLow),
+        elevation: const WidgetStatePropertyAll(0),
         shape: WidgetStatePropertyAll(
           RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(PiShape.md),
+            side: BorderSide(color: border),
           ),
         ),
       ),
     ),
+
     listTileTheme: ListTileThemeData(
       iconColor: scheme.onSurfaceVariant,
       titleTextStyle: AppType.textTheme.bodyLarge?.copyWith(
         color: scheme.onSurface,
+        fontWeight: FontWeight.w500,
       ),
       subtitleTextStyle: AppType.textTheme.bodySmall?.copyWith(
         color: scheme.onSurfaceVariant,
       ),
-      selectedColor: scheme.onSecondaryContainer,
-      selectedTileColor: scheme.secondaryContainer,
-      minVerticalPadding: 12,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+      selectedColor: scheme.onPrimaryContainer,
+      selectedTileColor: scheme.primaryContainer,
+      minVerticalPadding: 13,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(PiShape.md),
       ),
     ),
+
     floatingActionButtonTheme: FloatingActionButtonThemeData(
-      // 回到底部按钮浮在消息流上,1 就够;默认的 6 会在内容区留一坨影子
-      elevation: 1,
-      focusElevation: 1,
-      hoverElevation: 1,
-      highlightElevation: 1,
-      backgroundColor: scheme.primaryContainer,
-      foregroundColor: scheme.onPrimaryContainer,
+      elevation: 0,
+      focusElevation: 0,
+      hoverElevation: 0,
+      highlightElevation: 0,
+      backgroundColor: scheme.primary,
+      foregroundColor: scheme.onPrimary,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(PiShape.md),
       ),
     ),
+
+    // 抽屉与页面同一套纸色。旧版这里浅色模式也强制 charcoal,
+    // 结果抽屉是黑的、页面是奶油的,拉开就撕裂。
     drawerTheme: DrawerThemeData(
-      backgroundColor: scheme.surfaceContainerLow,
-      surfaceTintColor: scheme.surfaceTint,
-      // 抽屉靠色阶 + 遮罩已经足够分离
+      backgroundColor: scheme.surface,
+      surfaceTintColor: Colors.transparent,
       elevation: 0,
-      width: 320,
+      width: 330,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.horizontal(
-          right: Radius.circular(PiShape.xxl),
+        // 抽屉从左侧滑出:右侧上方圆角(开口的纸角),右下方直角(贴屏底不悬空)。
+        borderRadius: BorderRadius.only(
+          topRight: Radius.circular(PiShape.xxl),
         ),
       ),
     ),
+
     navigationDrawerTheme: NavigationDrawerThemeData(
       backgroundColor: scheme.surfaceContainerLow,
-      indicatorColor: scheme.secondaryContainer,
-      indicatorShape: const StadiumBorder(),
-      tileHeight: 56,
+      indicatorColor: scheme.primaryContainer,
+      indicatorShape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(PiShape.sm),
+      ),
+      tileHeight: 54,
     ),
+
+    // 底部导航:**同色通栏,不用黑色**。
+    //
+    // 浅色模式:用一级卡片面(象牙白)+ 顶部一条细描边。和页面是同一张纸的
+    // 不同折页,而不是「奶油纸上贴一条黑胶带」——后者割裂又突兀。
+    // 深色模式:用抬升一档的暖石墨灰(页面是暖炭黑,底栏要高一档才分得开)。
+    navigationBarTheme: NavigationBarThemeData(
+      backgroundColor: isDark
+          ? scheme.surfaceContainerHigh
+          : scheme.surfaceContainerLow,
+      // 顶部细描边:代替悬浮圆角条的「边界」,通栏不漏底。
+      surfaceTintColor: Colors.transparent,
+      indicatorColor: scheme.primaryContainer,
+      indicatorShape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(PiShape.sm),
+      ),
+      elevation: 0,
+      height: 64,
+      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+      labelTextStyle: WidgetStateProperty.resolveWith(
+        (states) => TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.6,
+          color: states.contains(WidgetState.selected)
+              ? scheme.primary
+              : scheme.onSurfaceVariant.withValues(alpha: 0.72),
+        ),
+      ),
+      iconTheme: WidgetStateProperty.resolveWith(
+        (states) => IconThemeData(
+          size: 22,
+          color: states.contains(WidgetState.selected)
+              ? scheme.primary
+              : scheme.onSurfaceVariant.withValues(alpha: 0.72),
+        ),
+      ),
+    ),
+
     switchTheme: SwitchThemeData(
       thumbIcon: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? const Icon(Icons.check, size: 16)
+            ? const Icon(Icons.check, size: 15)
             : null,
       ),
     ),
+
     tooltipTheme: TooltipThemeData(
       decoration: BoxDecoration(
         color: scheme.inverseSurface,

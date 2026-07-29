@@ -6,6 +6,7 @@ import 'package:pi_pilot/ui/chat/widgets/chat_item_view.dart';
 import 'package:pi_pilot/ui/chat/widgets/code_block.dart';
 import 'package:pi_pilot/ui/chat/widgets/diff_view.dart';
 import 'package:pi_pilot/ui/chat/widgets/markdown_body.dart';
+import 'package:pi_pilot/ui/chat/widgets/streaming_cursor.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
 
 Widget _wrap(Widget child, {required bool dark}) => ProviderScope(
@@ -25,10 +26,13 @@ void main() {
         expect(find.text('hi'), findsOneWidget);
       });
 
-      testWidgets('流式助手 → 纯文本 + 光标', (tester) async {
+      testWidgets('流式助手 → 纯文本 + 闪烁光标 widget', (tester) async {
         final item = AssistantItem('assistant:1')..text = 'partial';
         await tester.pumpWidget(_wrap(ChatItemView(item: item), dark: dark));
-        expect(find.textContaining('partial ▍'), findsOneWidget);
+        // 光标不再是拼接的 '▍' 字符 —— 那个写法会跟着文本末尾一起跳、也不会闪。
+        // 现在是独立的 StreamingCursor widget,嵌在富文本末尾的 WidgetSpan 里。
+        expect(find.textContaining('partial'), findsOneWidget);
+        expect(find.byType(StreamingCursor), findsOneWidget);
         expect(find.byType(PiMarkdown), findsNothing);
       });
 

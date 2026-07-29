@@ -1,16 +1,33 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../chat/chat_body.dart';
 import '../chat/widgets/chat_app_bar.dart';
-import '../sessions/session_drawer.dart';
+import '../sessions/devices_page.dart';
+import '../settings/settings_screen.dart';
+import '../theme/motion.dart';
+import '../theme/paper.dart';
+import 'liquid_nav_bar.dart';
 import 'swipe_to_open_drawer.dart';
 
-/// 应用外壳:持有 `Scaffold` 与抽屉。
+/// 应用外壳:**三页常驻 + 同步横向滑动 + 水滴底栏**。
 ///
-/// 之前 `ChatScreen` 自己是 `Scaffold`,整个 app 只有一个持久界面、
-/// 会话/目录/设置全塞在弹窗里。`Scaffold` 上移到这一层之后才有 `drawer:`
-/// 可挂,对话页降级为纯 body。
+/// ## 为什么从右往左会卡(旧版的 bug)
+///
+/// 旧版非动画态只保留当前页,其他页从树中移除。于是切走再切回时,目标页
+/// 要**重新构建**。"从右往左"通常切回最重的会话页(长列表+输入框+滚动状态),
+/// 重建就卡;"从左往右"切向较轻页面,感觉丝滑 —— 其实是页面重量差异,
+/// 不是方向差异。
+///
+/// ## 正解:三页常驻,只移动位置
+///
+/// 三页在 `initState` 一次性构建、常驻一个 `Stack`,切换时**只改位置**,
+/// 不构建也不销毁。所有页面状态(滚动、输入、窗口)始终保留,切回去零开销。
+///
+/// 位置由一个浮点 `display` 决定:动画时从 `oldIndex` 连续插值到 `index`,
+/// 每页的偏移 = `(i - display)` 屏宽。三页用**同一个 display**,
+/// 物理上不可能不同步 —— 这是丝滑的根本保证。双向对称,不再有方向差异。
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
 
@@ -18,32 +35,143 @@ class AppShell extends ConsumerStatefulWidget {
   ConsumerState<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends ConsumerState<AppShell> {
-  /// `PopScope` 挂在 `Scaffold` 外面,所以 `Scaffold.maybeOf(context)` 在这一层
-  /// 只会往上找、找不到下面那个 —— 必须用 key 才能拿到抽屉的 state。
-  final _scaffoldKey = GlobalKey<ScaffoldState>();
+class _AppShellState extends ConsumerState<AppShell>
+    with TickerProviderStateMixin {
+  int _index = 0;
+  int _oldIndex = 0;
+  AnimationController? _controller;
 
-  /// 抽屉是否展开。只为了驱动 [PopScope.canPop] 而存在。
+  /// 三页常驻引用:只构建一次,之后切换只移动它们,绝不重建。
+  /// 这是双向丝滑的关键 —— 切回去时滚动位置/输入内容/窗口大小都不丢。
+  static const _keys = [
+    GlobalObjectKey('tab-chat'),
+    GlobalObjectKey('tab-devices'),
+    GlobalObjectKey('tab-settings'),
+  ];
+
+  late final List<Widget> _pages;
+
+  static const _tabs = [
+    NavTabSpec(
+      icon: Icons.forum_outlined,
+      selectedIcon: Icons.forum,
+      label: '会话',
+    ),
+    NavTabSpec(
+      icon: Icons.devices_outlined,
+      selectedIcon: Icons.devices,
+      label: '设备',
+    ),
+    NavTabSpec(
+      icon: Icons.settings_outlined,
+      selectedIcon: Icons.settings,
+      label: '设置',
+    ),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    // 一次性构建三页,常驻整个 app 生命周期。
+    _pages = [
+      _ChatTab(key: _keys[0]),
+      DevicesPage(key: _keys[1]),
+      SettingsScreen(key: _keys[2]),
+    ];
+  }
+
+  void _switchTo(int i) {
+    if (i == _index) return;
+    // 切换中途又点新的:跳到上一个动画的终点,再开新动画。
+    _controller?.stop();
+    setState(() {
+      _oldIndex = _index;
+      _index = i;
+    });
+    _controller = AnimationController(
+      vsync: this,
+      duration: PiMotion.standard,
+    )..addListener(() => setState(() {}));
+    _controller!.forward().then((_) {
+      _controller?.dispose();
+      _controller = null;
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ctrl = _controller;
+    final isAnimating = ctrl != null && ctrl.isAnimating;
+    // display:当前「连续」位置。静止时 = _index;动画时从 _oldIndex 插值到 _index。
+    final display = isAnimating
+        ? _oldIndex + (_index - _oldIndex) * _easeOutCubic(ctrl.value)
+        : _index.toDouble();
+
+    return Scaffold(
+      extendBodyBehindAppBar: true,
+      body: BackdropPaper(
+        // 背景常驻,切换时这层完全不动。
+        child: Stack(
+          fit: StackFit.expand,
+          // 裁掉移出屏幕的页面,不让它们画到背景层上。
+          clipBehavior: Clip.hardEdge,
+          children: [
+            // 三页全部常驻,每页只随 display 移动。
+            // offset = (i - display):当前页 ≈ 0(居中),左侧页 <0(屏外左),
+            // 右侧页 >0(屏外右)。三页偏移之差始终是整数屏宽,
+            // 永不重叠 → 不会出现「两页同时叠在一起」。
+            for (var i = 0; i < _pages.length; i++)
+              Positioned.fill(
+                child: FractionalTranslation(
+                  translation: Offset(i - display, 0),
+                  child: _pages[i],
+                ),
+              ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: LiquidNavBar(
+        selectedIndex: _index,
+        tabs: _tabs,
+        onTap: _switchTo,
+      ),
+    );
+  }
+}
+
+/// 会话 tab:顶栏 + 消息流。
+///
+/// 不带自己的背景 —— 背景由外层 [AppShell] 的 BackdropPaper 统一提供。
+class _ChatTab extends StatefulWidget {
+  const _ChatTab({super.key});
+
+  @override
+  State<_ChatTab> createState() => _ChatTabState();
+}
+
+class _ChatTabState extends State<_ChatTab> {
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   bool _drawerOpen = false;
 
   @override
   Widget build(BuildContext context) {
-    // Material 的 Drawer 不注册任何返回键拦截(drawer.dart 里没有 PopScope),
-    // 所以抽屉开着时按返回会直接落到根路由上 —— 表现就是一下退到桌面。
-    // 这里把抽屉当成一层「可以被返回键关掉的东西」:开着时禁止 pop,
-    // 拦到返回就只关抽屉;关上之后 canPop 恢复,再按一次才真的退出。
     return PopScope(
       canPop: !_drawerOpen,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        // 走到这里说明 pop 被 canPop 拦住了,唯一的原因就是抽屉开着。
         _scaffoldKey.currentState?.closeDrawer();
       },
       child: Scaffold(
         key: _scaffoldKey,
-        drawer: const SessionDrawer(),
-        // 抽屉关闭时 Flutter 会把焦点还给 body 里第一个可聚焦节点 ——
-        // 那正好是输入框,于是每次关抽屉键盘都会弹出来。这里显式收掉焦点。
+        backgroundColor: Colors.transparent,
+        drawer: const DevicesDrawer(),
         onDrawerChanged: (isOpen) {
           if (!isOpen) FocusManager.instance.primaryFocus?.unfocus();
           if (isOpen != _drawerOpen) setState(() => _drawerOpen = isOpen);
@@ -60,4 +188,10 @@ class _AppShellState extends ConsumerState<AppShell> {
       ),
     );
   }
+}
+
+/// ease-out 三次曲线:快进慢出。手动插值用(controller 的 Curve 通道喂不进来)。
+double _easeOutCubic(double t) {
+  final v = 1 - math.pow(1 - t, 3);
+  return v.toDouble();
 }

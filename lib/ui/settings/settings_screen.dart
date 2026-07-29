@@ -3,14 +3,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
+import '../theme/paper.dart';
 import '../theme/semantic_colors.dart';
+import '../theme/shapes.dart';
+import '../theme/typography.dart';
 import 'settings_sections.dart';
 
-/// 设置索引页。
+/// 设置索引页:**衬线页头 + 编辑式分组卡**。
 ///
-/// 原来这是一个 832 行、滚动高度 ~2,100dp(约 3 屏)的单页,其中 448dp
-/// 是纯分组标题留白,而且断开连接时两段会缩成空壳、页面长度悄悄变化。
-/// 现在首屏就是 6 个入口,每个带一行当前值摘要,点进去是能一屏看完的子页。
+/// Editorial Retro 改版。设计规范说设置页「最容易出效果」,因为它天然适合
+/// 大留白 + 整齐卡片 + 标签化图标 + 分组信息——像一本优雅杂志的目录页。
+///
+/// 结构:衬线大标题「设置」+ 品牌印章 → 栏目名 → 6 张描边纸卡入口,
+/// 每张带一枚复古色圆形图标和一行当前值摘要。
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -75,44 +80,75 @@ class SettingsScreen extends ConsumerWidget {
       ),
     ];
 
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+
+    // 这个页面**两用**:既作底栏的「设置」tab(外层 AppShell 已给背景),
+    // 又会被 Navigator.push 成独立路由(会话页「前往设置」、抽屉入口)。
+    // 透明 Scaffold 在 tab 模式下能透出外层背景,但 push 成独立路由时
+    // 下面没有 BackdropPaper,会透出 MaterialApp 默认底色 → 黑白混搭。
+    // 所以这里自己套一层 BackdropPaper,两种场景都自带正确背景。
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          const SliverAppBar.large(title: Text('设置')),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
-            sliver: SliverList.separated(
-              itemCount: entries.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 8),
-              itemBuilder: (context, index) {
-                final entry = entries[index];
-                // 每个入口一个专属身份色,列表一眼能分辨,不是一排一样的灰图标
-                final slot = PiColors.identityIndex(entry.title);
-                return Card(
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: piColors.identity[slot],
-                      foregroundColor: piColors.onIdentity[slot],
-                      child: Icon(entry.icon, size: 22),
+      body: BackdropPaper(
+        child: SafeArea(
+          bottom: false,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 36),
+            children: [
+              // 页头:衬线大标题 + 品牌印章,像刊物目录页的报头
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '设置',
+                          style: AppType.displayTitle(
+                            size: 32,
+                            color: colors.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '连接、外观、行为与会话',
+                          style: AppType.serifItalic(
+                            size: 14,
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ),
-                    title: Text(entry.title),
-                    subtitle: Text(
-                      entry.summary,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () => Navigator.of(
-                      context,
-                    ).push(MaterialPageRoute<void>(builder: entry.builder)),
                   ),
-                );
-              },
-            ),
+                  // 矢量小装饰替代带白底的印章 PNG
+                  EditorialOrnament(
+                    size: 54,
+                    color: colors.onSurfaceVariant,
+                    accent: colors.primary,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              Eyebrow(text: '目录', withRule: true),
+              const SizedBox(height: 14),
+              for (final entry in entries) ...[
+                _SettingsCard(entry: entry, piColors: piColors),
+                const SizedBox(height: 10),
+              ],
+              const SizedBox(height: 8),
+              // 页脚:一条编辑式短线收住整页(替代带白底的叶枝 PNG)
+              Center(
+                child: SizedBox(
+                  width: 64,
+                  child: EditorialRule(color: colors.outlineVariant),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
-    );
+      );
   }
 }
 
@@ -128,4 +164,87 @@ class _SettingsEntry {
   final String title;
   final String summary;
   final WidgetBuilder builder;
+}
+
+/// 设置入口纸卡:复古色圆形图标 + 标题 + 当前值摘要。
+class _SettingsCard extends StatelessWidget {
+  const _SettingsCard({required this.entry, required this.piColors});
+
+  final _SettingsEntry entry;
+  final PiColors piColors;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    // 每个入口一个专属身份色,列表一眼能分辨,不是一排一样的灰图标
+    final slot = PiColors.identityIndex(entry.title);
+
+    return Material(
+      color: colors.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(PiShape.lg),
+        side: BorderSide(color: colors.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => Navigator.of(
+          context,
+        ).push(MaterialPageRoute<void>(builder: entry.builder)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 15, 14, 15),
+          child: Row(
+            children: [
+              // 圆形复古色图标区(设计规范:「柔和色彩的圆形图标区域」)
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: piColors.identity[slot],
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: piColors.onIdentity[slot].withValues(alpha: 0.18),
+                  ),
+                ),
+                child: Icon(
+                  entry.icon,
+                  size: 21,
+                  color: piColors.onIdentity[slot],
+                ),
+              ),
+              const SizedBox(width: 15),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      entry.title,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: colors.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      entry.summary,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right,
+                size: 20,
+                color: colors.onSurfaceVariant,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

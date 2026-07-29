@@ -23,7 +23,7 @@ class AppSettings {
     this.quickPrompts = const [],
     this.notificationsEnabled = true,
     this.notificationVibrationEnabled = false,
-    this.accent = AppAccent.blue,
+    this.accent = AppAccent.terracotta,
     this.loaded = false,
   });
 

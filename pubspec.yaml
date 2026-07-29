@@ -64,6 +64,10 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Editorial Retro 视觉素材:纸感背景、场景插画、纹样装饰、品牌元素、徽章。
+  assets:
+    - assets/images/
+
   fonts:
     - family: JetBrainsMono
       fonts:
@@ -74,11 +78,6 @@ flutter:
           weight: 500
         - asset: assets/fonts/JetBrainsMono-Bold.ttf
           weight: 700
-
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

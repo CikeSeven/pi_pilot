@@ -152,9 +152,8 @@ void main() {
     await tester.pumpAndSettle();
 
     final theme = buildLightTheme();
-    // 现在整个 app 内容区都不投影,所以「看得见」只能靠底色差 ——
+    // 全 app 零阴影,所以「看得见」靠底色差 + 1px 描边 ——
     // 输入卡的底色必须**不等于** scaffold 背景,否则它会彻底消失。
-    // (最早那版是 Container + Border(top:),既无 elevation 也无色差。)
     final cards = tester
         .widgetList<Material>(
           find.descendant(
@@ -162,16 +161,15 @@ void main() {
             matching: find.byType(Material),
           ),
         )
-        .where((m) => m.color == theme.colorScheme.surfaceContainerHigh);
+        .where((m) => m.color == theme.colorScheme.surfaceContainerLow);
     expect(cards, isNotEmpty, reason: '输入卡必须有独立底色');
 
-    // 而且是大圆角
+    // Editorial Retro:输入卡是**胶囊** + 描边(「纸上的输入区域」),
+    // 不再是旧版的 28 圆角方卡。
     final card = cards.first;
-    final shape = card.shape! as RoundedRectangleBorder;
-    expect(
-      shape.borderRadius.resolve(TextDirection.ltr).topLeft.x,
-      greaterThanOrEqualTo(24),
-    );
+    final shape = card.shape! as StadiumBorder;
+    expect(shape.side.color, theme.colorScheme.outlineVariant);
+    expect(shape.side.width, greaterThan(0));
   });
 
   testWidgets('输入框自己不画边框,视觉容器是外面那张卡', (tester) async {

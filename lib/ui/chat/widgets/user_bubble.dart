@@ -3,16 +3,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
 import '../../theme/shapes.dart';
+import '../../theme/typography.dart';
 import 'message_actions_sheet.dart';
 
-/// 用户消息。
+/// 用户消息:**陶土橙实心卡,右对齐**。
 ///
-/// 全屏只有它和工具卡带底色 —— AI 的回答是裸排的,所以这一层淡底就是
-/// 「这句是我说的」的唯一标记。
+/// Editorial Retro 改版的关键对比元素。旧版用 `surfaceContainerHigh` 淡底、
+/// 铺满整行宽度——在新的奶油纸底上那层淡底几乎看不见,「谁在说话」就丢了。
 ///
-/// 用 `surfaceContainerHigh` 而不是 `primaryContainer`:顶栏已经是一整块
-/// `primaryContainer`,再用主题色会和它抢注意力,而且每条用户消息都上主题色
-/// 会让长对话变得很吵。
+/// 现在的设计语言(对齐参考图):
+/// - 主强调色实心 + 反白字 —— 全屏唯一的实色块,是视觉锚点;
+/// - **右对齐 + 最大宽度 82%** —— 靠位置区分说话人,比靠底色更快;
+/// - 左上角留一个 `你` 的编辑式小标 —— 像信笺上的落款;
+/// - 圆角走纸卡档(14),不是胶囊 —— 它是一张纸条,不是聊天气泡。
 class UserBubble extends ConsumerWidget {
   const UserBubble({super.key, required this.item});
 
@@ -20,18 +23,33 @@ class UserBubble extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final colors = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 10, 20, 10),
-      child: Row(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // 左侧留白让它和 AI 的裸排文字错开,一眼能看出说话的人变了
-          const SizedBox(width: 24),
-          Expanded(
+          // 落款小标:在卡片右上,像纸条上的署名
+          Padding(
+            padding: const EdgeInsets.only(right: 4, bottom: 6),
+            child: Text(
+              '你',
+              style: AppType.eyebrow(
+                color: colors.onSurfaceVariant.withValues(alpha: 0.8),
+              ),
+            ),
+          ),
+          // 右对齐 + 宽度上限:长消息不会顶满全宽,短消息自然收缩
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+            ),
             child: Material(
-              color: colors.surfaceContainerHigh,
-              shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.all(Radius.circular(PiShape.xl)),
+              color: colors.primary,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(PiShape.lg),
               ),
               clipBehavior: Clip.antiAlias,
               child: InkWell(
@@ -43,9 +61,10 @@ class UserBubble extends ConsumerWidget {
                   ),
                   child: SelectableText(
                     item.text,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyLarge?.copyWith(color: colors.onSurface),
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      color: colors.onPrimary,
+                      height: 1.5,
+                    ),
                   ),
                 ),
               ),

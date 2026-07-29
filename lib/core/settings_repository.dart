@@ -57,7 +57,7 @@ class SettingsRepository {
       notificationsEnabled: prefs.getBool(_kNotificationsEnabled) ?? true,
       notificationVibrationEnabled:
           prefs.getBool(_kNotificationVibrationEnabled) ?? false,
-      accent: prefs.getString(_kAccent) ?? 'blue',
+      accent: prefs.getString(_kAccent) ?? 'terracotta',
       preferredSessionId: prefs.getString(_kPreferredSessionId),
     );
   }

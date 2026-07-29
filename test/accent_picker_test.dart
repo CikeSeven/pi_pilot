@@ -25,17 +25,17 @@ void main() {
     addTearDown(container.dispose);
     await tester.pump();
 
-    expect(container.read(settingsProvider).accent, AppAccent.blue);
+    expect(container.read(settingsProvider).accent, AppAccent.terracotta);
 
     // 设置从 2,100dp 的单页拆成了索引页 + 子页:先进「外观」
     await tester.tap(find.text('外观'));
     await tester.pumpAndSettle();
 
-    // 6 个色点中点第二个(purple);Tooltip message 即 label
-    await tester.tap(find.byTooltip('紫色'));
+    // 6 个色点中点橄榄;Tooltip message 即 label
+    await tester.tap(find.byTooltip('橄榄'));
     await tester.pumpAndSettle();
 
-    expect(container.read(settingsProvider).accent, AppAccent.purple);
-    expect((await SettingsRepository().load()).accent, 'purple');
+    expect(container.read(settingsProvider).accent, AppAccent.olive);
+    expect((await SettingsRepository().load()).accent, 'olive');
   });
 }

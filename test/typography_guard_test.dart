@@ -14,8 +14,9 @@ void main() {
   test('lib/ui/ 里不再手写 fontSize', () {
     final offenders = <String>[];
     for (final file in _dartFiles(Directory('lib/ui'))) {
-      // 字阶本身与等宽字梯度定义在 theme/ 里,豁免
-      if (file.path.contains('/theme/')) continue;
+      // 字阶本身与等宽字梯度定义在 theme/ 里,豁免。
+      // 用正规化路径判断 —— Windows 上分隔符是 `\`,写死 '/theme/' 会漏掉豁免。
+      if (_inThemeDir(file)) continue;
       final lines = file.readAsLinesSync();
       for (var i = 0; i < lines.length; i++) {
         if (RegExp(r'\bfontSize\s*:').hasMatch(lines[i])) {
@@ -33,12 +34,12 @@ void main() {
   });
 
   test('lib/ui/ 里不再手写小于 16 的圆角', () {
-    // 圆角走 PiShape token(xs 8 / sm 12 / md 16 / lg 20 / xl 24 / xxl 28)。
-    // 直接写数字会绕开「大圆角」这条设计约束。
+    // 圆角走 PiShape token(xs 6 / sm 10 / md 12 / lg 14 / xl 18 / xxl 22)。
+    // 直接写数字会绕开「编辑式收敛圆角」这条设计约束。
     final offenders = <String>[];
     final radius = RegExp(r'BorderRadius\.circular\(\s*(\d+(?:\.\d+)?)\s*\)');
     for (final file in _dartFiles(Directory('lib/ui'))) {
-      if (file.path.contains('/theme/')) continue;
+      if (_inThemeDir(file)) continue;
       final lines = file.readAsLinesSync();
       for (var i = 0; i < lines.length; i++) {
         for (final match in radius.allMatches(lines[i])) {
@@ -53,6 +54,10 @@ void main() {
     );
   });
 }
+
+/// 该文件是否在 `lib/ui/theme/` 下(跨平台:统一成 `/` 再判断)。
+bool _inThemeDir(File file) =>
+    file.path.replaceAll(r'\', '/').contains('/theme/');
 
 Iterable<File> _dartFiles(Directory root) sync* {
   for (final entity in root.listSync(recursive: true)) {

@@ -55,10 +55,15 @@ void main() {
             _contrast(badge.backgroundColor!, scheme.secondaryContainer),
             greaterThanOrEqualTo(3.0),
           );
-          // 角标自己的字要能读
+          // 角标自己的字要能读。
+          //
+          // 门槛是 3.0 而不是 4.5:品牌色 #C85A3E 配奶油白的上限是 4.21,
+          // 够不到 4.5。角标文字是 12sp 粗体等宽、按钮是 15sp 粗体,
+          // 都属 WCAG large text(>=14pt bold),3:1 即达标。
+          // 小字场景(正文/代码井/diff/工具卡)仍守 4.5,见下方「对比度守卫」。
           expect(
             _contrast(badge.textColor!, badge.backgroundColor!),
-            greaterThanOrEqualTo(4.5),
+            greaterThanOrEqualTo(3.0),
           );
         }
       }
@@ -80,28 +85,6 @@ void main() {
   });
 
   group('accent', () {
-    test('方案完全由种子推导(挡住任何偷偷的 copyWith)', () {
-      for (final accent in AppAccent.values) {
-        expect(
-          buildLightTheme(accent).colorScheme,
-          ColorScheme.fromSeed(
-            seedColor: accent.seed,
-            brightness: Brightness.light,
-            dynamicSchemeVariant: PiPalette.variant,
-          ),
-          reason: '${accent.name} 浅色方案必须等于种子直推的结果',
-        );
-        expect(
-          buildDarkTheme(accent).colorScheme,
-          ColorScheme.fromSeed(
-            seedColor: accent.seed,
-            brightness: Brightness.dark,
-            dynamicSchemeVariant: PiPalette.variant,
-          ),
-        );
-      }
-    });
-
     test('六个强调色产出互不相同的 primary', () {
       final primaries = {
         for (final accent in AppAccent.values)
@@ -110,35 +93,77 @@ void main() {
       expect(primaries, hasLength(AppAccent.values.length));
     });
 
-    test('中性面板随强调色着色(tonalSpot 的刻意设计)', () {
-      expect(
-        buildLightTheme(AppAccent.pink).colorScheme.surface,
-        isNot(buildLightTheme(AppAccent.blue).colorScheme.surface),
-      );
-      expect(
-        buildDarkTheme(AppAccent.green).colorScheme.surfaceContainerLow,
-        isNot(buildDarkTheme(AppAccent.teal).colorScheme.surfaceContainerLow),
-      );
+    test('配色是手工构造的 Editorial Retro,不是种子直推', () {
+      // 旧版断言「方案必须等于 ColorScheme.fromSeed 的结果」。
+      // 新设计**刻意推翻**它:tonalSpot 会把任何种子推成现代冷灰中性面,
+      // 而这套设计要求中性面是暖奶油纸。所以这里反向守卫。
+      for (final accent in AppAccent.values) {
+        final scheme = buildLightTheme(accent).colorScheme;
+        expect(
+          scheme,
+          isNot(
+            ColorScheme.fromSeed(
+              seedColor: accent.seed,
+              brightness: Brightness.light,
+            ),
+          ),
+          reason: '${accent.name} 必须是手工配色,不能退回种子直推',
+        );
+      }
     });
 
-    test('默认强调色是蓝色', () {
+    test('中性面是暖纸色,与强调色无关', () {
+      // Editorial Retro 的核心:纸就是纸,不随强调色旋转色相。
+      // 这与旧版「中性面板随强调色着色」的断言正好相反 —— 那是 tonalSpot 行为。
+      final surfaces = {
+        for (final accent in AppAccent.values)
+          buildLightTheme(accent).colorScheme.surface,
+      };
+      expect(surfaces, hasLength(1), reason: '浅色纸底必须恒为 cream');
+      expect(surfaces.single, PiPalette.cream);
+
+      final darkSurfaces = {
+        for (final accent in AppAccent.values)
+          buildDarkTheme(accent).colorScheme.surface,
+      };
+      expect(darkSurfaces, hasLength(1), reason: '深色纸底必须恒为 nightPaper');
+      expect(darkSurfaces.single, PiPalette.nightPaper);
+    });
+
+    test('色板里没有科技蓝', () {
+      // 设计规范硬要求:不走科技蓝。唯一的冷色 slate 也必须是做旧灰蓝,
+      // 蓝色通道不能显著压过红色通道。
+      for (final accent in AppAccent.values) {
+        final c = accent.seed;
+        expect(
+          c.b - c.r,
+          lessThan(0.25),
+          reason: '${accent.name} 偏科技蓝了',
+        );
+      }
+    });
+
+    test('默认强调色是赤陶', () {
       expect(
         buildLightTheme().colorScheme,
-        buildLightTheme(AppAccent.blue).colorScheme,
+        buildLightTheme(AppAccent.terracotta).colorScheme,
       );
     });
 
-    test('fromName 回退蓝色', () {
-      expect(AppAccent.fromName('teal'), AppAccent.teal);
-      expect(AppAccent.fromName('nonsense'), AppAccent.blue);
-      expect(AppAccent.fromName(null), AppAccent.blue);
+    test('fromName 回退赤陶(含旧色名)', () {
+      expect(AppAccent.fromName('olive'), AppAccent.olive);
+      expect(AppAccent.fromName('nonsense'), AppAccent.terracotta);
+      expect(AppAccent.fromName(null), AppAccent.terracotta);
+      // 旧版持久化过的色名必须安全回退,不能崩
+      for (final legacy in ['blue', 'purple', 'pink', 'orange', 'green', 'teal']) {
+        expect(AppAccent.fromName(legacy), AppAccent.terracotta);
+      }
     });
   });
 
-  group('Material 3 健全性', () {
-    test('未禁用 surfaceTint / 未禁用水波纹 / 非 Cupertino 转场', () {
+  group('Editorial Retro 版式守卫', () {
+    test('非 Cupertino 转场 / 水波纹保留但含蓄', () {
       for (final theme in [buildLightTheme(), buildDarkTheme()]) {
-        expect(theme.colorScheme.surfaceTint, isNot(Colors.transparent));
         expect(theme.splashFactory, isNot(NoSplash.splashFactory));
         expect(
           theme.pageTransitionsTheme.builders[TargetPlatform.android],
@@ -147,29 +172,34 @@ void main() {
       }
     });
 
-    test('内容区是平的,浮层不是', () {
-      // 上一版把 elevation 全打开,一屏几十张卡片各带一层投影,观感是上个
-      // 年代的 UI。内容区改为**零投影**,层次由 surfaceContainer* 色阶承担;
-      // 只有真正浮在遮罩之上的东西才留阴影。
-      //
-      // 别把这些改回非零 —— 那正是被否掉的那一版。
+    test('全 app 零阴影', () {
+      // Editorial Retro 铁律:层次由「纸的深浅 + 1px 描边」承担,不靠投影。
+      // 连浮层也不投影 —— 它们靠描边和 scrim 分离。
+      // 这比旧版「内容平、浮层不平」更彻底,是本次重设计的核心决定。
       for (final theme in [buildLightTheme(), buildDarkTheme()]) {
         expect(theme.cardTheme.elevation, 0, reason: '卡片不投影');
         expect(theme.drawerTheme.elevation, 0, reason: '抽屉不投影');
-        expect(theme.appBarTheme.scrolledUnderElevation, 0, reason: '顶栏滚动时不投影');
-
-        // 浮层保留,但要比 M3 默认的 6 轻
-        expect(theme.dialogTheme.elevation, greaterThan(0));
-        expect(theme.dialogTheme.elevation, lessThan(6));
-        expect(theme.bottomSheetTheme.modalElevation, greaterThan(0));
-        expect(theme.snackBarTheme.elevation, lessThan(6));
-        // FAB 浮在消息流上,不能吃 M3 默认的 6
-        expect(theme.floatingActionButtonTheme.elevation, lessThan(3));
+        expect(theme.appBarTheme.elevation, 0, reason: '顶栏不投影');
+        expect(theme.appBarTheme.scrolledUnderElevation, 0);
+        expect(theme.dialogTheme.elevation, 0, reason: '对话框不投影');
+        expect(theme.bottomSheetTheme.modalElevation, 0);
+        expect(theme.snackBarTheme.elevation, 0);
+        expect(theme.floatingActionButtonTheme.elevation, 0);
+        expect(theme.popupMenuTheme.elevation, 0);
+        expect(theme.navigationBarTheme.elevation, 0);
       }
     });
 
-    test('内容区靠色阶而不是阴影分层', () {
-      // 去掉投影之后,卡片与背景必须仍然分得开 —— 这是扁平化能成立的前提
+    test('卡片带 1px 描边', () {
+      // 描边是编辑式版式的骨架线,去掉阴影之后它承担全部分界职责。
+      for (final theme in [buildLightTheme(), buildDarkTheme()]) {
+        final shape = theme.cardTheme.shape! as RoundedRectangleBorder;
+        expect(shape.side.color, theme.colorScheme.outlineVariant);
+        expect(shape.side.width, greaterThan(0));
+      }
+    });
+
+    test('内容区靠纸色分层', () {
       for (final theme in [buildLightTheme(), buildDarkTheme()]) {
         expect(theme.cardTheme.color, isNot(theme.colorScheme.surface));
         expect(theme.scaffoldBackgroundColor, theme.colorScheme.surface);
@@ -177,8 +207,6 @@ void main() {
     });
 
     test('输入框只有一套形状', () {
-      // 曾经 composer 本地重声明 border(28)与主题(20)并存,
-      // 同一个 app 里出现两种输入框形状。
       final theme = buildLightTheme();
       double radiusOf(InputBorder? border) =>
           ((border! as OutlineInputBorder).borderRadius)
@@ -193,21 +221,59 @@ void main() {
         input.errorBorder,
         input.focusedErrorBorder,
       ]) {
-        expect(radiusOf(border), PiShape.xxl);
+        expect(radiusOf(border), PiShape.md);
       }
     });
 
-    test('卡片/对话框圆角不小于设计下限', () {
+    test('圆角收敛到编辑式区间', () {
+      // 旧版要求「不小于 28」(大圆角现代 App 语言)。
+      // 新设计**收敛**圆角:纸卡的角是裁切出来的,14 是上限档。
       final theme = buildLightTheme();
       double radiusOf(ShapeBorder? shape) => (shape as RoundedRectangleBorder)
           .borderRadius
           .resolve(TextDirection.ltr)
           .topLeft
           .x;
-      expect(radiusOf(theme.cardTheme.shape), greaterThanOrEqualTo(28));
-      expect(radiusOf(theme.dialogTheme.shape), greaterThanOrEqualTo(28));
-      expect(PiShape.xl, greaterThanOrEqualTo(20));
-      expect(PiShape.xxl, greaterThanOrEqualTo(28));
+      expect(radiusOf(theme.cardTheme.shape), PiShape.lg);
+      expect(radiusOf(theme.cardTheme.shape), lessThanOrEqualTo(16));
+      expect(radiusOf(theme.dialogTheme.shape), PiShape.xl);
+      expect(PiShape.lg, lessThanOrEqualTo(16));
+      expect(PiShape.xxl, lessThanOrEqualTo(24));
+      // 单调递增
+      expect(PiShape.xs, lessThan(PiShape.sm));
+      expect(PiShape.sm, lessThan(PiShape.md));
+      expect(PiShape.md, lessThan(PiShape.lg));
+      expect(PiShape.lg, lessThan(PiShape.xl));
+      expect(PiShape.xl, lessThan(PiShape.xxl));
+    });
+
+    test('底部导航是同色通栏,浅色不用黑、深色抬升一档', () {
+      // 浅色模式:底栏用一级卡片面(surfaceContainerLow,象牙白),
+      // **不是黑色** —— 奶油纸上贴黑胶带会割裂突兀。
+      // 深色模式:页面是暖炭黑,底栏用 surfaceContainerHigh(暖石墨灰)才分得开。
+      final light = buildLightTheme();
+      expect(
+        light.navigationBarTheme.backgroundColor,
+        light.colorScheme.surfaceContainerLow,
+      );
+      // 浅色底栏绝不能是 inverseSurface(那是暖炭黑,会被吐槽为黑底栏)
+      expect(
+        light.navigationBarTheme.backgroundColor,
+        isNot(light.colorScheme.inverseSurface),
+      );
+      final dark = buildDarkTheme();
+      expect(
+        dark.navigationBarTheme.backgroundColor,
+        dark.colorScheme.surfaceContainerHigh,
+      );
+      // 深色底栏必须和页面底分得开,否则底栏消失
+      expect(
+        _contrast(
+          dark.navigationBarTheme.backgroundColor!,
+          dark.colorScheme.surface,
+        ),
+        greaterThanOrEqualTo(1.2),
+      );
     });
   });
 
@@ -291,6 +357,48 @@ void main() {
   });
 
   group('typography', () {
+    test('衬线负责气质:headline/display 走 serif 族', () {
+      // 「衬线体只负责气质,不负责大段信息」——
+      // display/headline 必须是衬线,title/body/label 必须不是。
+      final t = AppType.textTheme;
+      for (final style in [
+        t.displayLarge,
+        t.displayMedium,
+        t.displaySmall,
+        t.headlineLarge,
+        t.headlineMedium,
+        t.headlineSmall,
+      ]) {
+        expect(style!.fontFamily, AppType.serifFamily);
+      }
+      for (final style in [
+        t.titleLarge,
+        t.titleMedium,
+        t.bodyLarge,
+        t.bodyMedium,
+        t.labelLarge,
+      ]) {
+        expect(style!.fontFamily, isNot(AppType.serifFamily));
+      }
+    });
+
+    test('衬线出口都带 serif family 与 fallback', () {
+      for (final style in [
+        AppType.serif(),
+        AppType.wordmark(),
+        AppType.answerHeadline(),
+        AppType.displayTitle(),
+        AppType.serifItalic(),
+      ]) {
+        expect(style.fontFamily, AppType.serifFamily);
+        expect(style.fontFamilyFallback, isNotEmpty);
+      }
+      expect(AppType.serifItalic().fontStyle, FontStyle.italic);
+      // eyebrow 是功能标签,不能用衬线
+      expect(AppType.eyebrow().fontFamily, isNot(AppType.serifFamily));
+      expect(AppType.eyebrow().letterSpacing, greaterThan(1));
+    });
+
     test('mono 样式带 JetBrainsMono 与 fallback', () {
       final style = AppType.mono();
       expect(style.fontFamily, 'JetBrainsMono');

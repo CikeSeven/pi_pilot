@@ -150,12 +150,20 @@ class _CodeBlockState extends State<CodeBlock> {
     return code;
   }
 
+  /// 复制成功后,复制键图标闪成对勾再回退 —— 替代之前的 SnackBar。
+  /// SnackBar 会从底部弹一条横幅打断阅读,对「复制」这种轻操作太重;
+  /// 原地闪对勾是即时、就地、不打扰的反馈。
+  bool _copied = false;
+
   void _copy(BuildContext context) {
     Clipboard.setData(ClipboardData(text: widget.code));
     HapticFeedback.lightImpact();
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('已复制')));
+    setState(() => _copied = true);
+    // 1.2s 后回退成复制图标。用 timer 而不是 AnimatedSwitcher 的自带反转,
+    // 因为这里要的是一个明确的「闪一下」节奏,不是悬停态。
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _copied = false);
+    });
   }
 
   @override
@@ -238,10 +246,29 @@ class _CodeBlockState extends State<CodeBlock> {
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   iconSize: 16,
-                  color: colors.onSurfaceVariant,
                   tooltip: '复制',
-                  icon: const Icon(Icons.copy_outlined),
-                  onPressed: () => _copy(context),
+                  // 复制成功:图标变对勾 + 主色,带一次缩放过渡。
+                  style: IconButton.styleFrom(
+                    foregroundColor:
+                        _copied ? colors.primary : colors.onSurfaceVariant,
+                  ),
+                  icon: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 180),
+                    transitionBuilder: (child, anim) {
+                      final t = anim.value;
+                      // 进:从 60% 放大 + 淡入;退:缩小淡出
+                      final scale = 0.6 + 0.4 * t;
+                      return Opacity(
+                        opacity: t,
+                        child: Transform.scale(scale: scale, child: child),
+                      );
+                    },
+                    child: Icon(
+                      _copied ? Icons.check_rounded : Icons.copy_outlined,
+                      key: ValueKey(_copied),
+                    ),
+                  ),
+                  onPressed: _copied ? null : () => _copy(context),
                 ),
               ],
             ),

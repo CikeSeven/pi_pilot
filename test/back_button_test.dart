@@ -31,7 +31,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    tester.state<ScaffoldState>(find.byType(Scaffold)).openDrawer();
+    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
     await tester.pumpAndSettle();
     expect(find.byType(Drawer), findsOneWidget);
 
@@ -39,7 +39,7 @@ void main() {
     expect(await pressBack(tester), isTrue);
     expect(find.byType(Drawer), findsNothing);
     expect(
-      tester.state<ScaffoldState>(find.byType(Scaffold)).isDrawerOpen,
+      tester.state<ScaffoldState>(findDrawerScaffold()).isDrawerOpen,
       isFalse,
     );
   });
@@ -49,7 +49,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    tester.state<ScaffoldState>(find.byType(Scaffold)).openDrawer();
+    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
     await tester.pumpAndSettle();
 
     expect(await pressBack(tester), isTrue);
@@ -65,3 +65,12 @@ void main() {
     expect(await pressBack(tester), isFalse);
   });
 }
+
+/// 定位**带抽屉的那个** `Scaffold`。
+///
+/// 底部导航改版后树里有多个 Scaffold:AppShell 外层一个(挂底栏),
+/// `IndexedStack` 里每个 tab 各一个。`find.byType(Scaffold)` 会命中多个
+/// 并抛 "Too many elements",所以按「有没有 drawer」把会话页那个挑出来。
+Finder findDrawerScaffold() => find.byWidgetPredicate(
+  (widget) => widget is Scaffold && widget.drawer != null,
+);

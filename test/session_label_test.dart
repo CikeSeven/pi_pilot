@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pi_pilot/ui/sessions/session_drawer.dart';
+import 'package:pi_pilot/ui/sessions/devices_page.dart';
 
 /// 抽屉列的是「电脑上开着的 pi 窗口」，标题要让人认得出是哪个窗口。
 ///
