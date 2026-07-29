@@ -52,6 +52,24 @@ void main() {
       expect(r.port, 9377);
     });
 
+    test('裸 IPv6(多冒号,不做端口解析)', () {
+      final r = parseHostInput('2409:8a62:6822:26a0:d914:d852:d8ed:b3b6');
+      expect(r!.host, '2409:8a62:6822:26a0:d914:d852:d8ed:b3b6');
+      expect(r.port, isNull);
+    });
+
+    test('裸 ::1', () {
+      final r = parseHostInput('::1');
+      expect(r!.host, '::1');
+      expect(r.port, isNull);
+    });
+
+    test('ws URL 带方括号 IPv6 + 路径', () {
+      final r = parseHostInput('ws://[2409:8a62::1]:9377/health');
+      expect(r!.host, '2409:8a62::1');
+      expect(r.port, 9377);
+    });
+
     test('空字符串 → null', () {
       expect(parseHostInput(''), isNull);
       expect(parseHostInput('   '), isNull);

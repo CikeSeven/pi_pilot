@@ -2317,7 +2317,7 @@ if (config.headlessAutoStart) {
   }
 }
 
-server.listen(config.port, config.host, () => {
+const printBanner = () => {
   console.log("PiPilot Source Hub is up");
   console.log(`  hub id:        ${sources.hubId}`);
   console.log(`  headless cwd:  ${currentCwd}`);
@@ -2326,7 +2326,21 @@ server.listen(config.port, config.host, () => {
   console.log("  mobile auth:   configured (token omitted from logs)");
   console.log("  connect urls:");
   for (const url of lanUrls(config)) console.log(`    ${url}`);
+};
+
+// 禁用了 IPv6 的机器上监听 "::" 会 EADDRNOTAVAIL/EAFNOSUPPORT —— 退回纯 v4
+// 而不是让 hub 直接起不来。
+server.on("error", (error) => {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (config.host === "::" && (code === "EADDRNOTAVAIL" || code === "EAFNOSUPPORT")) {
+    console.warn(`[bridge] IPv6 unavailable (${code}), falling back to IPv4-only 0.0.0.0`);
+    server.listen(config.port, "0.0.0.0", printBanner);
+    return;
+  }
+  throw error;
 });
+
+server.listen(config.port, config.host, printBanner);
 
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;

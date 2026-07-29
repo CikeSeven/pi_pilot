@@ -130,7 +130,9 @@ object BridgeWatcher {
     private fun connect() {
         val current = config ?: return
         if (!running) return
-        val url = "ws://${current.host}:${current.port}/" +
+        // IPv6 地址必须带方括号才是合法 URL;Dart 侧存的 host 是不带括号的
+        val urlHost = if (current.host.contains(':')) "[${current.host}]" else current.host
+        val url = "ws://$urlHost:${current.port}/" +
             "?token=${java.net.URLEncoder.encode(current.token, "UTF-8")}" +
             "&clientId=${java.net.URLEncoder.encode(current.clientId, "UTF-8")}"
         Log.i(tag, "connecting host=${current.host}:${current.port} source=${current.sourceId}")

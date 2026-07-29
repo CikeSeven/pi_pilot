@@ -131,7 +131,9 @@ export function loadConfig(): BridgeConfig {
   };
   const file = readFileConfig();
 
-  const host = str("host") ?? process.env.PIPILOT_HOST ?? "0.0.0.0";
+  // 默认双栈:"::" 同时接收 IPv6 与 v4-mapped 连接(IPv6 直连的前提);
+  // IPv6 被禁用的机器由 server 在监听失败时回退 0.0.0.0。
+  const host = str("host") ?? process.env.PIPILOT_HOST ?? "::";
   const port = positiveInt(str("port") ?? process.env.PIPILOT_PORT, 9377);
 
   let token = str("token") ?? process.env.PIPILOT_TOKEN ?? file.token ?? "";
@@ -202,12 +204,16 @@ export function loadConfig(): BridgeConfig {
 }
 
 export function lanUrls(config: BridgeConfig): string[] {
-  const urls: string[] = [`ws://127.0.0.1:${config.port}`];
+  const urls: string[] = [`ws://127.0.0.1:${config.port}`, `ws://[::1]:${config.port}`];
   const ifaces = os.networkInterfaces();
   for (const list of Object.values(ifaces)) {
     for (const addr of list ?? []) {
-      if (addr.family === "IPv4" && !addr.internal) {
+      if (addr.internal) continue;
+      if (addr.family === "IPv4") {
         urls.push(`ws://${addr.address}:${config.port}`);
+      } else if (addr.family === "IPv6" && !addr.address.startsWith("fe80:")) {
+        // 全局/ULA 地址直接展示,手机抄进设置就能连;link-local(fe80:)没意义
+        urls.push(`ws://[${addr.address}]:${config.port}`);
       }
     }
   }

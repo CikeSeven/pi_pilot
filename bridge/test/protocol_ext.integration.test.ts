@@ -770,3 +770,29 @@ test("streaming flips broadcast refreshed sessions so keepalive counts stay fres
     ]);
   }
 });
+
+test("hub bound to '::' serves both IPv4 and IPv6 clients (dual-stack)", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot, { PIPILOT_HOST: "::" });
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    // waitForHealth 走 127.0.0.1 —— 它成功本身就是双栈下 v4 兼容的证明
+    await waitForHealth(port, child);
+    peers.push(await open(`ws://127.0.0.1:${port}/?token=mobile-test-token`));
+    peers.push(await open(`ws://[::1]:${port}/?token=mobile-test-token`));
+    const health6 = await fetch(`http://[::1]:${port}/health`);
+    assert.ok(health6.ok, "IPv6 loopback health check");
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 3_000),
+      ),
+    ]);
+  }
+});
