@@ -146,8 +146,141 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
             ),
           ),
           const SizedBox(height: 12),
+          const _P2pCard(),
+          const SizedBox(height: 12),
           const HubSourceCard(),
         ],
+      ),
+    );
+  }
+}
+
+/// 远程打洞(P2P)配置卡:开关 + 信令服地址/设备名/配对密钥。
+/// 与直连卡一样的显式保存模式——按保存前只改本地状态。
+class _P2pCard extends ConsumerStatefulWidget {
+  const _P2pCard();
+
+  @override
+  ConsumerState<_P2pCard> createState() => _P2pCardState();
+}
+
+class _P2pCardState extends ConsumerState<_P2pCard> {
+  final _rendezvous = TextEditingController();
+  final _deviceId = TextEditingController();
+  final _secret = TextEditingController();
+  bool _enabled = false;
+  bool _obscure = true;
+  bool _filled = false;
+
+  @override
+  void dispose() {
+    _rendezvous.dispose();
+    _deviceId.dispose();
+    _secret.dispose();
+    super.dispose();
+  }
+
+  void _fillFromSettings(AppSettings settings) {
+    if (_filled || !settings.loaded) return;
+    _filled = true;
+    _enabled = settings.p2pEnabled;
+    _rendezvous.text = settings.p2pRendezvous;
+    _deviceId.text = settings.p2pDeviceId;
+    _secret.text = settings.p2pSecret;
+  }
+
+  Future<void> _save() async {
+    await ref
+        .read(settingsProvider.notifier)
+        .setP2pConfig(
+          enabled: _enabled,
+          rendezvous: _rendezvous.text.trim(),
+          deviceId: _deviceId.text.trim(),
+          secret: _secret.text.trim(),
+        );
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('打洞配置已保存,下次连接生效')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
+    _fillFromSettings(settings);
+    final theme = Theme.of(context);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.cell_tower_outlined),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text('远程打洞(P2P)', style: theme.textTheme.titleMedium),
+                ),
+                Switch(
+                  value: _enabled,
+                  onChanged: (value) => setState(() => _enabled = value),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '出门在外直连失败时,自动经信令服打洞连家里电脑。'
+              '需要家里电脑的 bridge 开着、信令服可达。后台通知暂不支持 P2P。',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _rendezvous,
+              decoration: const InputDecoration(
+                labelText: '信令服地址',
+                hintText: 'ws://服务器地址:9378',
+                prefixIcon: Icon(Icons.hub_outlined),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _deviceId,
+              decoration: const InputDecoration(
+                labelText: '设备名',
+                hintText: '与 bridge 的 PIPILOT_P2P_DEVICE_ID 一致',
+                prefixIcon: Icon(Icons.computer_outlined),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _secret,
+              obscureText: _obscure,
+              decoration: InputDecoration(
+                labelText: '配对密钥',
+                hintText: '与信令服 devices 表一致',
+                prefixIcon: const Icon(Icons.vpn_key_outlined),
+                suffixIcon: IconButton(
+                  tooltip: _obscure ? '显示' : '隐藏',
+                  icon: Icon(
+                    _obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                  ),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.tonalIcon(
+              onPressed: _save,
+              icon: const Icon(Icons.save_outlined),
+              label: const Text('保存打洞配置'),
+            ),
+          ],
+        ),
       ),
     );
   }

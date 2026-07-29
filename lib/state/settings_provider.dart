@@ -24,6 +24,10 @@ class AppSettings {
     this.notificationsEnabled = true,
     this.notificationVibrationEnabled = false,
     this.accent = AppAccent.terracotta,
+    this.p2pEnabled = false,
+    this.p2pRendezvous = '',
+    this.p2pDeviceId = '',
+    this.p2pSecret = '',
     this.loaded = false,
   });
 
@@ -55,10 +59,31 @@ class AppSettings {
   /// 主题强调色。
   final AppAccent accent;
 
+  /// 远程打洞(WebRTC P2P):出门在外经公网信令服交换握手后直连家里电脑。
+  /// 直连永远是首选,打洞是直连失败后的自动回退。
+  /// v1 只有前台聊天走 P2P;后台通知的原生 watcher 仍是直连-only。
+  final bool p2pEnabled;
+
+  /// 信令服地址(ws://host:port;域名+WSS 是后续档位)。
+  final String p2pRendezvous;
+
+  /// 家里电脑在信令服上的设备名。
+  final String p2pDeviceId;
+
+  /// 配对密钥:与信令服 devices 表一致。挑战-应答校验,明文永不上行。
+  final String p2pSecret;
+
   /// 是否已完成首次从磁盘的加载(用于触发自动连接)。
   final bool loaded;
 
   bool get hasConnection => host.isNotEmpty && token.isNotEmpty;
+
+  /// 打洞四要素是否齐备(开关 + 三个字段)。
+  bool get hasP2p =>
+      p2pEnabled &&
+      p2pRendezvous.isNotEmpty &&
+      p2pDeviceId.isNotEmpty &&
+      p2pSecret.isNotEmpty;
 
   AppSettings copyWith({
     String? host,
@@ -76,6 +101,10 @@ class AppSettings {
     bool? notificationsEnabled,
     bool? notificationVibrationEnabled,
     AppAccent? accent,
+    bool? p2pEnabled,
+    String? p2pRendezvous,
+    String? p2pDeviceId,
+    String? p2pSecret,
     bool? loaded,
   }) {
     return AppSettings(
@@ -95,6 +124,10 @@ class AppSettings {
       notificationVibrationEnabled:
           notificationVibrationEnabled ?? this.notificationVibrationEnabled,
       accent: accent ?? this.accent,
+      p2pEnabled: p2pEnabled ?? this.p2pEnabled,
+      p2pRendezvous: p2pRendezvous ?? this.p2pRendezvous,
+      p2pDeviceId: p2pDeviceId ?? this.p2pDeviceId,
+      p2pSecret: p2pSecret ?? this.p2pSecret,
       loaded: loaded ?? this.loaded,
     );
   }
@@ -135,6 +168,10 @@ class SettingsNotifier extends Notifier<AppSettings> {
       notificationsEnabled: data.notificationsEnabled,
       notificationVibrationEnabled: data.notificationVibrationEnabled,
       accent: AppAccent.fromName(data.accent),
+      p2pEnabled: data.p2pEnabled,
+      p2pRendezvous: data.p2pRendezvous,
+      p2pDeviceId: data.p2pDeviceId,
+      p2pSecret: data.p2pSecret,
       loaded: true,
     );
   }
@@ -211,5 +248,25 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setAccent(AppAccent accent) async {
     state = state.copyWith(accent: accent);
     await _repo.saveAccent(accent.name);
+  }
+
+  Future<void> setP2pConfig({
+    required bool enabled,
+    required String rendezvous,
+    required String deviceId,
+    required String secret,
+  }) async {
+    state = state.copyWith(
+      p2pEnabled: enabled,
+      p2pRendezvous: rendezvous,
+      p2pDeviceId: deviceId,
+      p2pSecret: secret,
+    );
+    await _repo.saveP2pConfig(
+      enabled: enabled,
+      rendezvous: rendezvous,
+      deviceId: deviceId,
+      secret: secret,
+    );
   }
 }

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/pi_connection.dart';
+import '../core/p2p_connector.dart';
 import 'hub_models.dart';
 import 'settings_provider.dart';
 import 'source_cursor.dart';
@@ -737,6 +738,10 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 是为了保住这一批内部的先后顺序。
   int? _prependAt;
   ({String host, int port, String token})? _creds;
+
+  /// 打洞配置快照(与 _creds 同生命周期):connect() 时从设置取,
+  /// 四要素不齐为 null——_open() 据此决定直连失败后是否落 P2P。
+  ({String rendezvous, String deviceId, String secret})? _p2p;
   bool _intentionalDisconnect = false;
   bool _hubV2 = false;
 
@@ -815,6 +820,13 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     _intentionalDisconnect = false;
     _creds = (host: settings.host, port: settings.port, token: settings.token);
+    _p2p = settings.hasP2p
+        ? (
+            rendezvous: settings.p2pRendezvous,
+            deviceId: settings.p2pDeviceId,
+            secret: settings.p2pSecret,
+          )
+        : null;
     state = state.copyWith(status: PiConnStatus.connecting, clearError: true);
 
     bool ok;
@@ -842,6 +854,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     _resetConversation();
     _leafId = null;
     _creds = null;
+    _p2p = null;
     _hubV2 = false;
     state = PiState.initial();
   }
@@ -1873,11 +1886,32 @@ class PiSessionNotifier extends Notifier<PiState> {
     _msgSub = conn.messages.listen(_handleEvent);
     _statusSub = conn.status.listen(_onConnStatus);
 
-    final hello = await conn.connect(
+    // 直连优先。P2P 开着时缩短直连等待(在外网直连基本必败,
+    // 不值得让它占满 12s),失败后自动落到打洞:信令 → WebRTC → DataChannel。
+    final p2p = _p2p;
+    var hello = await conn.connect(
       host: creds.host,
       port: creds.port,
       token: creds.token,
+      timeout: p2p != null
+          ? const Duration(seconds: 5)
+          : const Duration(seconds: 12),
     );
+    if (hello == null && p2p != null && identical(_conn, conn)) {
+      final channel = await P2pConnector().connect(
+        rendezvousUrl: p2p.rendezvous,
+        deviceId: p2p.deviceId,
+        secret: p2p.secret,
+      );
+      if (channel != null) {
+        if (identical(_conn, conn)) {
+          hello = await conn.connectViaChannel(channel, token: creds.token);
+        } else {
+          // 打洞期间用户已断开/换了连接:通道不能漏,关掉。
+          await channel.close();
+        }
+      }
+    }
     if (hello == null) return false;
 
     final version = hello['version'] as int? ?? 1;

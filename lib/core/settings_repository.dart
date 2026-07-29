@@ -17,6 +17,10 @@ typedef SettingsData = ({
   bool notificationVibrationEnabled,
   String accent,
   String? preferredSessionId,
+  bool p2pEnabled,
+  String p2pRendezvous,
+  String p2pDeviceId,
+  String p2pSecret,
 });
 
 /// SharedPreferences 统一持久化层。所有配置键集中在这里。
@@ -39,6 +43,12 @@ class SettingsRepository {
   static const _kNotificationVibrationEnabled =
       'ui.notificationVibrationEnabled';
   static const _kAccent = 'ui.accentColor';
+  // 远程打洞(WebRTC P2P):信令服地址/设备名/配对密钥。
+  // 配对密钥只存在本机与信令服配置里,不进仓库、不上行明文。
+  static const _kP2pEnabled = 'p2p.enabled';
+  static const _kP2pRendezvous = 'p2p.rendezvous';
+  static const _kP2pDeviceId = 'p2p.deviceId';
+  static const _kP2pSecret = 'p2p.secret';
 
   Future<SettingsData> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -59,6 +69,10 @@ class SettingsRepository {
           prefs.getBool(_kNotificationVibrationEnabled) ?? false,
       accent: prefs.getString(_kAccent) ?? 'terracotta',
       preferredSessionId: prefs.getString(_kPreferredSessionId),
+      p2pEnabled: prefs.getBool(_kP2pEnabled) ?? false,
+      p2pRendezvous: prefs.getString(_kP2pRendezvous) ?? '',
+      p2pDeviceId: prefs.getString(_kP2pDeviceId) ?? '',
+      p2pSecret: prefs.getString(_kP2pSecret) ?? '',
     );
   }
 
@@ -129,5 +143,18 @@ class SettingsRepository {
   Future<void> saveAccent(String name) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kAccent, name);
+  }
+
+  Future<void> saveP2pConfig({
+    required bool enabled,
+    required String rendezvous,
+    required String deviceId,
+    required String secret,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kP2pEnabled, enabled);
+    await prefs.setString(_kP2pRendezvous, rendezvous);
+    await prefs.setString(_kP2pDeviceId, deviceId);
+    await prefs.setString(_kP2pSecret, secret);
   }
 }

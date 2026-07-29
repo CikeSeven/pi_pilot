@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'hub_channel.dart';
+
 enum PiConnStatus { disconnected, connecting, connected, failed }
 
 /// 解析主机栏输入,兼容误粘贴完整 URL / 带端口 / 带路径的情况。
@@ -54,13 +56,13 @@ enum PiConnStatus { disconnected, connecting, connected, failed }
   return (host: s, port: null);
 }
 
-/// Thin WebSocket client for the PiPilot bridge.
+/// Thin client for the PiPilot bridge,transport-agnostic:
+/// 直连时通道是 WebSocket,打洞时是 WebRTC DataChannel——协议完全一致。
 ///
-/// Auth happens via the `?token=` query param. The bridge's first frame after
-/// a successful handshake is `bridge_hello`; [connect] completes with that
-/// decoded frame, or `null` if the connection/auth failed.
+/// 直连经 `?token=` query 鉴权;打洞经首帧 auth 鉴权。两者之后桥回的
+/// 第一帧都是 `bridge_hello`;握手完成后的帧流、状态流两条路共用。
 class PiConnection {
-  WebSocketChannel? _channel;
+  HubChannel? _channel;
   StreamSubscription<dynamic>? _sub;
 
   final StreamController<Map<String, dynamic>> _messages =
@@ -81,9 +83,9 @@ class PiConnection {
     required String host,
     required int port,
     required String token,
+    Duration timeout = const Duration(seconds: 12),
   }) async {
     disconnect(notify: false);
-    _status.add(PiConnStatus.connecting);
 
     // 防御:主机栏可能误填完整 URL(http://…/path),先规范化
     final parsed = parseHostInput(host);
@@ -105,6 +107,33 @@ class PiConnection {
       _status.add(PiConnStatus.failed);
       return null;
     }
+    return _attach(WsHubChannel(channel), null, timeout);
+  }
+
+  /// 经 P2P DataChannel(打洞)接入:通道已由 P2pConnector 打开,
+  /// 第一帧补 auth(等价 WS 直连的 ?token=),之后握手与消息流与直连一致。
+  Future<Map<String, dynamic>?> connectViaChannel(
+    HubChannel channel, {
+    required String token,
+    String? clientId,
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    disconnect(notify: false);
+    return _attach(channel, () {
+      send(<String, dynamic>{
+        'type': 'auth',
+        'token': token,
+        'clientId': ?clientId,
+      });
+    }, timeout);
+  }
+
+  Future<Map<String, dynamic>?> _attach(
+    HubChannel channel,
+    void Function()? onAttached,
+    Duration timeout,
+  ) async {
+    _status.add(PiConnStatus.connecting);
     _channel = channel;
 
     final ready = Completer<Map<String, dynamic>?>();
@@ -146,16 +175,19 @@ class PiConnection {
       },
     );
 
+    // 监听就位后再发首帧(P2P 的 auth):bridge 见到 auth 才回 bridge_hello。
+    onAttached?.call();
+
     return ready.future.timeout(
-      const Duration(seconds: 12),
+      timeout,
       onTimeout: () {
-        // 超时必须清理僵尸 socket 并广播 failed,
+        // 超时必须清理僵尸通道并广播 failed,
         // 否则状态会永远停在 connecting
         if (identical(_channel, channel)) {
           _sub?.cancel();
           _sub = null;
           _channel = null;
-          channel.sink.close();
+          channel.close();
           _status.add(PiConnStatus.failed);
         }
         return null;
@@ -163,12 +195,12 @@ class PiConnection {
     );
   }
 
-  /// 发送一帧。**返回是否真的写进了 socket** —— 调用方据此决定要不要
+  /// 发送一帧。**返回是否真的写进了通道** —— 调用方据此决定要不要
   /// 告诉用户"没发出去",而不是让消息静静消失。
   bool send(Map<String, dynamic> message) {
     final channel = _channel;
     if (channel == null) return false;
-    channel.sink.add(jsonEncode(message));
+    channel.add(jsonEncode(message));
     return true;
   }
 
@@ -178,7 +210,7 @@ class PiConnection {
     final channel = _channel;
     _channel = null;
     if (channel != null) {
-      channel.sink.close();
+      channel.close();
     }
     if (notify) _status.add(PiConnStatus.disconnected);
   }

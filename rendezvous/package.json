@@ -1,19 +1,15 @@
 {
-  "name": "pipilot-bridge",
+  "name": "pipilot-rendezvous",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "WebSocket bridge that exposes `pi --mode rpc` to the PiPilot mobile app",
+  "description": "Signaling rendezvous for PiPilot P2P (WebRTC) connections",
   "scripts": {
     "start": "tsx src/server.ts",
-    "dev": "tsx watch src/server.ts",
-    "configure:extension": "node scripts/install-extension.mjs --config-only",
-    "install:extension": "node scripts/install-extension.mjs",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "werift": "^0.24.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {

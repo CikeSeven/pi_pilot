@@ -23,6 +23,7 @@ import { CommandQueue } from "./command_queue.js";
 import { quiesceSourceForHandoff } from "./source_handoff.js";
 import { PiPool, sourceIdForSession, type SessionSpec } from "./pi_pool.js";
 import { listDirs, listSessions, SESSIONS_ROOT } from "./sessions.js";
+import { P2pHost } from "./p2p_host.js";
 import {
   SourceRegistry,
   type SequencedSourceEvent,
@@ -2176,9 +2177,14 @@ wss.on("connection", (ws, req) => {
     ws.close(4001, "unauthorized");
     return;
   }
+  acceptMobileClient(ws, requestUrl(req).searchParams.get("clientId"));
+});
+
+/// 手机连接的公共接入点:WS 直连与 P2P DataChannel(由 DataChannelSocket
+/// 伪装成 ws.WebSocket)都从这里进,协议处理路径完全一致。
+function acceptMobileClient(ws: WebSocket, requestedClientId: string | null): void {
   // 稳定 clientId:App 持久化后重连仍是同一个"驱动者",
   // 断线重连不必等旧租约 TTL 过期(这是把最坏接管延迟压到即时的三条路径之一)。
-  const requestedClientId = requestUrl(req).searchParams.get("clientId");
   const clientId =
     requestedClientId && /^[A-Za-z0-9._:-]{8,128}$/.test(requestedClientId)
       ? requestedClientId
@@ -2248,7 +2254,7 @@ wss.on("connection", (ws, req) => {
     if (client.selectedSourceId) pushDesktopStatus(client.selectedSourceId);
   });
   ws.on("error", () => {});
-});
+}
 
 /// 半开连接(手机锁屏/掉网)不会触发 close,租约会一直挂着。
 /// 10s 一次 ping,连丢两次就 terminate —— close 事件随即释放租约。
@@ -2341,6 +2347,21 @@ server.on("error", (error) => {
 });
 
 server.listen(config.port, config.host, printBanner);
+
+// P2P(打洞)远程通道:作为 WebRTC host 挂到信令服,手机叫进来后在
+// DataChannel 上跑与 WS 完全相同的 hub 协议。信令服只交换握手,不碰流量。
+if (config.p2p.enabled && config.p2p.rendezvousUrl && config.p2p.secret) {
+  const p2pHost = new P2pHost({
+    rendezvousUrl: config.p2p.rendezvousUrl,
+    deviceId: config.p2p.deviceId,
+    secret: config.p2p.secret,
+    validateMobileToken: (token) => tokenMatches(token ?? null, config.token),
+    acceptMobile: (socket, clientId) => acceptMobileClient(socket, clientId),
+    log: (line) => console.log(`[p2p] ${line}`),
+  });
+  p2pHost.start();
+  console.log(`P2P 打洞已启用:信令服 ${config.p2p.rendezvousUrl},设备名 ${config.p2p.deviceId}`);
+}
 
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;

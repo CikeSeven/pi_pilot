@@ -1,0 +1,7 @@
+{
+  "port": 9378,
+  "host": "0.0.0.0",
+  "devices": {
+    "my-desktop": "change-me-to-a-long-random-pairing-secret"
+  }
+}

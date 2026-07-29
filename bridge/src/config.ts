@@ -46,6 +46,19 @@ export interface BridgeConfig {
   sessionIdleTtlMs: number;
   leaseMinTtlMs: number;
   leaseMaxTtlMs: number;
+  /// P2P(打洞)远程通道:bridge 作为 WebRTC host 挂到信令服上,
+  /// 手机经信令服交换 SDP/ICE 后在 DataChannel 上跑同一套 hub 协议。
+  p2p: P2pConfig;
+}
+
+export interface P2pConfig {
+  enabled: boolean;
+  /// 信令服地址(公网 VPS / 域名)。只交换握手,不碰会话流量。
+  rendezvousUrl: string;
+  /// 这台桌面在信令服上的名字;手机凭它找到本机。
+  deviceId: string;
+  /// 配对密钥:与信令服 devices 表里的值一致。挑战-应答校验,永不上行。
+  secret: string;
 }
 
 interface FileConfig {
@@ -200,6 +213,19 @@ export function loadConfig(): BridgeConfig {
     // 强制抢占后,TTL 只负责释放死客户端的 fence,可以做得很短
     leaseMinTtlMs: positiveInt(process.env.PIPILOT_LEASE_MIN_TTL_MS, 3_000),
     leaseMaxTtlMs: positiveInt(process.env.PIPILOT_LEASE_MAX_TTL_MS, 8_000),
+    p2p: {
+      // 默认:配了信令服地址和配对密钥就开;显式 PIPILOT_P2P_ENABLED=false 可关。
+      enabled:
+        process.env.PIPILOT_P2P_ENABLED !== undefined
+          ? process.env.PIPILOT_P2P_ENABLED === "true"
+          : Boolean(
+              (str("p2p-rendezvous") ?? process.env.PIPILOT_P2P_RENDEZVOUS) &&
+                (str("p2p-secret") ?? process.env.PIPILOT_P2P_SECRET),
+            ),
+      rendezvousUrl: str("p2p-rendezvous") ?? process.env.PIPILOT_P2P_RENDEZVOUS ?? "",
+      deviceId: str("p2p-device-id") ?? process.env.PIPILOT_P2P_DEVICE_ID ?? os.hostname(),
+      secret: str("p2p-secret") ?? process.env.PIPILOT_P2P_SECRET ?? "",
+    },
   };
 }
 
