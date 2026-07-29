@@ -2,15 +2,14 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-
 /// 素材包资源路径常量。集中一处,避免字符串散落各屏。
 abstract final class PiAsset {
   static const _img = 'assets/images';
 
   // 背景。浅色统一一张、深色统一一张(见 BackdropPaper)。
   // 之前按页面分了三张浅色底图,反而让切换有割裂感;统一一张更顺。
-  static const bgCreamMain = '$_img/bg_cream_main.png';   // 浅色统一底
-  static const bgCharcoal = '$_img/bg_charcoal.png';      // 深色统一底
+  static const bgCreamMain = '$_img/bg_cream_main.png'; // 浅色统一底
+  static const bgCharcoal = '$_img/bg_charcoal.png'; // 深色统一底
   // 旧的分页底图保留常量但不再使用,避免引用断裂。
   static const bgCreamPaper = '$_img/bg_cream_paper.png';
   static const bgIvoryLinework = '$_img/bg_ivory_linework.png';

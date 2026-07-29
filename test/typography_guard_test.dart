@@ -34,7 +34,7 @@ void main() {
   });
 
   test('lib/ui/ 里不再手写小于 16 的圆角', () {
-    // 圆角走 PiShape token(xs 6 / sm 10 / md 12 / lg 14 / xl 18 / xxl 22)。
+    // 圆角走 PiShape token(三档收敛:sm 8 / md 14 / lg 22,且统一 squircle)。
     // 直接写数字会绕开「编辑式收敛圆角」这条设计约束。
     final offenders = <String>[];
     final radius = RegExp(r'BorderRadius\.circular\(\s*(\d+(?:\.\d+)?)\s*\)');

@@ -249,8 +249,9 @@ class _CodeBlockState extends State<CodeBlock> {
                   tooltip: '复制',
                   // 复制成功:图标变对勾 + 主色,带一次缩放过渡。
                   style: IconButton.styleFrom(
-                    foregroundColor:
-                        _copied ? colors.primary : colors.onSurfaceVariant,
+                    foregroundColor: _copied
+                        ? colors.primary
+                        : colors.onSurfaceVariant,
                   ),
                   icon: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 180),

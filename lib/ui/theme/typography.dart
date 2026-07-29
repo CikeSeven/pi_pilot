@@ -70,8 +70,12 @@ abstract final class AppType {
   }
 
   /// 品牌字标 PiPilot:衬线 + 轻微字距,像刊物报头。
-  static TextStyle wordmark({double size = 22, Color? color}) =>
-      serif(size: size, weight: FontWeight.w600, color: color, letterSpacing: 0.5);
+  static TextStyle wordmark({double size = 22, Color? color}) => serif(
+    size: size,
+    weight: FontWeight.w600,
+    color: color,
+    letterSpacing: 0.5,
+  );
 
   /// AI 回复的衬线小标题(参考图里每段回答上方那行大字)。
   static TextStyle answerHeadline({Color? color}) =>
@@ -82,12 +86,8 @@ abstract final class AppType {
       serif(size: size, weight: FontWeight.w500, color: color, height: 1.2);
 
   /// 衬线斜体:引文、副标语气(「安静等待」那类文案)。
-  static TextStyle serifItalic({double size = 15, Color? color}) => serif(
-    size: size,
-    color: color,
-    style: FontStyle.italic,
-    height: 1.45,
-  );
+  static TextStyle serifItalic({double size = 15, Color? color}) =>
+      serif(size: size, color: color, style: FontStyle.italic, height: 1.45);
 
   /// 编辑式小标签:全大写 + 宽字距,像杂志栏目名。
   /// 用无衬线——它是功能标签不是气质位。
@@ -148,7 +148,11 @@ abstract final class AppType {
       height: 1.33,
     ),
     // title 起继续用无衬线:它们出现在卡头、列表项、顶栏,信息位。
-    titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, height: 1.3),
+    titleLarge: TextStyle(
+      fontSize: 20,
+      fontWeight: FontWeight.w600,
+      height: 1.3,
+    ),
     titleMedium: TextStyle(
       fontSize: 16,
       fontWeight: FontWeight.w600,

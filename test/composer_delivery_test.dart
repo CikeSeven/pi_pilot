@@ -1,7 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/state/pi_session.dart';
 import 'package:pi_pilot/ui/chat/widgets/composer.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
+
+/// 新版输入框内嵌 ModelPicker / _ContextRing(Riverpod consumer),
+/// 测试必须给 ProviderScope;会话态用假的就行,不用真连接。
+class _FakeNotifier extends PiSessionNotifier {
+  @override
+  PiState build() => PiState.initial();
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -14,19 +23,22 @@ void main() {
     VoidCallback? onFollowUp,
     VoidCallback? onInterruptAndSend,
     VoidCallback? onAbort,
-  }) => MaterialApp(
-    theme: buildLightTheme(),
-    home: Scaffold(
-      body: Composer(
-        controller: controller,
-        enabled: true,
-        streaming: streaming,
-        compacting: compacting,
-        onSend: () {},
-        onSteer: onSteer,
-        onFollowUp: onFollowUp,
-        onInterruptAndSend: onInterruptAndSend,
-        onAbort: onAbort,
+  }) => ProviderScope(
+    overrides: [piSessionProvider.overrideWith(() => _FakeNotifier())],
+    child: MaterialApp(
+      theme: buildLightTheme(),
+      home: Scaffold(
+        body: Composer(
+          controller: controller,
+          enabled: true,
+          streaming: streaming,
+          compacting: compacting,
+          onSend: () {},
+          onSteer: onSteer,
+          onFollowUp: onFollowUp,
+          onInterruptAndSend: onInterruptAndSend,
+          onAbort: onAbort,
+        ),
       ),
     ),
   );
@@ -75,7 +87,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('压缩上下文中 · 发送会排队'), findsOneWidget);
+    expect(find.text('压缩中 · 发送会排队'), findsOneWidget);
   });
 
   testWidgets('压缩中且输入框为空时,发送键不变成停止键', (tester) async {
@@ -151,25 +163,21 @@ void main() {
     await tester.pumpWidget(wrap(controller: controller, streaming: false));
     await tester.pumpAndSettle();
 
-    final theme = buildLightTheme();
-    // 全 app 零阴影,所以「看得见」靠底色差 + 1px 描边 ——
-    // 输入卡的底色必须**不等于** scaffold 背景,否则它会彻底消失。
-    final cards = tester
-        .widgetList<Material>(
+    // 液态玻璃:渐变 + 描边(聚焦时描边加粗转主色),不再是旧版的
+    // Material 胶囊。层次靠渐变和描边承担,不靠投影。
+    final decorations = tester
+        .widgetList<AnimatedContainer>(
           find.descendant(
             of: find.byType(Composer),
-            matching: find.byType(Material),
+            matching: find.byType(AnimatedContainer),
           ),
         )
-        .where((m) => m.color == theme.colorScheme.surfaceContainerLow);
-    expect(cards, isNotEmpty, reason: '输入卡必须有独立底色');
-
-    // Editorial Retro:输入卡是**胶囊** + 描边(「纸上的输入区域」),
-    // 不再是旧版的 28 圆角方卡。
-    final card = cards.first;
-    final shape = card.shape! as StadiumBorder;
-    expect(shape.side.color, theme.colorScheme.outlineVariant);
-    expect(shape.side.width, greaterThan(0));
+        .map((c) => c.decoration)
+        .whereType<BoxDecoration>()
+        .where((d) => d.gradient != null)
+        .toList();
+    expect(decorations, isNotEmpty, reason: '输入卡必须有液态玻璃渐变');
+    expect(decorations.first.border, isNotNull, reason: '输入卡必须有描边');
   });
 
   testWidgets('输入框自己不画边框,视觉容器是外面那张卡', (tester) async {

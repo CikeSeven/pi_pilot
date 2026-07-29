@@ -49,12 +49,8 @@ class DevicesDrawer extends StatelessWidget {
     // 「悬空」的错觉(就是之前看着怪的那处)。
     return const Drawer(
       child: ClipRRect(
-        borderRadius: BorderRadius.only(
-          topRight: Radius.circular(PiShape.lg),
-        ),
-        child: BackdropPaper(
-          child: _DevicesBody(inDrawer: true),
-        ),
+        borderRadius: BorderRadius.only(topRight: Radius.circular(PiShape.lg)),
+        child: BackdropPaper(child: _DevicesBody(inDrawer: true)),
       ),
     );
   }
@@ -122,7 +118,10 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _Header(connected: connected, onRefresh: connected ? _refresh : null),
+              _Header(
+                connected: connected,
+                onRefresh: connected ? _refresh : null,
+              ),
               Expanded(child: _body(state, connected, windows)),
               // 抽屉页脚原本有个「设置」入口。撤掉了:底栏已经有「设置」tab,
               // 同一个目的地给两个入口只会让人犹豫点哪个。
@@ -333,11 +332,7 @@ class _DeviceCard extends StatelessWidget {
                   child: Text('当前', style: AppType.eyebrow(color: fg)),
                 )
               else
-                Icon(
-                  Icons.chevron_right,
-                  size: 20,
-                  color: fgMuted,
-                ),
+                Icon(Icons.chevron_right, size: 20, color: fgMuted),
             ],
           ),
         ),
@@ -371,10 +366,7 @@ class _Placeholder extends StatelessWidget {
               Text(
                 title,
                 textAlign: TextAlign.center,
-                style: AppType.displayTitle(
-                  size: 22,
-                  color: colors.onSurface,
-                ),
+                style: AppType.displayTitle(size: 22, color: colors.onSurface),
               ),
               const SizedBox(height: 10),
               Text(

@@ -64,6 +64,9 @@ void main() {
       final copy = calls.where((c) => c.method == 'Clipboard.setData');
       expect(copy, isNotEmpty);
       expect((copy.first.arguments as Map)['text'], 'abc');
+      // 复制后有个 1.2s 的对勾回退定时器(code_block 的「闪一下」反馈),
+      // 不把它跑完测试结束时会留下 pending timer。
+      await tester.pump(const Duration(milliseconds: 1300));
     });
 
     testWidgets('行号 gutter 从 firstLineNumber 起算', (tester) async {

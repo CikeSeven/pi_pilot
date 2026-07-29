@@ -6,7 +6,11 @@ import 'package:pi_pilot/ui/shell/swipe_to_open_drawer.dart';
 ///
 /// 这里最要紧的一条是**不能抢掉内层横向滚动**:聊天页有四处横向可滚动区域
 /// (代码块、diff、投递芯片、快捷面板)。所以手势挂在 body 的祖先位置,
-/// 靠手势竞技场"最深者先入场、sweep 时先入场者胜"把优先权让给内层。
+/// 靠手势竞技场“最深者先入场、sweep 时先入场者胜”把优先权让给内层。
+///
+/// 合并 Editorial Retro 之后手势只在**左边缘 60px** 内生效:新外壳用
+/// PageView 左右滑切页,全屏右滑会和切页打架 —— 边缘往右滑开抽屉,
+/// 中间往右滑切页。所以下面的拖拽起点都要在边缘内。
 void main() {
   Widget wrap({
     required VoidCallback onOpen,
@@ -28,7 +32,8 @@ void main() {
     var opened = 0;
     await tester.pumpWidget(wrap(onOpen: () => opened++));
 
-    await tester.drag(find.byType(SwipeToOpenDrawer), const Offset(120, 0));
+    // 起点必须在左边缘 60px 内 —— 中间的右滑留给 PageView 切页。
+    await tester.dragFrom(const Offset(20, 300), const Offset(120, 0));
     await tester.pumpAndSettle();
 
     expect(opened, 1);
@@ -54,7 +59,7 @@ void main() {
     var opened = 0;
     await tester.pumpWidget(wrap(onOpen: () => opened++));
 
-    await tester.drag(find.byType(SwipeToOpenDrawer), const Offset(-120, 0));
+    await tester.dragFrom(const Offset(40, 300), const Offset(-40, 0));
     await tester.pumpAndSettle();
 
     expect(opened, 0);
@@ -64,7 +69,7 @@ void main() {
     var opened = 0;
     await tester.pumpWidget(wrap(onOpen: () => opened++));
 
-    await tester.drag(find.byType(SwipeToOpenDrawer), const Offset(0, -300));
+    await tester.dragFrom(const Offset(20, 400), const Offset(0, -300));
     await tester.pumpAndSettle();
 
     expect(opened, 0);
@@ -74,7 +79,7 @@ void main() {
     var opened = 0;
     await tester.pumpWidget(wrap(onOpen: () => opened++));
 
-    final gesture = await tester.startGesture(const Offset(100, 300));
+    final gesture = await tester.startGesture(const Offset(20, 300));
     for (var i = 0; i < 6; i++) {
       await gesture.moveBy(const Offset(30, 0));
       await tester.pump();

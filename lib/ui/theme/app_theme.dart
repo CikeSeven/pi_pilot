@@ -122,9 +122,7 @@ ThemeData _build(
         minimumSize: const Size(64, 50),
         padding: const EdgeInsets.symmetric(horizontal: 26),
         elevation: 0,
-        shape: SquircleBorder(
-          borderRadius: BorderRadius.circular(PiShape.md),
-        ),
+        shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.md)),
         textStyle: const TextStyle(
           fontSize: 15,
           fontWeight: FontWeight.w600,
@@ -138,9 +136,7 @@ ThemeData _build(
         minimumSize: const Size(64, 50),
         padding: const EdgeInsets.symmetric(horizontal: 22),
         side: BorderSide(color: scheme.outline),
-        shape: SquircleBorder(
-          borderRadius: BorderRadius.circular(PiShape.md),
-        ),
+        shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.md)),
         textStyle: const TextStyle(
           fontSize: 15,
           fontWeight: FontWeight.w600,
@@ -152,9 +148,7 @@ ThemeData _build(
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
         minimumSize: const Size(48, 42),
-        shape: SquircleBorder(
-          borderRadius: BorderRadius.circular(PiShape.sm),
-        ),
+        shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.sm)),
       ),
     ),
 
@@ -164,9 +158,7 @@ ThemeData _build(
 
     // chip:编辑式标签,方正 + 描边。
     chipTheme: ChipThemeData(
-      shape: SquircleBorder(
-        borderRadius: BorderRadius.circular(PiShape.sm),
-      ),
+      shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.sm)),
       side: BorderSide(color: border),
       backgroundColor: scheme.surfaceContainerLow,
       selectedColor: scheme.primaryContainer,
@@ -184,9 +176,7 @@ ThemeData _build(
         selectedForegroundColor: scheme.onPrimaryContainer,
         side: BorderSide(color: scheme.outline),
         minimumSize: const Size(0, 46),
-        shape: SquircleBorder(
-          borderRadius: BorderRadius.circular(PiShape.sm),
-        ),
+        shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.sm)),
       ),
     ),
 
@@ -263,9 +253,7 @@ ThemeData _build(
       contentTextStyle: TextStyle(color: scheme.onInverseSurface, fontSize: 14),
       actionTextColor: scheme.inversePrimary,
       insetPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      shape: SquircleBorder(
-        borderRadius: BorderRadius.circular(PiShape.sm),
-      ),
+      shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.sm)),
     ),
 
     dividerTheme: DividerThemeData(color: border, thickness: 1, space: 1),
@@ -312,9 +300,7 @@ ThemeData _build(
       selectedTileColor: scheme.primaryContainer,
       minVerticalPadding: 13,
       contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
-      shape: SquircleBorder(
-        borderRadius: BorderRadius.circular(PiShape.md),
-      ),
+      shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.md)),
     ),
 
     floatingActionButtonTheme: FloatingActionButtonThemeData(
@@ -324,9 +310,7 @@ ThemeData _build(
       highlightElevation: 0,
       backgroundColor: scheme.primary,
       foregroundColor: scheme.onPrimary,
-      shape: SquircleBorder(
-        borderRadius: BorderRadius.circular(PiShape.md),
-      ),
+      shape: SquircleBorder(borderRadius: BorderRadius.circular(PiShape.md)),
     ),
 
     // 抽屉与页面同一套纸色。旧版这里浅色模式也强制 charcoal,
@@ -338,9 +322,7 @@ ThemeData _build(
       width: 330,
       shape: const SquircleBorder(
         // 抽屉从左侧滑出:右侧上方圆角(开口的纸角),右下方直角(贴屏底不悬空)。
-        borderRadius: BorderRadius.only(
-          topRight: Radius.circular(PiShape.lg),
-        ),
+        borderRadius: BorderRadius.only(topRight: Radius.circular(PiShape.lg)),
       ),
     ),
 

@@ -68,11 +68,7 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
               padding: const EdgeInsets.fromLTRB(16, 13, 12, 13),
               child: Row(
                 children: [
-                  Icon(
-                    Icons.psychology_outlined,
-                    size: 15,
-                    color: accent,
-                  ),
+                  Icon(Icons.psychology_outlined, size: 15, color: accent),
                   const SizedBox(width: 9),
                   Text(
                     widget.streaming ? '思考过程 · 进行中' : '思考过程',
@@ -89,11 +85,7 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
                     turns: _expanded ? 0.5 : 0,
                     duration: PiMotion.quick,
                     curve: PiMotion.enter,
-                    child: Icon(
-                      Icons.expand_more,
-                      size: 18,
-                      color: fgMuted,
-                    ),
+                    child: Icon(Icons.expand_more, size: 18, color: fgMuted),
                   ),
                 ],
               ),

@@ -438,7 +438,9 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                           end: Alignment.bottomCenter,
                           colors: [
                             Theme.of(context).colorScheme.surface,
-                            Theme.of(context).colorScheme.surface.withValues(alpha: 0),
+                            Theme.of(
+                              context,
+                            ).colorScheme.surface.withValues(alpha: 0),
                           ],
                           stops: const [0.55, 1.0],
                         ),
@@ -460,8 +462,12 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                         colors: [
-                          Theme.of(context).colorScheme.surface.withValues(alpha: 0),
-                          Theme.of(context).colorScheme.surface.withValues(alpha: 0.6),
+                          Theme.of(
+                            context,
+                          ).colorScheme.surface.withValues(alpha: 0),
+                          Theme.of(
+                            context,
+                          ).colorScheme.surface.withValues(alpha: 0.6),
                           Theme.of(context).colorScheme.surface,
                         ],
                         stops: const [0.0, 0.4, 1.0],
@@ -481,55 +487,57 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                 child: Container(
                   color: Theme.of(context).colorScheme.surface,
                   child: NotificationListener<SizeChangedLayoutNotification>(
-                  onNotification: (_) {
-                    WidgetsBinding.instance.addPostFrameCallback(
-                      (_) => _syncComposerHeight(),
-                    );
-                    return true;
-                  },
-                  child: SizeChangedLayoutNotifier(
-                    key: _composerKey,
-                    child: Composer(
-                      controller: _input,
-                      enabled: true,
-                      streaming: state.isStreaming,
-                      compacting: state.isCompacting,
-                      onSend: _send,
-                      onSteer: () => _send(delivery: PiDelivery.steer),
-                      onFollowUp: () => _send(delivery: PiDelivery.followUp),
-                      onInterruptAndSend: _interruptAndSend,
-                      onAbort: () => unawaited(
-                        ref.read(piSessionProvider.notifier).abort(),
-                      ),
-                      onChanged: (text) => setState(() => _inputText = text),
-                      quickPanel: QuickPanel(
-                        inputText: _inputText,
-                        onInsert: (text) {
-                          _input.text = text;
-                          _input.selection = TextSelection.collapsed(
-                            offset: text.length,
-                          );
-                          setState(() => _inputText = text);
-                        },
-                        onSendPrompt: (text) {
-                          // 快捷指令没有输入框可清,自己挡住连点
-                          if (_sending) return;
-                          setState(() => _sending = true);
-                          unawaited(
-                            ref
-                                .read(piSessionProvider.notifier)
-                                .sendPrompt(text)
-                                .whenComplete(() {
-                                  if (mounted) setState(() => _sending = false);
-                                }),
-                          );
-                        },
+                    onNotification: (_) {
+                      WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => _syncComposerHeight(),
+                      );
+                      return true;
+                    },
+                    child: SizeChangedLayoutNotifier(
+                      key: _composerKey,
+                      child: Composer(
+                        controller: _input,
+                        enabled: true,
+                        streaming: state.isStreaming,
+                        compacting: state.isCompacting,
+                        onSend: _send,
+                        onSteer: () => _send(delivery: PiDelivery.steer),
+                        onFollowUp: () => _send(delivery: PiDelivery.followUp),
+                        onInterruptAndSend: _interruptAndSend,
+                        onAbort: () => unawaited(
+                          ref.read(piSessionProvider.notifier).abort(),
+                        ),
+                        onChanged: (text) => setState(() => _inputText = text),
+                        quickPanel: QuickPanel(
+                          inputText: _inputText,
+                          onInsert: (text) {
+                            _input.text = text;
+                            _input.selection = TextSelection.collapsed(
+                              offset: text.length,
+                            );
+                            setState(() => _inputText = text);
+                          },
+                          onSendPrompt: (text) {
+                            // 快捷指令没有输入框可清,自己挡住连点
+                            if (_sending) return;
+                            setState(() => _sending = true);
+                            unawaited(
+                              ref
+                                  .read(piSessionProvider.notifier)
+                                  .sendPrompt(text)
+                                  .whenComplete(() {
+                                    if (mounted) {
+                                      setState(() => _sending = false);
+                                    }
+                                  }),
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
             ],
           ),
         ),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/ui/chat/widgets/island_bar.dart';
 import 'package:pi_pilot/ui/settings/settings_screen.dart';
 import 'package:pi_pilot/ui/shell/app_shell.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
@@ -13,6 +14,17 @@ void main() {
     child: MaterialApp(theme: buildLightTheme(), home: const AppShell()),
   );
 
+  /// 新外壳(灵动岛/液态导航)有常驻动画,pumpAndSettle 会超时。
+  Future<void> settle(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+  }
+
+  Future<void> openDrawer(WidgetTester tester) async {
+    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
+    await settle(tester);
+  }
+
   testWidgets('会话页仍挂着抽屉(底栏之外的第二入口)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
@@ -24,8 +36,7 @@ void main() {
     expect(scaffold.drawer, isNotNull);
 
     // 打开后抽屉才真的进树
-    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
-    await tester.pumpAndSettle();
+    await openDrawer(tester);
     expect(find.byType(Drawer), findsOneWidget);
   });
 
@@ -34,8 +45,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
-    await tester.pumpAndSettle();
+    await openDrawer(tester);
 
     // 「pi 窗口」标题在抽屉和「设备」tab 里各有一份(同一份 UI 两个外壳),
     // 所以限定在 Drawer 子树里断言。
@@ -61,8 +71,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
-    await tester.pumpAndSettle();
+    await openDrawer(tester);
 
     // 对话页的未连接态也有同样文案,这里只看抽屉里的那份
     expect(
@@ -71,41 +80,28 @@ void main() {
     );
   });
 
-  testWidgets('设置从底栏可达(不再走抽屉页脚)', (tester) async {
+  testWidgets('设置向右翻页可达(不再走抽屉页脚)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    // 底栏第三格就是设置 —— 这取代了原来「抽屉页脚一条设置」的路径。
-    await tester.tap(find.text('设置'));
-    await tester.pumpAndSettle();
+    // 新外壳:三页 PageView(设置 | 会话 | 设备)。液态导航栏只在滚动时
+    // 现身,平时收起 —— 所以设置靠「把内容往右拖,翻到上一页」到达。
+    await tester.dragFrom(const Offset(400, 300), const Offset(300, 0));
+    await settle(tester);
 
     expect(find.byType(SettingsScreen), findsOneWidget);
   });
 
-  testWidgets('顶栏是报头:衬线字标 + 状态副行 + 一条细线', (tester) async {
+  testWidgets('会话页没有常驻顶栏,灵动岛浮在内容上', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    final appBar = tester.widget<AppBar>(find.byType(AppBar));
-    // Editorial Retro:顶栏底部是一条 1px 编辑式细线(替代滚动阴影),
-    // 不再是旧版那个 48dp 的等宽字体芯片行。
-    expect(appBar.bottom, isNotNull);
-    expect(appBar.bottom!.preferredSize.height, 1);
-    expect(appBar.toolbarHeight, 76);
-    // 品牌字标在顶栏里,而且是**衬线**的 —— 这是「衬线负责气质」的落点。
-    // 顶栏里 'PiPilot' 会出现两次:衬线字标,以及未选会话时标题回退的同名文本。
-    // 只断言「存在一个衬线的 PiPilot」,避免与回退文本混淆。
-    final wordmarks = tester
-        .widgetList<Text>(
-          find.descendant(
-            of: find.byType(AppBar),
-            matching: find.text('PiPilot'),
-          ),
-        )
-        .where((t) => t.style?.fontFamily == 'serif');
-    expect(wordmarks, hasLength(1), reason: '顶栏必须有一个衬线品牌字标');
+    // Editorial Retro 把「报头 AppBar」删了:无常驻顶栏,内容区全屏,
+    // 品牌/状态/入口收进灵动岛(收起是小胶囊,点开是完整信息卡)。
+    expect(find.byType(AppBar), findsNothing);
+    expect(find.byType(DynamicIslandBar), findsOneWidget);
   });
 
   testWidgets('关抽屉不会把焦点还给输入框(否则键盘每次都弹出来)', (tester) async {
@@ -115,9 +111,9 @@ void main() {
 
     final scaffold = tester.state<ScaffoldState>(findDrawerScaffold());
     scaffold.openDrawer();
-    await tester.pumpAndSettle();
+    await settle(tester);
     scaffold.closeDrawer();
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     // Flutter 关抽屉后会把焦点还给 body 里第一个可聚焦节点 = 输入框,
     // 键盘就跟着弹出来。AppShell 的 onDrawerChanged 必须把它收掉。

@@ -35,9 +35,21 @@ class _AppShellState extends ConsumerState<AppShell> {
   ];
 
   static const _tabs = [
-    NavTabSpec(icon: Icons.settings_outlined, selectedIcon: Icons.settings, label: '设置'),
-    NavTabSpec(icon: Icons.forum_outlined, selectedIcon: Icons.forum, label: '会话'),
-    NavTabSpec(icon: Icons.devices_outlined, selectedIcon: Icons.devices, label: '设备'),
+    NavTabSpec(
+      icon: Icons.settings_outlined,
+      selectedIcon: Icons.settings,
+      label: '设置',
+    ),
+    NavTabSpec(
+      icon: Icons.forum_outlined,
+      selectedIcon: Icons.forum,
+      label: '会话',
+    ),
+    NavTabSpec(
+      icon: Icons.devices_outlined,
+      selectedIcon: Icons.devices,
+      label: '设备',
+    ),
   ];
 
   @override
@@ -59,7 +71,9 @@ class _AppShellState extends ConsumerState<AppShell> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? scheme.surfaceContainerHigh : scheme.surfaceContainerLow;
+    final bg = isDark
+        ? scheme.surfaceContainerHigh
+        : scheme.surfaceContainerLow;
 
     return Scaffold(
       extendBody: true,
@@ -91,7 +105,8 @@ class _AppShellState extends ConsumerState<AppShell> {
                         ? (_pageController.page ?? 0.0)
                         : 0.0;
                     // 滚动中显示,停止时隐藏
-                    final isScrolling = _pageController.hasClients &&
+                    final isScrolling =
+                        _pageController.hasClients &&
                         _pageController.position.isScrollingNotifier.value;
                     final opacity = isScrolling ? 1.0 : 0.0;
                     return AnimatedOpacity(
@@ -190,9 +205,7 @@ class _ChatTabState extends State<_ChatTab> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              ChatBody(
-                topPadding: MediaQuery.paddingOf(context).top + 52,
-              ),
+              ChatBody(topPadding: MediaQuery.paddingOf(context).top + 52),
               // 灵动岛:平时小胶囊,点击展开成完整信息卡。
               DynamicIslandBar(
                 key: _islandKey,

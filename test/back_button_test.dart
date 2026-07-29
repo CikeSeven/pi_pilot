@@ -11,6 +11,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// `NavigatorState.maybePop` 的返回值正好区分这两种结局:
 /// - `true`  → 被 PopScope 拦下并自行处理(这里是关抽屉)
 /// - `false` → 冒泡给系统,根路由上就是退出到桌面
+///
+/// 注意:新外壳(灵动岛/液态导航)有常驻动画,`pumpAndSettle` 会超时,
+/// 所以这里一律用固定时长 pump。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -22,8 +25,17 @@ void main() {
     final popped = await tester
         .state<NavigatorState>(find.byType(Navigator))
         .maybePop();
-    await tester.pumpAndSettle();
+    await tester.pump();
+    // 抽屉收起动画 ~300ms,给 500ms 足够跑完;不能用 pumpAndSettle。
+    await tester.pump(const Duration(milliseconds: 500));
     return popped;
+  }
+
+  /// 开抽屉并等动画跑完(同样不能 pumpAndSettle)。
+  Future<void> openDrawer(WidgetTester tester) async {
+    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
   }
 
   testWidgets('抽屉开着时返回键只关抽屉,不退出到桌面', (tester) async {
@@ -31,8 +43,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
-    await tester.pumpAndSettle();
+    await openDrawer(tester);
     expect(find.byType(Drawer), findsOneWidget);
 
     // 返回被拦下(true = 没有冒泡给系统),抽屉关掉
@@ -49,8 +60,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
-    await tester.pumpAndSettle();
+    await openDrawer(tester);
 
     expect(await pressBack(tester), isTrue);
     // 第二次:抽屉已经关了,这一下必须放给系统,否则返回键就彻底失灵了

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
 import '../../sessions/session_tree_screen.dart';
+import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
 import 'chat_app_bar.dart' show StatusDot;
 import 'session_sheet.dart';
@@ -168,8 +169,8 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
                 height: _collapsedH + (_expandedH - _collapsedH) * t,
                 clipBehavior: Clip.antiAlias,
                 decoration: BoxDecoration(
-                  // 圆角 22:和输入卡、PiShape.lg 统一。
-                  borderRadius: BorderRadius.circular(22),
+                  // 圆角和输入卡、PiShape.lg 统一。
+                  borderRadius: BorderRadius.circular(PiShape.lg),
                   // 液态玻璃:和输入框同一套语言。
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
@@ -302,7 +303,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
             children: [
               Expanded(
                 child: InkWell(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(PiShape.md),
                   onTap: () {
                     HapticFeedback.selectionClick();
                     showSessionSheet(context, ref);
@@ -361,8 +362,9 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
                   tooltip: '更多',
                   icon: const Icon(Icons.more_vert),
                   visualDensity: VisualDensity.compact,
-                  onPressed: () =>
-                      controller.isOpen ? controller.close() : controller.open(),
+                  onPressed: () => controller.isOpen
+                      ? controller.close()
+                      : controller.open(),
                 ),
                 menuChildren: [
                   MenuItemButton(
@@ -372,9 +374,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
                             final messenger = ScaffoldMessenger.of(context);
                             final ok = await notifier.undoLastTurn();
                             messenger.showSnackBar(
-                              SnackBar(
-                                content: Text(ok ? '已撤销上一轮' : '撤销失败'),
-                              ),
+                              SnackBar(content: Text(ok ? '已撤销上一轮' : '撤销失败')),
                             );
                           }
                         : null,
@@ -411,10 +411,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               Expanded(
                 child: Text(
                   // 生成中时副行前面加工作状态,一眼看出模型在干什么。
-                  [
-                    ?_workStatus(state),
-                    _subtitle(state),
-                  ].join(' · '),
+                  [?_workStatus(state), _subtitle(state)].join(' · '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.labelSmall?.copyWith(
@@ -470,8 +467,9 @@ class _StreamTimerState extends State<_StreamTimer> {
   @override
   Widget build(BuildContext context) {
     final s = _elapsed.inSeconds;
-    final text =
-        s < 60 ? '${s}s' : '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+    final text = s < 60
+        ? '${s}s'
+        : '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
     return Text(
       text,
       style: Theme.of(context).textTheme.labelSmall?.copyWith(

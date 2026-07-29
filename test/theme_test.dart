@@ -8,6 +8,7 @@ import 'package:pi_pilot/ui/theme/highlight_theme.dart';
 import 'package:pi_pilot/ui/theme/palette.dart';
 import 'package:pi_pilot/ui/theme/semantic_colors.dart';
 import 'package:pi_pilot/ui/theme/shapes.dart';
+import 'package:pi_pilot/ui/theme/squircle.dart';
 import 'package:pi_pilot/ui/theme/typography.dart';
 
 /// WCAG 相对亮度对比度。
@@ -135,11 +136,7 @@ void main() {
       // 蓝色通道不能显著压过红色通道。
       for (final accent in AppAccent.values) {
         final c = accent.seed;
-        expect(
-          c.b - c.r,
-          lessThan(0.25),
-          reason: '${accent.name} 偏科技蓝了',
-        );
+        expect(c.b - c.r, lessThan(0.25), reason: '${accent.name} 偏科技蓝了');
       }
     });
 
@@ -155,7 +152,14 @@ void main() {
       expect(AppAccent.fromName('nonsense'), AppAccent.terracotta);
       expect(AppAccent.fromName(null), AppAccent.terracotta);
       // 旧版持久化过的色名必须安全回退,不能崩
-      for (final legacy in ['blue', 'purple', 'pink', 'orange', 'green', 'teal']) {
+      for (final legacy in [
+        'blue',
+        'purple',
+        'pink',
+        'orange',
+        'green',
+        'teal',
+      ]) {
         expect(AppAccent.fromName(legacy), AppAccent.terracotta);
       }
     });
@@ -172,17 +176,26 @@ void main() {
       }
     });
 
-    test('全 app 零阴影', () {
-      // Editorial Retro 铁律:层次由「纸的深浅 + 1px 描边」承担,不靠投影。
-      // 连浮层也不投影 —— 它们靠描边和 scrim 分离。
-      // 这比旧版「内容平、浮层不平」更彻底,是本次重设计的核心决定。
+    test('阴影收敛:卡片/对话框允许 ≤1 微阴影,其余零阴影', () {
+      // 初版守卫是「连浮层也零阴影」;后续设计细化为:
+      // 卡片/对话框/弹层允许 ≤1 的微阴影与底纸分离(app_theme.dart
+      // 里标注「微浮起:替代纯零阴影」),其余一律零阴影。
+      // 这里按分支最终代码状态收录这个演变。
       for (final theme in [buildLightTheme(), buildDarkTheme()]) {
-        expect(theme.cardTheme.elevation, 0, reason: '卡片不投影');
+        expect(
+          theme.cardTheme.elevation,
+          lessThanOrEqualTo(1),
+          reason: '卡片最多微阴影',
+        );
+        expect(
+          theme.dialogTheme.elevation,
+          lessThanOrEqualTo(1),
+          reason: '对话框最多微阴影',
+        );
+        expect(theme.bottomSheetTheme.modalElevation, lessThanOrEqualTo(1));
         expect(theme.drawerTheme.elevation, 0, reason: '抽屉不投影');
         expect(theme.appBarTheme.elevation, 0, reason: '顶栏不投影');
         expect(theme.appBarTheme.scrolledUnderElevation, 0);
-        expect(theme.dialogTheme.elevation, 0, reason: '对话框不投影');
-        expect(theme.bottomSheetTheme.modalElevation, 0);
         expect(theme.snackBarTheme.elevation, 0);
         expect(theme.floatingActionButtonTheme.elevation, 0);
         expect(theme.popupMenuTheme.elevation, 0);
@@ -193,7 +206,7 @@ void main() {
     test('卡片带 1px 描边', () {
       // 描边是编辑式版式的骨架线,去掉阴影之后它承担全部分界职责。
       for (final theme in [buildLightTheme(), buildDarkTheme()]) {
-        final shape = theme.cardTheme.shape! as RoundedRectangleBorder;
+        final shape = theme.cardTheme.shape! as SquircleBorder;
         expect(shape.side.color, theme.colorScheme.outlineVariant);
         expect(shape.side.width, greaterThan(0));
       }
@@ -226,25 +239,20 @@ void main() {
     });
 
     test('圆角收敛到编辑式区间', () {
-      // 旧版要求「不小于 28」(大圆角现代 App 语言)。
-      // 新设计**收敛**圆角:纸卡的角是裁切出来的,14 是上限档。
+      // 三档收敛:sm 8 / md 14 / lg 22,差值明显、用途固定。
+      // 纸卡用中档(裁切感),对话框/弹层用高档,且全部走 squircle。
       final theme = buildLightTheme();
-      double radiusOf(ShapeBorder? shape) => (shape as RoundedRectangleBorder)
+      double radiusOf(ShapeBorder? shape) => (shape as SquircleBorder)
           .borderRadius
           .resolve(TextDirection.ltr)
           .topLeft
           .x;
-      expect(radiusOf(theme.cardTheme.shape), PiShape.lg);
-      expect(radiusOf(theme.cardTheme.shape), lessThanOrEqualTo(16));
+      expect(radiusOf(theme.cardTheme.shape), PiShape.md);
       expect(radiusOf(theme.dialogTheme.shape), PiShape.lg);
-      expect(PiShape.lg, lessThanOrEqualTo(16));
-      expect(PiShape.lg, lessThanOrEqualTo(24));
-      // 单调递增
-      expect(PiShape.sm, lessThan(PiShape.sm));
+      // 单调递增且收敛:最大档 22,不再像旧版 xxl 那样到 28。
       expect(PiShape.sm, lessThan(PiShape.md));
       expect(PiShape.md, lessThan(PiShape.lg));
-      expect(PiShape.lg, lessThan(PiShape.lg));
-      expect(PiShape.lg, lessThan(PiShape.lg));
+      expect(PiShape.lg, lessThanOrEqualTo(22));
     });
 
     test('底部导航是同色通栏,浅色不用黑、深色抬升一档', () {

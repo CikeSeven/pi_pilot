@@ -106,23 +106,23 @@ class AssistantBubble extends ConsumerWidget {
             // text 为空且非 streaming = AI 纯思考/纯工具调用,不画空壳。
             if (item.text.isNotEmpty || streaming)
               Material(
-              color: colors.surfaceContainerLow,
-              shape: SquircleBorder(
-                borderRadius: BorderRadius.circular(PiShape.md),
-                side: BorderSide(color: colors.outlineVariant),
-                smoothing: PiShape.smoothing,
-              ),
-              elevation: 1,
-              clipBehavior: Clip.antiAlias,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-                child: AnimatedSwitcher(
-                  duration: PiMotion.quick,
-                  switchInCurve: PiMotion.enter,
-                  child: KeyedSubtree(key: ValueKey(streaming), child: body),
+                color: colors.surfaceContainerLow,
+                shape: SquircleBorder(
+                  borderRadius: BorderRadius.circular(PiShape.md),
+                  side: BorderSide(color: colors.outlineVariant),
+                  smoothing: PiShape.smoothing,
+                ),
+                elevation: 1,
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                  child: AnimatedSwitcher(
+                    duration: PiMotion.quick,
+                    switchInCurve: PiMotion.enter,
+                    child: KeyedSubtree(key: ValueKey(streaming), child: body),
+                  ),
                 ),
               ),
-            ),
             if (item.isErrored) const _AssistantErrorBadge(),
           ],
         ),
@@ -144,8 +144,7 @@ class _Byline extends StatefulWidget {
   State<_Byline> createState() => _BylineState();
 }
 
-class _BylineState extends State<_Byline>
-    with SingleTickerProviderStateMixin {
+class _BylineState extends State<_Byline> with SingleTickerProviderStateMixin {
   // 生成中时图标缓慢呼吸,「正在想」的律动。
   late final AnimationController _pulse = AnimationController(
     vsync: this,
@@ -194,9 +193,7 @@ class _BylineState extends State<_Byline>
             return Transform.scale(
               scale: s,
               child: Icon(
-                widget.streaming
-                    ? Icons.blur_on
-                    : Icons.auto_awesome,
+                widget.streaming ? Icons.blur_on : Icons.auto_awesome,
                 size: 13,
                 color: fg,
               ),

@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
 import '../../theme/motion.dart';
+import '../../theme/shapes.dart';
+import '../../theme/typography.dart';
 
 /// 输入条:**Claude Code 风格两行布局**。
 ///
@@ -80,7 +82,8 @@ class _ComposerState extends State<Composer> {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final showStop = widget.streaming &&
+    final showStop =
+        widget.streaming &&
         widget.onAbort != null &&
         widget.controller.text.trim().isEmpty;
     final sendEnabled = widget.enabled || showStop;
@@ -114,8 +117,7 @@ class _ComposerState extends State<Composer> {
                         child: Row(
                           children: [
                             ActionChip(
-                              avatar:
-                                  const Icon(Icons.bolt_outlined, size: 18),
+                              avatar: const Icon(Icons.bolt_outlined, size: 18),
                               label: const Text('插队'),
                               tooltip: widget.compacting
                                   ? '压缩结束后立刻处理'
@@ -157,7 +159,7 @@ class _ComposerState extends State<Composer> {
                 duration: const Duration(milliseconds: 200),
                 curve: Curves.easeOut,
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(22),
+                  borderRadius: BorderRadius.circular(PiShape.lg),
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
@@ -217,16 +219,17 @@ class _ComposerState extends State<Composer> {
                           hintText: widget.compacting
                               ? '压缩中 · 发送会排队'
                               : widget.streaming
-                                  ? '生成中 · 发送会插队'
-                                  : null,
+                              ? '生成中 · 发送会插队'
+                              : null,
                           filled: false,
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
                           focusedBorder: InputBorder.none,
                           disabledBorder: InputBorder.none,
                           isDense: true,
-                          contentPadding:
-                              const EdgeInsets.symmetric(vertical: 10),
+                          contentPadding: const EdgeInsets.symmetric(
+                            vertical: 10,
+                          ),
                         ),
                       ),
                       // 第二行:模型选择胶囊 + 上下文环 + 发送键
@@ -325,9 +328,9 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
     if (!mounted) return;
     if (!ok) {
       setState(() => _expanded = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('切换模型失败')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('切换模型失败')));
       return;
     }
     setState(() => _view = _PickerView.thinking);
@@ -339,9 +342,9 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
         .read(piSessionProvider.notifier)
         .setThinkingLevel(level);
     if (mounted && !ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('切换思考深度失败')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('切换思考深度失败')));
     }
   }
 
@@ -371,7 +374,9 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
     final currentName =
         ref.watch(piSessionProvider.select((s) => s.modelName)) ?? '选择模型';
     final currentId = ref.watch(piSessionProvider.select((s) => s.modelId));
-    final thinking = ref.watch(piSessionProvider.select((s) => s.thinkingLevel));
+    final thinking = ref.watch(
+      piSessionProvider.select((s) => s.thinkingLevel),
+    );
     // 胶囊上把深度也亮出来:模型和深度是配套信息。
     // off 是默认值,不占地方。
     final pillText = thinking != null && thinking != 'off'
@@ -460,8 +465,7 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
   /// 选完模型自动进到这里;返回箭头回模型列表,选一个深度即收起。
   Widget _buildThinking(ColorScheme colors, String? currentLevel) {
     final theme = Theme.of(context);
-    final levels =
-        _levels ?? const ['off', 'minimal', 'low', 'medium', 'high'];
+    final levels = _levels ?? const ['off', 'minimal', 'low', 'medium', 'high'];
     return Column(
       key: const ValueKey('thinking'),
       mainAxisSize: MainAxisSize.min,
@@ -472,7 +476,7 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
           child: Row(
             children: [
               InkWell(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(PiShape.sm),
                 onTap: () => setState(() => _view = _PickerView.models),
                 child: Padding(
                   padding: const EdgeInsets.all(6),
@@ -493,7 +497,7 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
                 ),
               ),
               InkWell(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(PiShape.sm),
                 onTap: _toggle,
                 child: Padding(
                   padding: const EdgeInsets.all(4),
@@ -634,9 +638,8 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
                                       overflow: TextOverflow.ellipsis,
                                       style: theme.textTheme.labelSmall
                                           ?.copyWith(
-                                        color: colors.onSurfaceVariant,
-                                        fontSize: 10,
-                                      ),
+                                            color: colors.onSurfaceVariant,
+                                          ),
                                     ),
                                 ],
                               ),
@@ -676,8 +679,8 @@ class _ContextRing extends ConsumerWidget {
     final color = percent < 60
         ? colors.primary
         : percent < 85
-            ? const Color(0xFFB8860B) // 琥珀:复古色系里的「注意」
-            : colors.error;
+        ? const Color(0xFFB8860B) // 琥珀:复古色系里的「注意」
+        : colors.error;
 
     final label = percent >= 100 ? '满' : '$percent';
 
@@ -698,10 +701,9 @@ class _ContextRing extends ConsumerWidget {
             ),
             Text(
               label,
-              style: TextStyle(
-                fontSize: 8.5,
-                fontFamily: 'monospace',
-                fontWeight: FontWeight.w600,
+              style: AppType.mono(
+                size: 8.5,
+                weight: FontWeight.w600,
                 color: color,
                 height: 1,
               ),
@@ -738,7 +740,9 @@ class _SendButtonState extends State<_SendButton> {
     final showStop = widget.showStop;
     return GestureDetector(
       onTap: !widget.enabled ? null : widget.onTap,
-      onTapDown: !widget.enabled ? null : (_) => setState(() => _pressed = true),
+      onTapDown: !widget.enabled
+          ? null
+          : (_) => setState(() => _pressed = true),
       onTapUp: !widget.enabled ? null : (_) => setState(() => _pressed = false),
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedScale(
@@ -754,10 +758,7 @@ class _SendButtonState extends State<_SendButton> {
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: showStop
-                  ? [
-                      Color.lerp(colors.error, Colors.white, 0.3)!,
-                      colors.error,
-                    ]
+                  ? [Color.lerp(colors.error, Colors.white, 0.3)!, colors.error]
                   : [
                       Color.lerp(colors.primary, Colors.white, 0.3)!,
                       colors.primary,
@@ -765,8 +766,9 @@ class _SendButtonState extends State<_SendButton> {
             ),
             boxShadow: [
               BoxShadow(
-                color: (showStop ? colors.error : colors.primary)
-                    .withValues(alpha: 0.4),
+                color: (showStop ? colors.error : colors.primary).withValues(
+                  alpha: 0.4,
+                ),
                 blurRadius: 10,
                 offset: const Offset(0, 4),
               ),

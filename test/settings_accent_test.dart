@@ -34,7 +34,9 @@ void main() {
       addTearDown(container.dispose);
       container.read(settingsProvider);
       await Future<void>.delayed(Duration.zero);
-      await container.read(settingsProvider.notifier).setAccent(AppAccent.slate);
+      await container
+          .read(settingsProvider.notifier)
+          .setAccent(AppAccent.slate);
       expect(container.read(settingsProvider).accent, AppAccent.slate);
       expect((await SettingsRepository().load()).accent, 'slate');
     });

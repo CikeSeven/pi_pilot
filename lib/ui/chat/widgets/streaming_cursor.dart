@@ -56,9 +56,10 @@ class _StreamingCursorState extends State<StreamingCursor>
   Widget build(BuildContext context) {
     final color = widget.color ?? Theme.of(context).colorScheme.primary;
     return FadeTransition(
-      opacity: Tween<double>(begin: 1.0, end: 0.25).animate(
-        CurvedAnimation(parent: _controller, curve: PiMotion.std),
-      ),
+      opacity: Tween<double>(
+        begin: 1.0,
+        end: 0.25,
+      ).animate(CurvedAnimation(parent: _controller, curve: PiMotion.std)),
       child: Container(
         width: widget.width,
         height: widget.height,

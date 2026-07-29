@@ -71,12 +71,12 @@ class SquircleBorder extends OutlinedBorder {
       final cosA = math.cos(a);
       final sinA = math.sin(a);
       // 超椭圆:x = r * sign(cos) * |cos|^(2/n)
-      final px = center.dx +
-          r * (cosA < 0 ? -1.0 : 1.0) *
-              math.pow(cosA.abs(), 2 / n).toDouble();
-      final py = center.dy +
-          r * (sinA < 0 ? -1.0 : 1.0) *
-              math.pow(sinA.abs(), 2 / n).toDouble();
+      final px =
+          center.dx +
+          r * (cosA < 0 ? -1.0 : 1.0) * math.pow(cosA.abs(), 2 / n).toDouble();
+      final py =
+          center.dy +
+          r * (sinA < 0 ? -1.0 : 1.0) * math.pow(sinA.abs(), 2 / n).toDouble();
       path.lineTo(px, py);
     }
   }
@@ -102,7 +102,14 @@ class SquircleBorder extends OutlinedBorder {
     // 顶边
     path.lineTo(r - rTR, t);
     // 右上角:北(3π/2) -> 东(0 = 2π)
-    _corner(path, Offset(r - rTR, t + rTR), rTR, 3 * math.pi / 2, 2 * math.pi, steps);
+    _corner(
+      path,
+      Offset(r - rTR, t + rTR),
+      rTR,
+      3 * math.pi / 2,
+      2 * math.pi,
+      steps,
+    );
     // 右边
     path.lineTo(r, b - rBR);
     // 右下角:东(0) -> 南(π/2)
@@ -114,7 +121,14 @@ class SquircleBorder extends OutlinedBorder {
     // 左边
     path.lineTo(l, t + rTL);
     // 左上角:西(π) -> 北(3π/2)
-    _corner(path, Offset(l + rTL, t + rTL), rTL, math.pi, 3 * math.pi / 2, steps);
+    _corner(
+      path,
+      Offset(l + rTL, t + rTL),
+      rTL,
+      math.pi,
+      3 * math.pi / 2,
+      steps,
+    );
     path.close();
     return path;
   }
