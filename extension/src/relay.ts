@@ -270,6 +270,34 @@ function isNavigable(node: RawTreeNode): boolean {
   return NAVIGABLE_TREE_TYPES.has(node?.entry?.type);
 }
 
+/// 摘要 leafId 的重映射:原始 leaf 可能是被投影丢掉的噪音节点(msg-meta
+/// 这类 custom 是常客 —— 生成一停它就挂在会话尾巴上),摘要里根本没有它,
+/// App 的「定位到当前位置」和 currentPath 会一起落空(生成中叶是正在写的
+/// assistant 消息所以能定位,一停就不行)。沿 parentId 向上走到最近的可导
+/// 航节点;leaf 不在树里或整链都不可导航时返回 null。
+export function navigableLeafId(tree: unknown[], leafId: string | null): string | null {
+  if (!leafId) return null;
+  const byId = new Map<string, any>();
+  const stack = [...(tree ?? [])] as RawTreeNode[];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const entry = node?.entry;
+    if (entry && typeof entry.id === "string") byId.set(entry.id, entry);
+    for (const child of node?.children ?? []) stack.push(child);
+  }
+  let current: string | null = leafId;
+  // 防御 parentId 环(损坏的转录),走死就放弃
+  const seen = new Set<string>();
+  while (current !== null && !seen.has(current)) {
+    seen.add(current);
+    const entry = byId.get(current);
+    if (!entry) return null;
+    if (NAVIGABLE_TREE_TYPES.has(entry.type)) return current;
+    current = typeof entry.parentId === "string" ? entry.parentId : null;
+  }
+  return null;
+}
+
 /// 时间戳转 epoch 毫秒数字。
 ///
 /// pi 写的是 ISO 字符串(24 字节),数字只需 13 字节 —— 千条规模下这一项就差
@@ -888,13 +916,16 @@ export class DesktopRelay {
           return;
         }
         try {
-          const tree = buildTreeSummary(ctx.sessionManager.getTree());
+          const rawTree = ctx.sessionManager.getTree();
+          const tree = buildTreeSummary(rawTree);
           if (!tree) throw new Error("tree summary exceeds its byte budget");
           this.sendFrame({
             type: "desktop_tree",
             requestId,
             epoch: this.epoch,
-            leafId: ctx.sessionManager.getLeafId(),
+            // 投影会丢噪音节点,leafId 必须重映射到摘要里真实存在的节点,
+            // 否则生成一停(msg-meta custom 挂上尾巴)定位就落空。
+            leafId: navigableLeafId(rawTree, ctx.sessionManager.getLeafId()),
             tree,
           });
         } catch (error) {

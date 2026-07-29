@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTreeSummary, computeSessionStats } from "../src/relay.js";
+import { buildTreeSummary, computeSessionStats, navigableLeafId } from "../src/relay.js";
 
 const usage = (input: number, output: number, total: number) => ({
   input,
@@ -179,4 +179,31 @@ test("buildTreeSummary leaves a small tree intact", () => {
   assert.equal(summary[0].children[0].id, "b");
   assert.equal(summary[0].children[0].preview, "yo");
   assert.equal(summary[0].children[0].collapsedBefore, undefined);
+});
+
+test("navigableLeafId 把噪音叶子重映射到最近的可导航祖先", () => {
+  const msg = (id: string, children: any[] = []) => ({
+    entry: { id, type: "message", parentId: undefined },
+    children,
+  });
+  const noise = (id: string, parentId: string, children: any[] = []) => ({
+    entry: { id, type: "custom", customType: "msg-meta", parentId },
+    children,
+  });
+
+  // 叶子本身可导航:原样返回(生成中的情形)
+  const tree1 = [msg("m1", [msg("m2")])];
+  assert.equal(navigableLeafId(tree1, "m2"), "m2");
+
+  // 叶子是 msg-meta custom:回到父级 message(生成一停的情形)
+  const tree2 = [msg("m1", [msg("m2", [noise("c1", "m2")])])];
+  assert.equal(navigableLeafId(tree2, "c1"), "m2");
+
+  // 连续两个噪音:一路向上走
+  const tree3 = [msg("m1", [noise("c1", "m1", [noise("c2", "c1")])])];
+  assert.equal(navigableLeafId(tree3, "c2"), "m1");
+
+  // leaf 不在树里 / 为空:归 null,App 端不落假位置
+  assert.equal(navigableLeafId(tree1, "zzz"), null);
+  assert.equal(navigableLeafId(tree1, null), null);
 });
