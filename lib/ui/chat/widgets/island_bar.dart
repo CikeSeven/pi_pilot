@@ -331,7 +331,9 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               // 的停止键是重复入口,留一个就够。
               IconButton(
                 tooltip: '撤销上一轮',
-                icon: const Icon(Icons.undo_rounded),
+                // 20px,和第二行收起箭头同尺寸 —— 默认 24 会让可见
+                // 右边缘比收起箭头靠外 2px,两行对不齐。
+                icon: const Icon(Icons.undo_rounded, size: 20),
                 visualDensity: VisualDensity.compact,
                 onPressed: canUndo
                     ? () async {
@@ -345,7 +347,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               ),
               IconButton(
                 tooltip: '会话树',
-                icon: const Icon(Icons.account_tree_outlined),
+                icon: const Icon(Icons.account_tree_outlined, size: 20),
                 visualDensity: VisualDensity.compact,
                 onPressed: state.hasSelectedSource
                     ? () => Navigator.of(context).push(
