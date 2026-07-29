@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme/motion.dart';
 import '../../theme/shapes.dart';
+import '../../theme/squircle.dart';
 import '../../theme/typography.dart';
 import 'ansi_text.dart';
 
@@ -49,11 +50,13 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
     // 栏目名与波形的点缀色:两套都用提亮过的主色系
     final accent = isDark ? colors.primary : colors.inversePrimary;
 
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(PiShape.lg),
+    // 用 Material + SquircleBorder,和 assistant_bubble/message_card 同一种圆角语言。
+    // 之前用 BoxDecoration(普通圆角),和其他卡的 squircle 视觉不一致。
+    return Material(
+      color: bg,
+      shape: SquircleBorder(
+        borderRadius: BorderRadius.circular(PiShape.md),
+        smoothing: PiShape.smoothing,
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(

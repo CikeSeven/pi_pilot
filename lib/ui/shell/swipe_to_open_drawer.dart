@@ -17,6 +17,7 @@ class SwipeToOpenDrawer extends StatefulWidget {
     required this.child,
     this.enabled = true,
     this.threshold = 48,
+    this.edgeWidth = 60,
   });
 
   final VoidCallback onOpen;
@@ -28,6 +29,12 @@ class SwipeToOpenDrawer extends StatefulWidget {
   /// 累计右移多少就认定是「要开抽屉」。
   final double threshold;
 
+  /// 只在屏幕左边缘这么宽内生效。
+  ///
+  /// 旧版全屏检测往右滑,和页面左右切换冲突 —— 用户想切页时总是先开抽屉。
+  /// 限制在左边缘后:左边缘往右滑开抽屉,中间往右滑切页。
+  final double edgeWidth;
+
   @override
   State<SwipeToOpenDrawer> createState() => _SwipeToOpenDrawerState();
 }
@@ -38,15 +45,18 @@ class _SwipeToOpenDrawerState extends State<SwipeToOpenDrawer> {
   /// 一次拖拽只开一次 —— 手指还没抬起时 update 会持续来。
   bool _fired = false;
 
-  void _start(DragStartDetails _) {
+  /// 起点是否在左边缘。不在边缘的拖拽不累计,避免和页面切换冲突。
+  bool _inEdge = false;
+
+  void _start(DragStartDetails details) {
     _dx = 0;
     _fired = false;
+    _inEdge = details.globalPosition.dx < widget.edgeWidth;
   }
 
   void _update(DragUpdateDetails details) {
-    if (_fired || !widget.enabled) return;
+    if (_fired || !widget.enabled || !_inEdge) return;
     _dx += details.delta.dx;
-    // 只认单向右滑:来回蹭的话累计值到不了阈值,不会误开。
     if (_dx < widget.threshold) return;
     _fired = true;
     widget.onOpen();

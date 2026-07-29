@@ -19,7 +19,11 @@ import 'widgets/ui_request_card.dart';
 /// 对话主体。**不再自带 `Scaffold`** —— 那一层上移到了 `AppShell`,
 /// 这样才有地方挂抽屉。
 class ChatBody extends ConsumerStatefulWidget {
-  const ChatBody({super.key});
+  const ChatBody({super.key, this.topPadding = 0});
+
+  /// 顶部留空(灵动岛高度 + 状态栏)。
+  /// 列表静止时第一项在岛下面;滚动时内容滚入顶部渐变区渐隐。
+  final double topPadding;
 
   @override
   ConsumerState<ChatBody> createState() => _ChatBodyState();
@@ -37,8 +41,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   ///
   /// **不能写死**:输入卡高 = 84 + 系统手势条 inset,再加上展开的快捷面板/
   /// 投递芯片。手势条 48dp 的机器上写死 96 会把最后一条消息压掉 28dp。
+  /// 默认值 140:足够覆盖手势条 48dp + 内容 92dp 的常见情况,
+  /// 首帧测量成功后会被实测值覆盖。
   final _composerKey = GlobalKey();
-  double _composerHeight = 96;
+  double _composerHeight = 140;
 
   /// 派生数据缓存:key -> 下标、以及时间标注标志。
   ///
@@ -333,12 +339,13 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
 
     // 首帧之后量一次;之后由 SizeChangedLayoutNotifier 驱动
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncComposerHeight());
-    // 留 12dp 呼吸,免得最后一条消息贴着输入卡的圆角
-    final listBottomInset = _composerHeight + 12;
+    // _composerHeight 已含手势条(Composer 内有 SafeArea),不要再加 bottomInset,
+    // 否则列表底部悬空,和输入框之间露出空隙。
+    final listBottomInset = _composerHeight + 4;
 
     return Column(
       children: [
-        _LivenessBanner(state: state),
+        _LivenessBanner(state: state, topPadding: widget.topPadding),
         if (state.isCompacting) const LinearProgressIndicator(minHeight: 2),
         Expanded(
           // 输入条**浮在**消息流之上,内容从它下面滚过去 —— 这才是「悬浮」。
@@ -353,8 +360,15 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
               else
                 ListView.builder(
                   controller: _scroll,
-                  // 底部留出输入卡的实测高度,免得最后一条消息被压在下面
-                  padding: EdgeInsets.fromLTRB(12, 12, 12, listBottomInset),
+                  // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
+                  // 顶部留出灵动岛高度,静止时第一项在岛下面。
+                  // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。
+                  padding: EdgeInsets.fromLTRB(
+                    4,
+                    widget.topPadding + 12,
+                    4,
+                    listBottomInset,
+                  ),
                   // 长会话里 keep-alive 会把滚过的每一项都钉在内存里不释放,
                   // 越滚越重。消息项本身无状态可留(展开态在 ChatItem 上),关掉。
                   addAutomaticKeepAlives: false,
@@ -408,13 +422,65 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     revision: state.revision,
                   ),
                 ),
+              // 顶部渐变遮罩:灵动岛不遮一整栏,内容滚到顶部时渐隐。
+              // 上段纯不透明(盖住岛后面的碎片),下段渐隐到透明。
+              if (widget.topPadding > 0)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  height: widget.topPadding + 24,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Theme.of(context).colorScheme.surface,
+                            Theme.of(context).colorScheme.surface.withValues(alpha: 0),
+                          ],
+                          stops: const [0.55, 1.0],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              // 渐变遮罩:紧贴输入卡顶部(_composerHeight 已含手势条,
+              // 不要再加 bottomInset,否则渐变悬空、和输入卡之间露出空隙)。
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: _composerHeight,
+                height: 40,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Theme.of(context).colorScheme.surface.withValues(alpha: 0),
+                          Theme.of(context).colorScheme.surface.withValues(alpha: 0.6),
+                          Theme.of(context).colorScheme.surface,
+                        ],
+                        stops: const [0.0, 0.4, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
               // 输入永远开放:任意一端、任意时刻都能发消息和打断。
               // 唯一的门是"还没连上 bridge",那时整个界面都不在这条分支。
+              // 外层包一层不透明背景:确保输入框下方(含手势条区域)没有文字透出。
+              // 参考 Claude Code:输入框下方是一块不透明底色,列表内容不会透出。
               Positioned(
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: NotificationListener<SizeChangedLayoutNotification>(
+                child: Container(
+                  color: Theme.of(context).colorScheme.surface,
+                  child: NotificationListener<SizeChangedLayoutNotification>(
                   onNotification: (_) {
                     WidgetsBinding.instance.addPostFrameCallback(
                       (_) => _syncComposerHeight(),
@@ -463,6 +529,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   ),
                 ),
               ),
+            ),
             ],
           ),
         ),
@@ -486,7 +553,7 @@ class _NotConnectedView extends ConsumerWidget {
     final (message, hint) = switch (status) {
       PiConnStatus.connecting => ('正在连接…', '正在唤醒你的电脑。'),
       PiConnStatus.failed => ('连接失败', '检查一下 bridge 地址和 token。'),
-      _ => ('尚未连接', '连接到你的电脑,开始远程协作。'),
+      _ => ('尚未连接', '连接电脑,远程协作。'),
     };
 
     // Center 包 SCSV:内容矮时居中,内容比视口高时(横屏/大字体/长错误
@@ -560,9 +627,12 @@ class _NotConnectedView extends ConsumerWidget {
 /// **空闲且一切正常时完全不渲染** —— 这是"大方"最直接的动作:平时聊天区域
 /// 上方没有任何 chrome。只有四种真正需要说话的情况才出现。
 class _LivenessBanner extends ConsumerWidget {
-  const _LivenessBanner({required this.state});
+  const _LivenessBanner({required this.state, this.topPadding = 0});
 
   final PiState state;
+
+  /// 灵动岛占位:横幅显示时要在岛下面,不被遮住。
+  final double topPadding;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -634,7 +704,8 @@ class _LivenessBanner extends ConsumerWidget {
     if (text.isEmpty && queueParts.isEmpty) return const SizedBox.shrink();
 
     return Card(
-      margin: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+      // 14 = ListView 左右 padding(4) + 卡片 margin(10),和内容卡对齐。
+      margin: EdgeInsets.fromLTRB(14, topPadding + 10, 14, 2),
       color: bg,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -866,7 +937,7 @@ class _EmptyHint extends StatelessWidget {
               ),
               const SizedBox(height: 10),
               Text(
-                '给 pi 下达你的第一个指令,\n例如「看看当前目录结构」',
+                '开始你的第一个指令',
                 textAlign: TextAlign.center,
                 style: AppType.serifItalic(color: colors.onSurfaceVariant),
               ),

@@ -1,53 +1,58 @@
 import 'package:flutter/material.dart';
 
-/// 圆角词汇。
+import 'squircle.dart';
+
+/// 圆角词汇。**Squircle(连续曲率圆角)+ 三档收敛**。
 ///
-/// Editorial Retro 改版:整体**收敛**圆角。
-/// 旧版是「大圆角」(卡片 24 / 对话框 28),那是现代 App 的语言;
-/// 编辑式排版讲究版芯方正,纸卡的角是裁切出来的,不是吹圆的。
-/// 所以卡片一律 14,只有胶囊类(输入条、chip、按钮)保留 stadium。
+/// 旧版有 6 档(xs/sm/md/lg/xl/xxl),差值太小(6/10/12/14/18/22),
+/// 肉眼看不出区别反而显得随机。收敛到 **3 档**(小/中/大),
+/// 每档差距明显、用途固定。
+///
+/// 所有圆角统一用 **Squircle**(超椭圆连续曲率),不再用普通圆弧圆角--
+/// 那个在直线到弧线的连接处有曲率突变(折角),squircle 平滑过渡,
+/// 这就是苹果圆角看着更柔的原因。
 abstract final class PiShape {
-  /// 内联代码、极小标签
-  static const xs = 6.0;
+  /// 小:chip、工具头像、内嵌小块、图标印章
+  static const sm = 8.0;
 
-  /// chip、工具头像、系统提示、内嵌小块
-  static const sm = 10.0;
+  /// 中:卡片、代码井、菜单、内容块、按钮、输入框
+  static const md = 14.0;
 
-  /// 代码井、菜单、snackbar、内容块
-  static const md = 12.0;
+  /// 大:对话框、底部弹层、全屏卡、抽屉
+  static const lg = 22.0;
 
-  /// 卡片主圆角——编辑式纸卡
-  static const lg = 14.0;
+  /// 超椭圆指数,越大越方。
+  static const smoothing = 5.0;
 
-  /// 大面板、弹层
-  static const xl = 18.0;
+  /// 通用卡片:中档 squircle。
+  static final card = SquircleBorder(
+    borderRadius: BorderRadius.circular(md),
+    smoothing: smoothing,
+  );
 
-  /// 底部弹层顶角、全屏卡
-  static const xxl = 22.0;
+  /// 消息卡:与通用卡同档。
+  static final messageCard = SquircleBorder(
+    borderRadius: BorderRadius.circular(md),
+    smoothing: smoothing,
+  );
 
-  /// 通用卡片。
-  static final card = RoundedRectangleBorder(
+  /// 对话框:大档。
+  static final dialog = SquircleBorder(
     borderRadius: BorderRadius.circular(lg),
+    smoothing: smoothing,
   );
 
-  /// 消息卡:与通用卡同档——统一的纸卡语言,不再刻意做最大圆角。
-  static final messageCard = RoundedRectangleBorder(
-    borderRadius: BorderRadius.circular(lg),
+  /// 底部弹层:顶部大圆角。
+  static final sheet = SquircleBorder(
+    borderRadius: const BorderRadius.vertical(top: Radius.circular(lg)),
+    smoothing: smoothing,
   );
 
-  static final dialog = RoundedRectangleBorder(
-    borderRadius: BorderRadius.circular(xl),
-  );
-
-  static const sheet = RoundedRectangleBorder(
-    borderRadius: BorderRadius.vertical(top: Radius.circular(xxl)),
-  );
-
-  /// 带细描边的纸卡形状。Editorial Retro 的核心组件语言:
-  /// **零阴影 + 1px 描边**,层次靠描边和纸色深浅,不靠投影。
-  static RoundedRectangleBorder outlinedCard(Color border, {double radius = lg}) =>
-      RoundedRectangleBorder(
+  /// 带描边的纸卡。零阴影 + 1px 描边 = 编辑式骨架线。
+  static SquircleBorder outlinedCard(Color border, {double radius = md}) =>
+      SquircleBorder(
         borderRadius: BorderRadius.circular(radius),
         side: BorderSide(color: border),
+        smoothing: smoothing,
       );
 }

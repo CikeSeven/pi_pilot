@@ -292,7 +292,7 @@ class _TreeNodeTile extends ConsumerWidget {
               height: 22,
               decoration: BoxDecoration(
                 color: look.bg,
-                borderRadius: BorderRadius.circular(PiShape.xs),
+                borderRadius: BorderRadius.circular(PiShape.sm),
               ),
               child: Center(child: Icon(look.icon, size: 13, color: look.fg)),
             ),

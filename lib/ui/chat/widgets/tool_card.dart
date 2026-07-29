@@ -283,7 +283,7 @@ Widget _outputWell(BuildContext context, String text) {
     padding: const EdgeInsets.all(12),
     decoration: BoxDecoration(
       color: piColors.codeWellBg,
-      borderRadius: BorderRadius.circular(PiShape.md),
+      borderRadius: BorderRadius.circular(PiShape.sm),
       border: Border.all(color: piColors.codeWellBorder),
     ),
     child: SingleChildScrollView(
@@ -572,7 +572,7 @@ class _AnswerableQuestion extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
                   color: colors.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(PiShape.xs),
+                  borderRadius: BorderRadius.circular(PiShape.sm),
                 ),
                 child: Text(
                   question.header!,
@@ -641,7 +641,7 @@ class _AnswerableQuestion extends StatelessWidget {
                 isDense: true,
                 hintText: '写下你的答案',
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(PiShape.md),
+                  borderRadius: BorderRadius.circular(PiShape.sm),
                 ),
               ),
             ),

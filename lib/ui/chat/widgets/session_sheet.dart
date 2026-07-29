@@ -77,7 +77,7 @@ class _SessionSheetBody extends ConsumerWidget {
                       ),
                       const SizedBox(height: 10),
                       ClipRRect(
-                        borderRadius: BorderRadius.circular(PiShape.xs),
+                        borderRadius: BorderRadius.circular(PiShape.sm),
                         child: LinearProgressIndicator(
                           value: (percent / 100).clamp(0.0, 1.0),
                           minHeight: 8,

@@ -8,6 +8,7 @@ import '../theme/semantic_colors.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
 import 'settings_sections.dart';
+import '../theme/squircle.dart';
 
 /// 设置索引页:**衬线页头 + 编辑式分组卡**。
 ///
@@ -182,7 +183,7 @@ class _SettingsCard extends StatelessWidget {
 
     return Material(
       color: colors.surfaceContainerLow,
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.lg),
         side: BorderSide(color: colors.outlineVariant),
       ),

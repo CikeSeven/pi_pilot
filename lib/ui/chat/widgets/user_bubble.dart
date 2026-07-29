@@ -5,6 +5,7 @@ import '../../../state/pi_session.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
 import 'message_actions_sheet.dart';
+import '../../theme/squircle.dart';
 
 /// 用户消息:**陶土橙实心卡,右对齐**。
 ///
@@ -27,7 +28,7 @@ class UserBubble extends ConsumerWidget {
     final colors = theme.colorScheme;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+      padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -48,8 +49,8 @@ class UserBubble extends ConsumerWidget {
             ),
             child: Material(
               color: colors.primary,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(PiShape.lg),
+              shape: SquircleBorder(
+                borderRadius: BorderRadius.circular(PiShape.md),
               ),
               clipBehavior: Clip.antiAlias,
               child: InkWell(

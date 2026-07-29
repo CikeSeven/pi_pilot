@@ -5,6 +5,7 @@ import '../../state/pi_session.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
+import '../theme/squircle.dart';
 
 /// 设备页:**深炭全屏 + 复古插画 + 陶土橙当前卡**。
 ///
@@ -49,7 +50,7 @@ class DevicesDrawer extends StatelessWidget {
     return const Drawer(
       child: ClipRRect(
         borderRadius: BorderRadius.only(
-          topRight: Radius.circular(PiShape.xxl),
+          topRight: Radius.circular(PiShape.lg),
         ),
         child: BackdropPaper(
           child: _DevicesBody(inDrawer: true),
@@ -258,7 +259,7 @@ class _DeviceCard extends StatelessWidget {
 
     return Material(
       color: bg,
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.lg),
         side: BorderSide(
           color: isCurrent ? Colors.transparent : colors.outlineVariant,
@@ -327,7 +328,7 @@ class _DeviceCard extends StatelessWidget {
                   ),
                   decoration: BoxDecoration(
                     color: fg.withValues(alpha: 0.18),
-                    borderRadius: BorderRadius.circular(PiShape.xs),
+                    borderRadius: BorderRadius.circular(PiShape.sm),
                   ),
                   child: Text('当前', style: AppType.eyebrow(color: fg)),
                 )

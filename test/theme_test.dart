@@ -236,15 +236,15 @@ void main() {
           .x;
       expect(radiusOf(theme.cardTheme.shape), PiShape.lg);
       expect(radiusOf(theme.cardTheme.shape), lessThanOrEqualTo(16));
-      expect(radiusOf(theme.dialogTheme.shape), PiShape.xl);
+      expect(radiusOf(theme.dialogTheme.shape), PiShape.lg);
       expect(PiShape.lg, lessThanOrEqualTo(16));
-      expect(PiShape.xxl, lessThanOrEqualTo(24));
+      expect(PiShape.lg, lessThanOrEqualTo(24));
       // 单调递增
-      expect(PiShape.xs, lessThan(PiShape.sm));
+      expect(PiShape.sm, lessThan(PiShape.sm));
       expect(PiShape.sm, lessThan(PiShape.md));
       expect(PiShape.md, lessThan(PiShape.lg));
-      expect(PiShape.lg, lessThan(PiShape.xl));
-      expect(PiShape.xl, lessThan(PiShape.xxl));
+      expect(PiShape.lg, lessThan(PiShape.lg));
+      expect(PiShape.lg, lessThan(PiShape.lg));
     });
 
     test('底部导航是同色通栏,浅色不用黑、深色抬升一档', () {

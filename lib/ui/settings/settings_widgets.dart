@@ -374,7 +374,7 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
             DropdownButtonFormField<String>(
               initialValue: currentLevel,
               decoration: const InputDecoration(
-                labelText: '思考档位',
+                labelText: '思考深度',
                 prefixIcon: Icon(Icons.psychology_outlined),
               ),
               items: [
@@ -394,7 +394,7 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('自动压缩上下文'),
-              subtitle: const Text('上下文接近上限时自动 compact'),
+              subtitle: const Text('上下文快满时自动压缩'),
               value: piState.autoCompactionEnabled,
               onChanged: source?.isHeadless == true
                   ? (v) => notifier.setAutoCompaction(v)

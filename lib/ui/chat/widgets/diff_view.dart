@@ -164,7 +164,7 @@ class DiffView extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: piColors.codeWellBg,
-        borderRadius: BorderRadius.circular(PiShape.md),
+        borderRadius: BorderRadius.circular(PiShape.sm),
         border: Border.all(color: piColors.codeWellBorder),
       ),
       child: body,

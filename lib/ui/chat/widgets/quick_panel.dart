@@ -7,6 +7,7 @@ import '../../../state/settings_provider.dart';
 import '../../common/tool_avatar.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
+import '../../theme/squircle.dart';
 
 /// 输入条上方的快捷面板:
 /// - 输入以 `/` 开头 → 过滤后的斜杠命令列表(点按补全)
@@ -68,8 +69,8 @@ class _QuickPanelState extends ConsumerState<QuickPanel> {
         child: Material(
           color: theme.colorScheme.surfaceContainerHighest,
           elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(PiShape.lg),
+          shape: SquircleBorder(
+            borderRadius: BorderRadius.circular(PiShape.md),
             side: BorderSide(color: colors.outlineVariant),
           ),
           clipBehavior: Clip.antiAlias,

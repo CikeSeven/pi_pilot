@@ -6,6 +6,7 @@ import 'palette.dart';
 import 'semantic_colors.dart';
 import 'shapes.dart';
 import 'typography.dart';
+import 'squircle.dart';
 
 ThemeData buildLightTheme([AppAccent accent = AppAccent.terracotta]) => _build(
   PiPalette.lightScheme(accent),
@@ -22,7 +23,9 @@ ThemeData buildDarkTheme([AppAccent accent = AppAccent.terracotta]) => _build(
 /// Editorial Retro 主题。
 ///
 /// 三条铁律,贯穿所有组件默认样式:
-/// 1. **零阴影**。全 app 没有一处 elevation > 0(除 scrim 类必须的浮层),
+/// 1. **微阴影**。卡片/对话框/弹层/输入条 elevation = 1(极淡浮起感),
+///    不是 M3 默认的 6(太重),也不是零(卡片会融进背景)。浮层和内容区用
+///    同一套描边语言,阴影只是辅助层次。
 ///    层次由「纸的深浅 + 1px 描边」承担。设计规范原话:
 ///    「卡片不需要太多阴影」「更像印刷排版」。
 /// 2. **细描边**。卡片、井、chip、按钮一律 1px outlineVariant 描边。
@@ -77,7 +80,8 @@ ThemeData _build(
     // 纸卡:ivory 面 + 1px 描边 + 零阴影。
     cardTheme: CardThemeData(
       color: scheme.surfaceContainerLow,
-      elevation: 0,
+      // 微浮起:替代纯零阴影,让卡片与背景有层次区分。
+      elevation: 1,
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       shape: PiShape.outlinedCard(border),
@@ -118,7 +122,7 @@ ThemeData _build(
         minimumSize: const Size(64, 50),
         padding: const EdgeInsets.symmetric(horizontal: 26),
         elevation: 0,
-        shape: RoundedRectangleBorder(
+        shape: SquircleBorder(
           borderRadius: BorderRadius.circular(PiShape.md),
         ),
         textStyle: const TextStyle(
@@ -134,7 +138,7 @@ ThemeData _build(
         minimumSize: const Size(64, 50),
         padding: const EdgeInsets.symmetric(horizontal: 22),
         side: BorderSide(color: scheme.outline),
-        shape: RoundedRectangleBorder(
+        shape: SquircleBorder(
           borderRadius: BorderRadius.circular(PiShape.md),
         ),
         textStyle: const TextStyle(
@@ -148,7 +152,7 @@ ThemeData _build(
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
         minimumSize: const Size(48, 42),
-        shape: RoundedRectangleBorder(
+        shape: SquircleBorder(
           borderRadius: BorderRadius.circular(PiShape.sm),
         ),
       ),
@@ -160,7 +164,7 @@ ThemeData _build(
 
     // chip:编辑式标签,方正 + 描边。
     chipTheme: ChipThemeData(
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.sm),
       ),
       side: BorderSide(color: border),
@@ -180,7 +184,7 @@ ThemeData _build(
         selectedForegroundColor: scheme.onPrimaryContainer,
         side: BorderSide(color: scheme.outline),
         minimumSize: const Size(0, 46),
-        shape: RoundedRectangleBorder(
+        shape: SquircleBorder(
           borderRadius: BorderRadius.circular(PiShape.sm),
         ),
       ),
@@ -190,7 +194,7 @@ ThemeData _build(
       elevation: const WidgetStatePropertyAll(0),
       backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHigh),
       shape: WidgetStatePropertyAll(
-        RoundedRectangleBorder(
+        SquircleBorder(
           borderRadius: BorderRadius.circular(PiShape.md),
           side: BorderSide(color: border),
         ),
@@ -221,11 +225,12 @@ ThemeData _build(
     ),
 
     // 浮层:允许极轻阴影(需要和底纸分离),但形状和描边保持一致。
+    // 对话框:微阴影,从纸面浮起(替代纯零阴影)。
     dialogTheme: DialogThemeData(
-      elevation: 0,
+      elevation: 1,
       backgroundColor: scheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(PiShape.xl),
+      shape: SquircleBorder(
+        borderRadius: BorderRadius.circular(PiShape.lg),
         side: BorderSide(color: border),
       ),
       titleTextStyle: AppType.serif(
@@ -238,10 +243,11 @@ ThemeData _build(
       ),
     ),
 
+    // 底部弹层:微阴影,浮在 scrim 之上。
     bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: scheme.surfaceContainerLow,
       modalBackgroundColor: scheme.surfaceContainerLow,
-      elevation: 0,
+      elevation: 1,
       modalElevation: 0,
       dragHandleColor: scheme.onSurfaceVariant.withValues(alpha: 0.35),
       dragHandleSize: const Size(36, 4),
@@ -257,7 +263,7 @@ ThemeData _build(
       contentTextStyle: TextStyle(color: scheme.onInverseSurface, fontSize: 14),
       actionTextColor: scheme.inversePrimary,
       insetPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.sm),
       ),
     ),
@@ -274,7 +280,7 @@ ThemeData _build(
     popupMenuTheme: PopupMenuThemeData(
       color: scheme.surfaceContainerLow,
       elevation: 0,
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.md),
         side: BorderSide(color: border),
       ),
@@ -285,7 +291,7 @@ ThemeData _build(
         backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerLow),
         elevation: const WidgetStatePropertyAll(0),
         shape: WidgetStatePropertyAll(
-          RoundedRectangleBorder(
+          SquircleBorder(
             borderRadius: BorderRadius.circular(PiShape.md),
             side: BorderSide(color: border),
           ),
@@ -306,7 +312,7 @@ ThemeData _build(
       selectedTileColor: scheme.primaryContainer,
       minVerticalPadding: 13,
       contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.md),
       ),
     ),
@@ -318,7 +324,7 @@ ThemeData _build(
       highlightElevation: 0,
       backgroundColor: scheme.primary,
       foregroundColor: scheme.onPrimary,
-      shape: RoundedRectangleBorder(
+      shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.md),
       ),
     ),
@@ -330,10 +336,10 @@ ThemeData _build(
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       width: 330,
-      shape: const RoundedRectangleBorder(
+      shape: const SquircleBorder(
         // 抽屉从左侧滑出:右侧上方圆角(开口的纸角),右下方直角(贴屏底不悬空)。
         borderRadius: BorderRadius.only(
-          topRight: Radius.circular(PiShape.xxl),
+          topRight: Radius.circular(PiShape.lg),
         ),
       ),
     ),
@@ -341,7 +347,7 @@ ThemeData _build(
     navigationDrawerTheme: NavigationDrawerThemeData(
       backgroundColor: scheme.surfaceContainerLow,
       indicatorColor: scheme.primaryContainer,
-      indicatorShape: RoundedRectangleBorder(
+      indicatorShape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.sm),
       ),
       tileHeight: 54,
@@ -359,7 +365,7 @@ ThemeData _build(
       // 顶部细描边:代替悬浮圆角条的「边界」,通栏不漏底。
       surfaceTintColor: Colors.transparent,
       indicatorColor: scheme.primaryContainer,
-      indicatorShape: RoundedRectangleBorder(
+      indicatorShape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.sm),
       ),
       elevation: 0,
@@ -396,7 +402,7 @@ ThemeData _build(
     tooltipTheme: TooltipThemeData(
       decoration: BoxDecoration(
         color: scheme.inverseSurface,
-        borderRadius: BorderRadius.circular(PiShape.xs),
+        borderRadius: BorderRadius.circular(PiShape.sm),
       ),
       textStyle: TextStyle(color: scheme.onInverseSurface, fontSize: 12),
       waitDuration: const Duration(milliseconds: 400),

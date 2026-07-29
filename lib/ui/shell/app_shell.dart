@@ -1,33 +1,21 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../chat/chat_body.dart';
-import '../chat/widgets/chat_app_bar.dart';
+import '../chat/widgets/island_bar.dart';
 import '../sessions/devices_page.dart';
 import '../settings/settings_screen.dart';
 import '../theme/motion.dart';
 import '../theme/paper.dart';
 import 'liquid_nav_bar.dart';
-import 'swipe_to_open_drawer.dart';
 
-/// 应用外壳:**三页常驻 + 同步横向滑动 + 水滴底栏**。
+/// 应用外壳:**PageView 左右滑动切页 + 导航栏跟随弹出**。
 ///
-/// ## 为什么从右往左会卡(旧版的 bug)
+/// 用 Flutter 原生 `PageView` 替代手写手势 —— 它自带跟手、回弹、
+/// 手势竞争处理,是最可靠的方案。三页用 `AutomaticKeepAliveClientMixin`
+/// 保活,切页不丢状态。
 ///
-/// 旧版非动画态只保留当前页,其他页从树中移除。于是切走再切回时,目标页
-/// 要**重新构建**。"从右往左"通常切回最重的会话页(长列表+输入框+滚动状态),
-/// 重建就卡;"从左往右"切向较轻页面,感觉丝滑 —— 其实是页面重量差异,
-/// 不是方向差异。
-///
-/// ## 正解:三页常驻,只移动位置
-///
-/// 三页在 `initState` 一次性构建、常驻一个 `Stack`,切换时**只改位置**,
-/// 不构建也不销毁。所有页面状态(滚动、输入、窗口)始终保留,切回去零开销。
-///
-/// 位置由一个浮点 `display` 决定:动画时从 `oldIndex` 连续插值到 `index`,
-/// 每页的偏移 = `(i - display)` 屏宽。三页用**同一个 display**,
-/// 物理上不可能不同步 —— 这是丝滑的根本保证。双向对称,不再有方向差异。
+/// 导航栏在 PageView 滚动时显示(指示器跟着滚动位置),停止时淡出收起。
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
 
@@ -35,122 +23,131 @@ class AppShell extends ConsumerStatefulWidget {
   ConsumerState<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends ConsumerState<AppShell>
-    with TickerProviderStateMixin {
-  int _index = 0;
-  int _oldIndex = 0;
-  AnimationController? _controller;
+class _AppShellState extends ConsumerState<AppShell> {
+  // 会话是主页面,放中间:往左滑到设备(窗口),往右滑到设置。
+  final _pageController = PageController(initialPage: 1);
+  int _index = 1;
 
-  /// 三页常驻引用:只构建一次,之后切换只移动它们,绝不重建。
-  /// 这是双向丝滑的关键 —— 切回去时滚动位置/输入内容/窗口大小都不丢。
   static const _keys = [
+    GlobalObjectKey('tab-settings'),
     GlobalObjectKey('tab-chat'),
     GlobalObjectKey('tab-devices'),
-    GlobalObjectKey('tab-settings'),
   ];
-
-  late final List<Widget> _pages;
 
   static const _tabs = [
-    NavTabSpec(
-      icon: Icons.forum_outlined,
-      selectedIcon: Icons.forum,
-      label: '会话',
-    ),
-    NavTabSpec(
-      icon: Icons.devices_outlined,
-      selectedIcon: Icons.devices,
-      label: '设备',
-    ),
-    NavTabSpec(
-      icon: Icons.settings_outlined,
-      selectedIcon: Icons.settings,
-      label: '设置',
-    ),
+    NavTabSpec(icon: Icons.settings_outlined, selectedIcon: Icons.settings, label: '设置'),
+    NavTabSpec(icon: Icons.forum_outlined, selectedIcon: Icons.forum, label: '会话'),
+    NavTabSpec(icon: Icons.devices_outlined, selectedIcon: Icons.devices, label: '设备'),
   ];
-
-  @override
-  void initState() {
-    super.initState();
-    // 一次性构建三页,常驻整个 app 生命周期。
-    _pages = [
-      _ChatTab(key: _keys[0]),
-      DevicesPage(key: _keys[1]),
-      SettingsScreen(key: _keys[2]),
-    ];
-  }
-
-  void _switchTo(int i) {
-    if (i == _index) return;
-    // 切换中途又点新的:跳到上一个动画的终点,再开新动画。
-    _controller?.stop();
-    setState(() {
-      _oldIndex = _index;
-      _index = i;
-    });
-    _controller = AnimationController(
-      vsync: this,
-      duration: PiMotion.standard,
-    )..addListener(() => setState(() {}));
-    _controller!.forward().then((_) {
-      _controller?.dispose();
-      _controller = null;
-      if (mounted) setState(() {});
-    });
-  }
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _pageController.dispose();
     super.dispose();
+  }
+
+  void _onTabTap(int i) {
+    if (i == _index) return;
+    _pageController.animateToPage(
+      i,
+      duration: PiMotion.standard,
+      curve: Curves.easeOutCubic,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final ctrl = _controller;
-    final isAnimating = ctrl != null && ctrl.isAnimating;
-    // display:当前「连续」位置。静止时 = _index;动画时从 _oldIndex 插值到 _index。
-    final display = isAnimating
-        ? _oldIndex + (_index - _oldIndex) * _easeOutCubic(ctrl.value)
-        : _index.toDouble();
+    final scheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? scheme.surfaceContainerHigh : scheme.surfaceContainerLow;
 
     return Scaffold(
-      extendBodyBehindAppBar: true,
+      extendBody: true,
       body: BackdropPaper(
-        // 背景常驻,切换时这层完全不动。
         child: Stack(
           fit: StackFit.expand,
-          // 裁掉移出屏幕的页面,不让它们画到背景层上。
-          clipBehavior: Clip.hardEdge,
           children: [
-            // 三页全部常驻,每页只随 display 移动。
-            // offset = (i - display):当前页 ≈ 0(居中),左侧页 <0(屏外左),
-            // 右侧页 >0(屏外右)。三页偏移之差始终是整数屏宽,
-            // 永不重叠 → 不会出现「两页同时叠在一起」。
-            for (var i = 0; i < _pages.length; i++)
-              Positioned.fill(
-                child: FractionalTranslation(
-                  translation: Offset(i - display, 0),
-                  child: _pages[i],
+            // ── 三页(PageView 自带左右滑动,跟手、回弹) ──
+            PageView(
+              controller: _pageController,
+              onPageChanged: (i) => setState(() => _index = i),
+              children: [
+                _KeepAlivePage(key: _keys[0], child: const SettingsScreen()),
+                _KeepAlivePage(key: _keys[1], child: const _ChatTab()),
+                _KeepAlivePage(key: _keys[2], child: const DevicesPage()),
+              ],
+            ),
+            // ── 导航栏(PageView 滚动时显示,指示器跟着滚动位置) ──
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: AnimatedBuilder(
+                  animation: _pageController,
+                  builder: (context, _) {
+                    final page = _pageController.hasClients
+                        ? (_pageController.page ?? 0.0)
+                        : 0.0;
+                    // 滚动中显示,停止时隐藏
+                    final isScrolling = _pageController.hasClients &&
+                        _pageController.position.isScrollingNotifier.value;
+                    final opacity = isScrolling ? 1.0 : 0.0;
+                    return AnimatedOpacity(
+                      opacity: opacity,
+                      duration: const Duration(milliseconds: 200),
+                      child: IgnorePointer(
+                        ignoring: opacity < 0.5,
+                        child: Container(
+                          color: bg,
+                          child: LiquidNavBar(
+                            selectedIndex: _index,
+                            tabs: _tabs,
+                            onTap: _onTabTap,
+                            // 滚动时传浮点位置,指示器跟着滚动;
+                            // 停止时传 null,走内部水滴动画。
+                            position: isScrolling ? page : null,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
+            ),
           ],
         ),
-      ),
-      bottomNavigationBar: LiquidNavBar(
-        selectedIndex: _index,
-        tabs: _tabs,
-        onTap: _switchTo,
       ),
     );
   }
 }
 
-/// 会话 tab:顶栏 + 消息流。
-///
-/// 不带自己的背景 —— 背景由外层 [AppShell] 的 BackdropPaper 统一提供。
+/// 保活包装:让 PageView 的每一页在切走时不被销毁。
+class _KeepAlivePage extends StatefulWidget {
+  const _KeepAlivePage({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<_KeepAlivePage> createState() => _KeepAlivePageState();
+}
+
+class _KeepAlivePageState extends State<_KeepAlivePage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
+/// 会话 tab:灵动岛 + 消息流。
 class _ChatTab extends StatefulWidget {
-  const _ChatTab({super.key});
+  const _ChatTab();
 
   @override
   State<_ChatTab> createState() => _ChatTabState();
@@ -158,6 +155,7 @@ class _ChatTab extends StatefulWidget {
 
 class _ChatTabState extends State<_ChatTab> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _islandKey = GlobalKey<DynamicIslandBarState>();
   bool _drawerOpen = false;
 
   @override
@@ -171,27 +169,39 @@ class _ChatTabState extends State<_ChatTab> {
       child: Scaffold(
         key: _scaffoldKey,
         backgroundColor: Colors.transparent,
+        extendBodyBehindAppBar: true,
         drawer: const DevicesDrawer(),
+        // 左边缘 60px 内滑动开抽屉。其他区域让 PageView 处理横向手势。
+        drawerEdgeDragWidth: 60,
         onDrawerChanged: (isOpen) {
           if (!isOpen) FocusManager.instance.primaryFocus?.unfocus();
           if (isOpen != _drawerOpen) setState(() => _drawerOpen = isOpen);
         },
-        appBar: const ChatAppBar(),
-        // 右滑开抽屉。挂在 body 外面而不是放大 drawerEdgeDragWidth ——
-        // 那个检测器叠在 body 之上,加宽会抢掉聊天页里代码块/diff/芯片行的
-        // 横向滚动。详见 SwipeToOpenDrawer 的注释。
-        body: SwipeToOpenDrawer(
-          enabled: !_drawerOpen,
-          onOpen: () => _scaffoldKey.currentState?.openDrawer(),
-          child: const ChatBody(),
+        // 无常驻 AppBar —— 灵动岛浮在内容上,内容区全屏,
+        // 顶部渐变遮罩让滚上去的内容渐隐,岛只占自己那一小块。
+        body: NotificationListener<ScrollNotification>(
+          // 滚动列表时自动收起灵动岛(iOS 标准行为)。
+          onNotification: (n) {
+            if (n is ScrollStartNotification) {
+              _islandKey.currentState?.collapse();
+            }
+            return false;
+          },
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ChatBody(
+                topPadding: MediaQuery.paddingOf(context).top + 52,
+              ),
+              // 灵动岛:平时小胶囊,点击展开成完整信息卡。
+              DynamicIslandBar(
+                key: _islandKey,
+                onOpenDrawer: () => _scaffoldKey.currentState?.openDrawer(),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
-}
-
-/// ease-out 三次曲线:快进慢出。手动插值用(controller 的 Curve 通道喂不进来)。
-double _easeOutCubic(double t) {
-  final v = 1 - math.pow(1 - t, 3);
-  return v.toDouble();
 }

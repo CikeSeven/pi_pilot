@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../state/pi_session.dart';
 import '../../theme/motion.dart';
 import '../../theme/paper.dart';
+import '../../theme/squircle.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
 import 'markdown_body.dart';
@@ -74,7 +75,8 @@ class AssistantBubble extends ConsumerWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 14),
+      // 左右 10 + ListView padding 4 = 总边距 14(收窄,更紧凑)。
+      padding: const EdgeInsets.fromLTRB(10, 12, 10, 14),
       child: GestureDetector(
         onLongPress: item.text.isEmpty
             ? null
@@ -91,18 +93,24 @@ class AssistantBubble extends ConsumerWidget {
               const SizedBox(height: 8),
             ],
             // 正文纸卡:描边 + 奶油面 + 零阴影
-            Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: colors.surfaceContainerLow,
-                borderRadius: BorderRadius.circular(PiShape.lg),
-                border: Border.all(color: colors.outlineVariant),
+            // 用 Material + SquircleBorder 统一圆角语言(替代 BoxDecoration 的普通圆角)。
+            // 加微阴影让卡片从背景浮起,增加层次感。
+            Material(
+              color: colors.surfaceContainerLow,
+              shape: SquircleBorder(
+                borderRadius: BorderRadius.circular(PiShape.md),
+                side: BorderSide(color: colors.outlineVariant),
+                smoothing: PiShape.smoothing,
               ),
-              padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-              child: AnimatedSwitcher(
-                duration: PiMotion.quick,
-                switchInCurve: PiMotion.enter,
-                child: KeyedSubtree(key: ValueKey(streaming), child: body),
+              elevation: 1,
+              clipBehavior: Clip.antiAlias,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                child: AnimatedSwitcher(
+                  duration: PiMotion.quick,
+                  switchInCurve: PiMotion.enter,
+                  child: KeyedSubtree(key: ValueKey(streaming), child: body),
+                ),
               ),
             ),
             if (item.isErrored) const _AssistantErrorBadge(),

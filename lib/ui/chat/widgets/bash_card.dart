@@ -68,7 +68,7 @@ class BashCard extends ConsumerWidget {
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: piColors.codeWellBg,
-                borderRadius: BorderRadius.circular(PiShape.md),
+                borderRadius: BorderRadius.circular(PiShape.sm),
                 border: Border.all(color: piColors.codeWellBorder),
               ),
               child: SingleChildScrollView(

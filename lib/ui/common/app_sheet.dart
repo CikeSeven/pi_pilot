@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'sheet_navigator.dart';
 import 'tokens.dart';
+import '../theme/squircle.dart';
 
 /// 统一 iOS 风底部弹窗入口:顶部大圆角与拖把手来自 bottomSheetTheme,
 /// 这里补充弹出动效与可选固定高度。
@@ -116,8 +117,8 @@ class SheetGroup extends StatelessWidget {
           Material(
             color: theme.colorScheme.surfaceContainerHigh,
             clipBehavior: Clip.antiAlias,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(PiShape.xl),
+            shape: SquircleBorder(
+              borderRadius: BorderRadius.circular(PiShape.lg),
             ),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),

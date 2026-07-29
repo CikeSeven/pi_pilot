@@ -32,7 +32,7 @@ class PiMarkdown extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
           decoration: BoxDecoration(
             color: piColors.codeWellBg,
-            borderRadius: BorderRadius.circular(PiShape.xs),
+            borderRadius: BorderRadius.circular(PiShape.sm),
             border: Border.all(color: piColors.codeWellBorder),
           ),
           child: Text(

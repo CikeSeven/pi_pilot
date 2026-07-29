@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/shapes.dart';
+import '../../theme/squircle.dart';
 
 /// 所有消息共用的卡片外壳。
 ///
@@ -156,16 +157,21 @@ class MessageCard extends StatelessWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: maxContentWidth),
         child: Card(
-          // 对称边距 —— 不再是 left56 / right20 那种一边倒的观感
-          margin: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
+          // 左右边距 10 + ListView padding 4 = 总边距 14,
+          // 和 assistant_bubble / user_bubble 对齐,三种卡片宽度统一。
+          margin: const EdgeInsets.symmetric(vertical: 7, horizontal: 10),
           color: color,
-          elevation: elevation,
+          // 微阴影(elevation 1):不是零也不是 M3 默认的 6。
+          // 用户反馈「简陋、没层次感」-- 纯零阴影让卡片融进背景,
+          // 加一点点浮起感,层次立刻出来了,又不失克制。
+          elevation: elevation > 0 ? elevation : 1,
           // 显式描边:color 被调用方覆盖时(工具卡类别色)仍要有骨架线
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(PiShape.lg),
+          shape: SquircleBorder(
+            borderRadius: BorderRadius.circular(PiShape.md),
             side: BorderSide(
               color: Theme.of(context).colorScheme.outlineVariant,
             ),
+            smoothing: PiShape.smoothing,
           ),
           child: onTap == null && onLongPress == null
               ? body
@@ -191,11 +197,12 @@ class MessageNotice extends StatelessWidget {
         child: Card(
           margin: EdgeInsets.zero,
           color: color,
-          shape: RoundedRectangleBorder(
+          shape: SquircleBorder(
             borderRadius: BorderRadius.circular(PiShape.md),
             side: BorderSide(
               color: Theme.of(context).colorScheme.outlineVariant,
             ),
+            smoothing: PiShape.smoothing,
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),

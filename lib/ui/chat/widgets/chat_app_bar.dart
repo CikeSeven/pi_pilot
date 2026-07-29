@@ -92,6 +92,13 @@ class ChatAppBar extends ConsumerWidget implements PreferredSizeWidget {
 
     return AppBar(
       toolbarHeight: _height,
+      // 状态栏也统一底色:不再透出背景图的模糊,和 AppBar 一整块。
+      systemOverlayStyle: SystemUiOverlayStyle(
+        statusBarColor: colors.surface,
+        statusBarIconBrightness: theme.brightness == Brightness.dark
+            ? Brightness.light
+            : Brightness.dark,
+      ),
       // 顶栏就是纸本身 —— 与内容同底,靠字标和底部细线分隔。
       backgroundColor: colors.surface,
       foregroundColor: colors.onSurface,

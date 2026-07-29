@@ -220,7 +220,7 @@ class _CodeBlockState extends State<CodeBlock> {
       margin: const EdgeInsets.symmetric(vertical: 6),
       decoration: BoxDecoration(
         color: piColors.codeWellBg,
-        borderRadius: BorderRadius.circular(PiShape.md),
+        borderRadius: BorderRadius.circular(PiShape.sm),
         border: Border.all(color: piColors.codeWellBorder),
       ),
       child: Column(

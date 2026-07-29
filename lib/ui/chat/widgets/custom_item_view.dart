@@ -221,7 +221,7 @@ class _SummaryItemViewState extends State<SummaryItemView> {
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 color: colors.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(PiShape.lg),
+                borderRadius: BorderRadius.circular(PiShape.md),
               ),
               child: SelectableText(
                 widget.item.summary,

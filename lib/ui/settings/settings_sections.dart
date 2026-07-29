@@ -222,7 +222,7 @@ class NotificationsPage extends ConsumerWidget {
                 SwitchListTile(
                   secondary: const Icon(Icons.notifications_outlined),
                   title: const Text('后台通知'),
-                  subtitle: const Text('任务完成、扩展等待输入时提醒'),
+                  subtitle: const Text('任务完成或等待输入时提醒'),
                   value: settings.notificationsEnabled,
                   onChanged: (value) => ref
                       .read(settingsProvider.notifier)
@@ -357,9 +357,7 @@ class AboutPage extends StatelessWidget {
                 const ListTile(
                   leading: Icon(Icons.hub_outlined),
                   title: Text('连接方式'),
-                  subtitle: Text(
-                    'App → Source Hub → desktop TUI / headless RPC',
-                  ),
+                  subtitle: Text('手机通过 bridge 连接电脑上的 pi'),
                 ),
                 const Divider(height: 1),
                 ListTile(
