@@ -50,6 +50,7 @@ object BridgeWatcher {
         val sourceId: String,
         val vibrate: Boolean,
         val clientId: String,
+        val sessionName: String,
     )
 
     private var config: Config? = null
@@ -78,9 +79,10 @@ object BridgeWatcher {
         sourceId: String,
         vibrate: Boolean,
         clientId: String,
+        sessionName: String,
     ) {
         appContext = context.applicationContext
-        val next = Config(host, port, token, sourceId, vibrate, clientId)
+        val next = Config(host, port, token, sourceId, vibrate, clientId, sessionName)
         if (running && config == next && socket != null) {
             Log.i(tag, "already watching source=$sourceId")
             return
@@ -220,10 +222,13 @@ object BridgeWatcher {
             Notification.Builder(context)
         }
         val id = ++notificationId
+        val name = config?.sessionName.orEmpty()
+        // 与 Dart 侧 _notifyTaskComplete 同一格式:「<会话名> 已完成 / 点击查看结果」
+        val title = if (name.isNotEmpty()) "$name 已完成" else "PiPilot 任务完成"
         val notification = builder
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("pi 任务完成")
-            .setContentText("点击回到 PiPilot 查看结果")
+            .setContentTitle(title)
+            .setContentText("点击查看结果")
             .setContentIntent(pendingIntent)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setPriority(Notification.PRIORITY_MAX)

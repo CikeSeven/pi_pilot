@@ -225,6 +225,7 @@ class NotificationService {
     required String token,
     required String sourceId,
     required bool vibrate,
+    String? sessionName,
   }) async {
     await init();
     if (!_initialized || !_permissionGranted) return false;
@@ -236,6 +237,7 @@ class NotificationService {
         'sourceId': sourceId,
         'vibrate': vibrate,
         'clientId': _watcherClientId,
+        'sessionName': sessionName ?? '',
       });
       await logDiagnostic('watcher started: source=$sourceId');
       return true;

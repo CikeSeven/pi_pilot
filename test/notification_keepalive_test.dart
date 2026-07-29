@@ -59,4 +59,15 @@ void main() {
       expect(counts, (connected: 2, working: 0));
     });
   });
+  group('taskCompletionTitle', () {
+    test('带会话名:<会话名> 已完成', () {
+      expect(taskCompletionTitle('PiPilot'), 'PiPilot 已完成');
+    });
+
+    test('没有会话名时退成通用标题', () {
+      expect(taskCompletionTitle(null), 'PiPilot 任务完成');
+      expect(taskCompletionTitle(''), 'PiPilot 任务完成');
+      expect(taskCompletionTitle('  '), 'PiPilot 任务完成');
+    });
+  });
 }

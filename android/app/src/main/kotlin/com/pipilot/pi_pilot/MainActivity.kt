@@ -56,6 +56,7 @@ class MainActivity : FlutterActivity() {
                                 sourceId = sourceId,
                                 vibrate = call.argument<Boolean>("vibrate") ?: false,
                                 clientId = clientId,
+                                sessionName = call.argument<String>("sessionName").orEmpty(),
                             )
                             result.success(null)
                         }

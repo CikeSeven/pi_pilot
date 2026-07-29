@@ -7,6 +7,13 @@ import '../core/notification_service.dart';
 import 'pi_session.dart';
 import 'settings_provider.dart';
 
+/// 任务完成通知的标题:「<会话名> 已完成」。会话名取不到时退成通用标题。
+@visibleForTesting
+String taskCompletionTitle(String? sessionName) {
+  final name = sessionName?.trim();
+  return name != null && name.isNotEmpty ? '$name 已完成' : 'PiPilot 任务完成';
+}
+
 /// 常驻通知要展示的会话计数:已连接(dormant 不算)与正在工作中的会话数。
 /// sessions 还没就绪(空列表)时返回 null —— 不推状态,原生保留上一份文案。
 /// 断开源上残留的 streaming 标记不算工作中。
@@ -122,6 +129,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       token: settings.token,
       sourceId: sourceId,
       vibrate: settings.notificationVibrationEnabled,
+      sessionName: _selectedSessionName(),
     );
     if (mounted) _watcherActive = started;
   }
@@ -179,6 +187,17 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     );
   }
 
+  /// 当前选中会话的显示名(会话名 > 目录名 > id 前 8 位),供完成通知标题
+  /// 和原生 watcher 使用。sessions 里没有这个源时退到 pi 自己的会话名。
+  String? _selectedSessionName() {
+    final session = ref.read(piSessionProvider);
+    return session.sessions
+            .where((s) => s.sourceId == session.selectedSourceId)
+            .firstOrNull
+            ?.displayName ??
+        session.sessionName;
+  }
+
   /// 任务完成:isStreaming true -> false。后台实时通知;或前台兜底(完成发生在
   /// 后台期间,进程被杀后回前台才补收到)。
   void _notifyTaskComplete() {
@@ -190,16 +209,12 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     if (!shouldNotify) return;
     // 原生观察连接已接管后台通知,这里再发就是重复
     if (_watcherActive) return;
-    final items = ref.read(piSessionProvider).items;
-    final lastAssistant = items.reversed.whereType<AssistantItem>().firstOrNull;
-    var snippet = lastAssistant?.text ?? '';
-    if (snippet.length > 120) snippet = '${snippet.substring(0, 120)}…';
     final id = ++_notificationId;
     unawaited(
       NotificationService.instance.show(
         id: id,
-        title: 'pi 任务完成',
-        body: snippet.isEmpty ? null : snippet,
+        title: taskCompletionTitle(_selectedSessionName()),
+        body: '点击查看结果',
         vibrate: _vibrate,
       ),
     );
@@ -237,7 +252,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     ) {
       if (prev == null || next <= prev) return;
       final name = ref.read(piSessionProvider).backgroundFinishName;
-      _notify('${name ?? "另一个会话"} 已完成');
+      _notify('${name ?? "另一个会话"} 已完成', '点击查看结果');
     });
 
     // 扩展等待输入
