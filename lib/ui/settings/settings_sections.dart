@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/notification_service.dart';
+import '../../core/p2p_signaling.dart';
 import '../../core/pi_connection.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
@@ -27,6 +28,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
   final _host = TextEditingController();
   final _port = TextEditingController(text: '9377');
   final _token = TextEditingController();
+  final _p2pKey = GlobalKey<_P2pCardState>();
   bool _obscure = true;
   bool _filled = false;
 
@@ -62,6 +64,8 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
     _host.text = parsed.host;
     if (parsed.port != null) _port.text = '${parsed.port}';
     final port = int.tryParse(_port.text.trim()) ?? 9377;
+    final p2pSaved = await _p2pKey.currentState?.save(showNotice: false);
+    if (p2pSaved == false) return;
     await ref
         .read(settingsProvider.notifier)
         .setConnection(
@@ -146,7 +150,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
             ),
           ),
           const SizedBox(height: 12),
-          const _P2pCard(),
+          _P2pCard(key: _p2pKey),
           const SizedBox(height: 12),
           const HubSourceCard(),
         ],
@@ -156,9 +160,9 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
 }
 
 /// 远程打洞(P2P)配置卡:开关 + 信令服地址/设备名/配对密钥。
-/// 与直连卡一样的显式保存模式——按保存前只改本地状态。
+/// 卡内按钮可单独保存;页面的“保存并连接”也会一起持久化这些字段。
 class _P2pCard extends ConsumerStatefulWidget {
-  const _P2pCard();
+  const _P2pCard({super.key});
 
   @override
   ConsumerState<_P2pCard> createState() => _P2pCardState();
@@ -189,20 +193,30 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
     _secret.text = settings.p2pSecret;
   }
 
-  Future<void> _save() async {
+  Future<bool> save({bool showNotice = true}) async {
+    final rendezvous = _rendezvous.text.trim();
+    if (_enabled && !isAllowedP2pSignalingUrl(rendezvous)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('公网信令必须使用 wss://,ws:// 仅限本机测试')),
+        );
+      }
+      return false;
+    }
     await ref
         .read(settingsProvider.notifier)
         .setP2pConfig(
           enabled: _enabled,
-          rendezvous: _rendezvous.text.trim(),
+          rendezvous: rendezvous,
           deviceId: _deviceId.text.trim(),
           secret: _secret.text.trim(),
         );
-    if (mounted) {
+    if (showNotice && mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('打洞配置已保存,下次连接生效')));
     }
+    return true;
   }
 
   @override
@@ -232,8 +246,8 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
             ),
             const SizedBox(height: 8),
             Text(
-              '出门在外直连失败时,自动经信令服打洞连家里电脑。'
-              '需要家里电脑的 bridge 开着、信令服可达。后台通知暂不支持 P2P。',
+              '公网信令必须使用 WSS;直连失败时优先尝试打洞,困难网络自动使用 TURN 中继。'
+              'DataChannel 内容由 DTLS 加密,后台通知暂不支持 P2P。',
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 16),
@@ -241,7 +255,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               controller: _rendezvous,
               decoration: const InputDecoration(
                 labelText: '信令服地址',
-                hintText: 'ws://服务器地址:9378',
+                hintText: 'wss://signal.example.com',
                 prefixIcon: Icon(Icons.hub_outlined),
               ),
             ),
@@ -275,7 +289,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
             ),
             const SizedBox(height: 16),
             FilledButton.tonalIcon(
-              onPressed: _save,
+              onPressed: () => save(),
               icon: const Icon(Icons.save_outlined),
               label: const Text('保存打洞配置'),
             ),

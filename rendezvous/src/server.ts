@@ -34,10 +34,37 @@ export function sha256Hex(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
+export interface ClientIceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
+export function buildClientIceServers(
+  config: RendezvousConfig,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+  credentialId = crypto.randomBytes(6).toString("hex"),
+): ClientIceServer[] {
+  const servers: ClientIceServer[] = [];
+  if (config.stunUrls && config.stunUrls.length > 0) {
+    servers.push({ urls: [...config.stunUrls] });
+  }
+  if (config.turn) {
+    const username = `${nowSeconds + config.turn.ttlSeconds}:pipilot:${credentialId}`;
+    const credential = crypto
+      .createHmac("sha1", config.turn.secret)
+      .update(username)
+      .digest("base64");
+    servers.push({ urls: [...config.turn.urls], username, credential });
+  }
+  return servers;
+}
+
 /**
  * 信令服:按 deviceId 分房间,一个 host(桌面 bridge)加多个 guest(手机)。
  * 只转发 signal 帧(SDP/ICE 候选),不解析、不落地;配对密钥用
  * sha256(nonce:secret) 挑战-应答校验,明文密钥永不上行。
+ * TURN 凭据只在挑战通过后签发,会话数据仍由 DTLS 端到端加密。
  */
 export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
   const rooms = new Map<string, Room>();
@@ -121,7 +148,8 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
       client.role = role;
       client.deviceId = deviceId;
       client.authed = true;
-      send(client, { type: "ok" });
+      console.log(`[rdv] host 注册: ${deviceId}`);
+      send(client, { type: "ok", iceServers: buildClientIceServers(config) });
       return;
     }
     if (!room.host) {
@@ -134,7 +162,12 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
     client.authed = true;
     client.peerId = peerId;
     room.guests.set(peerId, client);
-    send(client, { type: "ok", peerId });
+    console.log(`[rdv] guest 注册: ${deviceId} peer=${peerId}`);
+    send(client, {
+      type: "ok",
+      peerId,
+      iceServers: buildClientIceServers(config),
+    });
     send(room.host, { type: "peer_joined", peerId });
   }
 
@@ -142,12 +175,22 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
     if (!client.authed || !client.deviceId) return;
     const room = rooms.get(client.deviceId);
     if (!room) return;
+    const kind =
+      typeof (msg.data as Record<string, unknown> | undefined)?.kind === "string"
+        ? ((msg.data as Record<string, unknown>).kind as string)
+        : "?";
     if (client.role === "guest") {
-      if (room.host) send(room.host, { type: "signal", from: client.peerId, data: msg.data });
+      if (room.host) {
+        console.log(`[rdv] 转发 ${client.peerId} → host: ${kind}`);
+        send(room.host, { type: "signal", from: client.peerId, data: msg.data });
+      }
     } else {
       const peerId = typeof msg.peerId === "string" ? msg.peerId : "";
       const guest = room.guests.get(peerId);
-      if (guest) send(guest, { type: "signal", data: msg.data });
+      if (guest) {
+        console.log(`[rdv] 转发 host → ${peerId}: ${kind}`);
+        send(guest, { type: "signal", data: msg.data });
+      }
     }
   }
 
@@ -160,7 +203,7 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
       helloTimer: setTimeout(() => ws.close(4002, "hello timeout"), HELLO_TIMEOUT_MS),
     };
     clients.add(client);
-    send(client, { type: "welcome", nonce: client.nonce });
+    send(client, { type: "welcome", nonce: client.nonce, stunUrls: config.stunUrls ?? [] });
     ws.on("pong", () => {
       client.alive = true;
     });

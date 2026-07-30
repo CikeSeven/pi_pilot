@@ -1,8 +1,9 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:pi_pilot/core/p2p_connector.dart';
 import 'package:pi_pilot/core/p2p_signaling.dart';
 import 'package:pi_pilot/core/settings_repository.dart';
 import 'package:pi_pilot/state/settings_provider.dart';
@@ -53,12 +54,233 @@ void main() {
     });
   });
 
+  group('信令地址安全', () {
+    test('公网必须 wss,ws 只允许回环地址', () {
+      expect(isAllowedP2pSignalingUrl('wss://signal.example.com/p2p'), isTrue);
+      expect(isAllowedP2pSignalingUrl('ws://127.0.0.1:9378'), isTrue);
+      expect(isAllowedP2pSignalingUrl('ws://127.20.30.40:9378'), isTrue);
+      expect(isAllowedP2pSignalingUrl('ws://localhost:9378'), isTrue);
+      expect(isAllowedP2pSignalingUrl('ws://[::1]:9378'), isTrue);
+      expect(isAllowedP2pSignalingUrl('ws://192.168.1.20:9378'), isFalse);
+      expect(isAllowedP2pSignalingUrl('ws://signal.example.com:9378'), isFalse);
+      expect(isAllowedP2pSignalingUrl('https://signal.example.com'), isFalse);
+      expect(
+        isAllowedP2pSignalingUrl('wss://user:pass@signal.example.com'),
+        isFalse,
+      );
+    });
+
+    test('GuestSignaling 在联网前拒绝公网明文地址', () async {
+      expect(
+        await GuestSignaling.connect(
+          url: 'ws://signal.example.com:9378',
+          deviceId: 'dev1',
+          secret: 's',
+        ),
+        isNull,
+      );
+    });
+  });
+
+  group('ICE 尝试模式', () {
+    final servers = <Map<String, dynamic>>[
+      <String, dynamic>{
+        'urls': <String>['stun:one.example:3478'],
+      },
+      <String, dynamic>{
+        'urls': <String>['turn:relay.example:3479?transport=udp'],
+        'username': 'temporary-user',
+        'credential': 'temporary-credential',
+      },
+    ];
+
+    test('纯 DataChannel offer 显式关闭音视频接收段', () {
+      expect(p2pDataChannelOfferConstraints, <String, dynamic>{
+        'mandatory': <String, dynamic>{
+          'OfferToReceiveAudio': false,
+          'OfferToReceiveVideo': false,
+        },
+        'optional': <dynamic>[],
+      });
+    });
+
+    test('直连只用 STUN,relay 只用带凭据 TURN', () {
+      expect(
+        p2pIceServersForMode(servers, P2pIceMode.direct),
+        <Map<String, dynamic>>[
+          <String, dynamic>{
+            'urls': <String>['stun:one.example:3478'],
+          },
+        ],
+      );
+      expect(
+        p2pIceServersForMode(servers, P2pIceMode.relay),
+        <Map<String, dynamic>>[
+          <String, dynamic>{
+            'urls': <String>['turn:relay.example:3479?transport=udp'],
+            'username': 'temporary-user',
+            'credential': 'temporary-credential',
+          },
+        ],
+      );
+    });
+
+    test('只有 TURN URL 才启用第二阶段 relay', () {
+      expect(p2pHasTurn(servers), isTrue);
+      expect(
+        p2pHasTurn(<Map<String, dynamic>>[
+          <String, dynamic>{
+            'urls': <String>['stun:one.example:3478'],
+          },
+        ]),
+        isFalse,
+      );
+    });
+
+    test('answer 前到达的 candidate 会保序缓存并在之后直接应用', () async {
+      final applied = <int>[];
+      final buffer = P2pCandidateBuffer<int>();
+      Future<void> apply(int value) async => applied.add(value);
+
+      await buffer.add(1, apply);
+      await buffer.add(2, apply);
+      expect(applied, isEmpty);
+
+      await buffer.flush(apply);
+      expect(applied, <int>[1, 2]);
+
+      await buffer.add(3, apply);
+      expect(applied, <int>[1, 2, 3]);
+    });
+
+    test('本地 candidate 会等 offer 发出后再按顺序放行', () {
+      final sent = <String>[];
+      final gate = P2pSignalGate<String>();
+
+      gate.add('candidate-1', sent.add);
+      gate.add('candidate-2', sent.add);
+      expect(sent, isEmpty);
+
+      sent.add('offer');
+      gate.open(sent.add);
+      gate.add('candidate-3', sent.add);
+      expect(sent, <String>[
+        'offer',
+        'candidate-1',
+        'candidate-2',
+        'candidate-3',
+      ]);
+    });
+
+    test('远端 DataChannel 关闭会幂等释放订阅、PeerConnection 与信令', () async {
+      final released = <String>[];
+      Future<void> mark(String name) async => released.add(name);
+      final lifecycle = P2pChannelLifecycle(
+        closeStream: () => mark('stream'),
+        cancelSignalingSubscription: () => mark('subscription'),
+        closeDataChannel: () => mark('data-channel'),
+        closePeerConnection: () => mark('peer-connection'),
+        closeSignaling: () => mark('signaling'),
+      );
+
+      await lifecycle.onDataChannelState(
+        RTCDataChannelState.RTCDataChannelClosed,
+      );
+      expect(released, <String>[
+        'stream',
+        'subscription',
+        'peer-connection',
+        'signaling',
+      ]);
+
+      await lifecycle.close();
+      expect(released, <String>[
+        'stream',
+        'subscription',
+        'peer-connection',
+        'signaling',
+      ]);
+    });
+
+    test('PeerConnection 创建失败会报告错误并释放已认证信令', () async {
+      final events = <String>[];
+      final resource = await acquireP2pResource<int>(
+        acquire: () async {
+          events.add('create');
+          throw StateError('native peer creation failed');
+        },
+        reportError: (error) async {
+          expect(error, isA<StateError>());
+          events.add('report');
+        },
+        releaseOwner: () async => events.add('release-signaling'),
+      );
+
+      expect(resource, isNull);
+      expect(events, <String>['create', 'report', 'release-signaling']);
+    });
+
+    test('直连失败后才启动独立 relay 尝试', () async {
+      final attempts = <String>[];
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: true,
+        direct: () async {
+          attempts.add('direct');
+          return null;
+        },
+        relay: () async {
+          attempts.add('relay');
+          return 'relay-channel';
+        },
+      );
+
+      expect(channel, 'relay-channel');
+      expect(attempts, <String>['direct', 'relay']);
+    });
+
+    test('直连成功时不创建 relay 尝试', () async {
+      final attempts = <String>[];
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: true,
+        direct: () async {
+          attempts.add('direct');
+          return 'direct-channel';
+        },
+        relay: () async {
+          attempts.add('relay');
+          return 'relay-channel';
+        },
+      );
+
+      expect(channel, 'direct-channel');
+      expect(attempts, <String>['direct']);
+    });
+
+    test('回传的 WebRTC 错误去换行且限制长度', () {
+      final message = p2pErrorForWire('first\nsecond${'x' * 600}');
+      expect(message, isNot(contains('\n')));
+      expect(message.length, 500);
+      expect(message, startsWith('first second'));
+    });
+  });
+
   group('GuestSignaling', () {
     test('握手:welcome→hello(挑战应答)→ok,信令双向转发', () async {
       final server = FakeRendezvous();
       final url = await server.start();
       server.onConnect = (ws) {
-        ws.add(jsonEncode({'type': 'welcome', 'nonce': 'abc123'}));
+        ws.add(
+          jsonEncode({
+            'type': 'welcome',
+            'nonce': 'abc123',
+            'stunUrls': [
+              'stun:stun.example.test:3478',
+              'turn:relay.example.test:3478',
+              42,
+              'stun:stun.example.test:3478',
+            ],
+          }),
+        );
       };
       server.onFrame = (ws, frame) {
         if (frame['type'] == 'hello') {
@@ -67,7 +289,24 @@ void main() {
           expect(frame['response'], pairingResponse('abc123', 's3cret'));
           // 密钥本身绝不出现在线上帧里
           expect(jsonEncode(frame).contains('s3cret'), isFalse);
-          ws.add(jsonEncode({'type': 'ok', 'peerId': 'p1'}));
+          ws.add(
+            jsonEncode({
+              'type': 'ok',
+              'peerId': 'p1',
+              'iceServers': [
+                {
+                  'urls': ['stun:stun.example.test:3478'],
+                },
+                {
+                  'urls': 'turn:relay.example.test:3478?transport=udp',
+                  'username': 'temporary-user',
+                  'credential': 'temporary-credential',
+                },
+                {'urls': 'turn:missing-credentials.example.test:3478'},
+                {'urls': 'https://invalid.example.test'},
+              ],
+            }),
+          );
         }
       };
 
@@ -78,6 +317,17 @@ void main() {
       );
       expect(signaling, isNotNull);
       expect(signaling!.peerId, 'p1');
+      expect(signaling.stunUrls, ['stun:stun.example.test:3478']);
+      expect(signaling.iceServers, [
+        {
+          'urls': ['stun:stun.example.test:3478'],
+        },
+        {
+          'urls': ['turn:relay.example.test:3478?transport=udp'],
+          'username': 'temporary-user',
+          'credential': 'temporary-credential',
+        },
+      ]);
 
       // guest → host
       signaling.sendSignal({'kind': 'offer', 'sdp': 'v=0'});
@@ -144,13 +394,13 @@ void main() {
       final repo = SettingsRepository();
       await repo.saveP2pConfig(
         enabled: true,
-        rendezvous: 'ws://example.com:9378',
+        rendezvous: 'wss://signal.example.com',
         deviceId: 'home-desktop',
         secret: 'pairing-secret',
       );
       final data = await repo.load();
       expect(data.p2pEnabled, isTrue);
-      expect(data.p2pRendezvous, 'ws://example.com:9378');
+      expect(data.p2pRendezvous, 'wss://signal.example.com');
       expect(data.p2pDeviceId, 'home-desktop');
       expect(data.p2pSecret, 'pairing-secret');
     });
@@ -162,7 +412,7 @@ void main() {
         settings
             .copyWith(
               p2pEnabled: true,
-              p2pRendezvous: 'ws://example.com:9378',
+              p2pRendezvous: 'wss://signal.example.com',
               p2pDeviceId: 'home-desktop',
               p2pSecret: 's',
             )
@@ -174,7 +424,7 @@ void main() {
         settings
             .copyWith(
               p2pEnabled: true,
-              p2pRendezvous: 'ws://example.com:9378',
+              p2pRendezvous: 'wss://signal.example.com',
               p2pDeviceId: 'home-desktop',
             )
             .hasP2p,

@@ -9,6 +9,89 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 String pairingResponse(String nonce, String secret) =>
     sha256.convert(utf8.encode('$nonce:$secret')).toString();
 
+bool _isLoopbackHost(String host) {
+  final normalized = host.toLowerCase();
+  if (normalized == 'localhost' || normalized == '::1') return true;
+  final octets = normalized.split('.').map(int.tryParse).toList();
+  return octets.length == 4 &&
+      octets.first == 127 &&
+      octets.every((part) => part != null && part >= 0 && part <= 255);
+}
+
+/// 公网信令必须由 TLS 认证;明文 ws 只允许本机测试。
+bool isAllowedP2pSignalingUrl(String value) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null || uri.host.isEmpty || uri.userInfo.isNotEmpty) return false;
+  if (uri.scheme == 'wss') return true;
+  return uri.scheme == 'ws' && _isLoopbackHost(uri.host);
+}
+
+List<String> _normalizeStunUrls(Object? value) {
+  if (value is! List) return const [];
+  final urls = <String>[];
+  final seen = <String>{};
+  for (final item in value) {
+    if (item is! String) continue;
+    final url = item.trim();
+    if (!url.startsWith('stun:') || url.length > 512 || !seen.add(url)) {
+      continue;
+    }
+    urls.add(url);
+    if (urls.length == 4) break;
+  }
+  return List.unmodifiable(urls);
+}
+
+List<Map<String, dynamic>> _normalizeIceServers(Object? value) {
+  if (value is! List) return const [];
+  final servers = <Map<String, dynamic>>[];
+  for (final item in value) {
+    if (item is! Map) continue;
+    final rawUrls = item['urls'];
+    final candidates = rawUrls is String
+        ? <Object?>[rawUrls]
+        : rawUrls is List
+        ? rawUrls
+        : const <Object?>[];
+    final urls = <String>[];
+    final seen = <String>{};
+    for (final candidate in candidates) {
+      if (candidate is! String) continue;
+      final url = candidate.trim();
+      if (url.length > 512 ||
+          (!url.startsWith('stun:') &&
+              !url.startsWith('turn:') &&
+              !url.startsWith('turns:')) ||
+          !seen.add(url)) {
+        continue;
+      }
+      urls.add(url);
+      if (urls.length == 8) break;
+    }
+    if (urls.isEmpty) continue;
+    final hasTurn = urls.any(
+      (url) => url.startsWith('turn:') || url.startsWith('turns:'),
+    );
+    final username = item['username'];
+    final credential = item['credential'];
+    if (hasTurn &&
+        (username is! String ||
+            username.isEmpty ||
+            credential is! String ||
+            credential.isEmpty)) {
+      continue;
+    }
+    servers.add(<String, dynamic>{
+      'urls': List<String>.unmodifiable(urls),
+      if (username is String && username.isNotEmpty) 'username': username,
+      if (credential is String && credential.isNotEmpty)
+        'credential': credential,
+    });
+    if (servers.length == 4) break;
+  }
+  return List<Map<String, dynamic>>.unmodifiable(servers);
+}
+
 /// 信令服 guest(手机)端会话:只负责信令收发——offer/answer/candidate
 /// 以 Map 形式进出,由调用方喂给 PeerConnection;本类不感知 WebRTC,
 /// 因此可以完全脱离原生层单测。
@@ -21,6 +104,12 @@ class GuestSignaling {
 
   /// 信令服分配的 guest id(ok 帧带回)。
   String? peerId;
+
+  /// 信令服下发的 STUN 地址,供旧版信令服兼容。
+  List<String> stunUrls = const [];
+
+  /// 配对通过后下发的 ICE 配置;TURN 凭据是短期值。
+  List<Map<String, dynamic>> iceServers = const [];
 
   bool _closed = false;
 
@@ -36,6 +125,7 @@ class GuestSignaling {
     required String secret,
     Duration timeout = const Duration(seconds: 10),
   }) async {
+    if (!isAllowedP2pSignalingUrl(url)) return null;
     final WebSocketChannel channel;
     try {
       channel = WebSocketChannel.connect(Uri.parse(url));
@@ -64,6 +154,12 @@ class GuestSignaling {
         }
         switch (frame['type']) {
           case 'welcome':
+            stunUrls = _normalizeStunUrls(frame['stunUrls']);
+            iceServers = stunUrls.isEmpty
+                ? const []
+                : <Map<String, dynamic>>[
+                    <String, dynamic>{'urls': stunUrls},
+                  ];
             _channel.sink.add(
               jsonEncode(<String, dynamic>{
                 'type': 'hello',
@@ -76,6 +172,12 @@ class GuestSignaling {
               }),
             );
           case 'ok':
+            final authenticatedServers = _normalizeIceServers(
+              frame['iceServers'],
+            );
+            if (authenticatedServers.isNotEmpty) {
+              iceServers = authenticatedServers;
+            }
             peerId = frame['peerId'] as String?;
             if (!completer.isCompleted) completer.complete(true);
           case 'error':

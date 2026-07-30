@@ -6,6 +6,13 @@ import path from "node:path";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { RTCPeerConnection, type RTCDataChannel } from "werift";
+import {
+  iceServersForMode,
+  isAllowedP2pSignalingUrl,
+  normalizeIceServers,
+  P2pHost,
+  turnCredentialRefreshDelay,
+} from "../src/p2p_host.js";
 
 type Frame = Record<string, any>;
 
@@ -16,6 +23,7 @@ class MiniRendezvous {
   readonly wss: WebSocketServer;
   host?: WebSocket;
   readonly guests = new Map<string, WebSocket>();
+  readonly guestSignals: Frame[] = [];
 
   constructor(
     readonly deviceId: string,
@@ -59,6 +67,7 @@ class MiniRendezvous {
         }
         if (msg.type === "signal") {
           if (role === "guest") {
+            this.guestSignals.push(msg.data as Frame);
             this.host?.send(JSON.stringify({ type: "signal", from: myPeerId, data: msg.data }));
           } else {
             this.guests.get(msg.peerId as string)?.send(
@@ -111,6 +120,8 @@ class GuestPeer {
   readonly channel: RTCDataChannel;
   readonly messages: string[] = [];
   private readonly wsFrames: Frame[] = [];
+  private readonly heldCandidates: Frame[] = [];
+  private holdCandidates = false;
 
   private constructor(private readonly ws: WebSocket) {
     // 帧收集必须在 open 之前挂上:rendezvous 连接瞬间就发 welcome,
@@ -130,7 +141,7 @@ class GuestPeer {
     this.channel.onMessage.subscribe((data) => this.messages.push(String(data)));
     this.pc.onIceCandidate.subscribe((candidate) => {
       if (!candidate) return;
-      this.sendSignal({
+      const signal = {
         kind: "candidate",
         candidate: {
           candidate: candidate.candidate,
@@ -138,7 +149,9 @@ class GuestPeer {
           sdpMLineIndex: candidate.sdpMLineIndex,
           usernameFragment: candidate.usernameFragment,
         },
-      });
+      };
+      if (this.holdCandidates) this.heldCandidates.push(signal);
+      else this.sendSignal(signal);
     });
   }
 
@@ -176,14 +189,39 @@ class GuestPeer {
     this.ws.send(JSON.stringify({ type: "signal", data }));
   }
 
-  async offer(): Promise<void> {
+  async offer(
+    options: { stripEmbeddedCandidates?: boolean; candidateBeforeOffer?: boolean } = {},
+  ): Promise<void> {
+    this.holdCandidates = options.candidateBeforeOffer === true;
     const offer = await this.pc.createOffer();
     // setLocalDescription 是 async:不 await 的话 localDescription 还没就位,
     // 且后续拒绝会变成 unhandled rejection(werift API 语义由探针确认)。
     await this.pc.setLocalDescription(offer);
     const local = this.pc.localDescription;
     assert.ok(local);
-    this.sendSignal({ kind: "offer", sdp: local.sdp });
+    const sdp = options.stripEmbeddedCandidates
+      ? local.sdp
+          .split(/\r?\n/)
+          .filter(
+            (line) =>
+              !line.startsWith("a=candidate:") && line !== "a=end-of-candidates",
+          )
+          .join("\r\n")
+      : local.sdp;
+    if (options.candidateBeforeOffer) {
+      const started = Date.now();
+      while (this.heldCandidates.length === 0) {
+        if (Date.now() - started > 2_000) {
+          throw new Error("guest did not gather an early ICE candidate");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      for (const candidate of this.heldCandidates) this.sendSignal(candidate);
+      this.heldCandidates.length = 0;
+    }
+    this.sendSignal({ kind: "offer", sdp });
+    this.holdCandidates = false;
   }
 
   async waitChannelOpen(timeoutMs = 10_000): Promise<void> {
@@ -213,6 +251,10 @@ class GuestPeer {
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+  }
+
+  async closeDataChannelOnly(): Promise<void> {
+    this.channel.close();
   }
 
   async close(): Promise<void> {
@@ -252,6 +294,154 @@ function onceExit(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
+test("P2P 公网信令必须使用 wss,ws 只允许回环地址", () => {
+  assert.equal(isAllowedP2pSignalingUrl("wss://signal.example.com/p2p"), true);
+  assert.equal(isAllowedP2pSignalingUrl("ws://127.0.0.1:9378"), true);
+  assert.equal(isAllowedP2pSignalingUrl("ws://127.99.1.2:9378"), true);
+  assert.equal(isAllowedP2pSignalingUrl("ws://localhost:9378"), true);
+  assert.equal(isAllowedP2pSignalingUrl("ws://[::1]:9378"), true);
+  assert.equal(isAllowedP2pSignalingUrl("ws://192.168.1.20:9378"), false);
+  assert.equal(isAllowedP2pSignalingUrl("ws://signal.example.com:9378"), false);
+  assert.equal(isAllowedP2pSignalingUrl("https://signal.example.com"), false);
+  assert.equal(isAllowedP2pSignalingUrl("wss://user:pass@signal.example.com"), false);
+});
+
+test("ICE 服务器只接受 STUN 或带凭据 TURN", () => {
+  assert.deepEqual(
+    normalizeIceServers([
+      { urls: ["stun:one.example:3478", "https://invalid"] },
+      {
+        urls: "turn:relay.example:3478?transport=udp",
+        username: "temporary-user",
+        credential: "temporary-credential",
+      },
+      { urls: "turn:missing-credentials.example:3478" },
+      42,
+    ]),
+    [
+      { urls: ["stun:one.example:3478"] },
+      {
+        urls: ["turn:relay.example:3478?transport=udp"],
+        username: "temporary-user",
+        credential: "temporary-credential",
+      },
+    ],
+  );
+});
+
+test("直连与 relay 使用互斥的 ICE 服务器集合", () => {
+  const servers = normalizeIceServers([
+    { urls: ["stun:one.example:3478"] },
+    {
+      urls: ["turn:relay.example:3479?transport=udp"],
+      username: "temporary-user",
+      credential: "temporary-credential",
+    },
+  ]);
+
+  assert.deepEqual(iceServersForMode(servers, "direct"), [
+    { urls: ["stun:one.example:3478"] },
+  ]);
+  assert.deepEqual(iceServersForMode(servers, "relay"), [
+    {
+      urls: ["turn:relay.example:3479?transport=udp"],
+      username: "temporary-user",
+      credential: "temporary-credential",
+    },
+  ]);
+  assert.equal(iceServersForMode(servers, "auto"), servers);
+});
+
+test("TURN REST 凭据在过期前一分钟刷新", () => {
+  const nowMs = 1_700_000_000_000;
+  assert.equal(
+    turnCredentialRefreshDelay(
+      [
+        {
+          urls: ["turn:relay.example:3479?transport=udp"],
+          username: "1700000600:pipilot:nonce",
+          credential: "temporary-credential",
+        },
+      ],
+      nowMs,
+    ),
+    540_000,
+  );
+  assert.equal(
+    turnCredentialRefreshDelay(
+      [
+        {
+          urls: ["turn:relay.example:3479?transport=udp"],
+          username: "1700000060:pipilot:short-ttl",
+          credential: "temporary-credential",
+        },
+      ],
+      nowMs,
+    ),
+    45_000,
+  );
+  assert.equal(
+    turnCredentialRefreshDelay(
+      [{ urls: ["stun:one.example:3478"] }],
+      nowMs,
+    ),
+    undefined,
+  );
+  assert.equal(
+    turnCredentialRefreshDelay(
+      [
+        {
+          urls: ["turn:relay.example:3479?transport=udp"],
+          username: "1699999999:pipilot:expired",
+          credential: "temporary-credential",
+        },
+      ],
+      nowMs,
+    ),
+    0,
+  );
+});
+
+test("远端只关闭 DataChannel 时 host 也释放对应 PeerConnection", async () => {
+  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvousUrl = await rendezvous.url();
+  const logs: string[] = [];
+  const host = new P2pHost({
+    rendezvousUrl,
+    deviceId: "test-dev",
+    secret: "s3cret",
+    validateMobileToken: () => true,
+    acceptMobile: () => {},
+    log: (line) => logs.push(line),
+  });
+  host.start();
+  let guest: GuestPeer | undefined;
+
+  try {
+    await rendezvous.waitForHost();
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    await guest.offer();
+    await guest.waitChannelOpen();
+    assert.equal(host.activePeerCount, 1);
+
+    // 信令连接保持打开,避免 peer_left 替 DataChannel close 路径做清理。
+    await guest.closeDataChannelOnly();
+    const started = Date.now();
+    while (!logs.some((line) => line.startsWith("PeerConnection 已关闭("))) {
+      if (Date.now() - started > 5_000) {
+        throw new Error(`host peer was not closed; logs=${JSON.stringify(logs)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(host.activePeerCount, 0);
+    assert.equal(rendezvous.guests.size, 1);
+  } finally {
+    await guest?.close();
+    host.stop();
+    rendezvous.close();
+  }
+});
+
 test("手机经打洞 DataChannel 接入:鉴权、bridge_hello、hub 指令全通", async () => {
   const rendezvous = new MiniRendezvous("test-dev", "s3cret");
   const rendezvousUrl = await rendezvous.url();
@@ -285,7 +475,22 @@ test("手机经打洞 DataChannel 接入:鉴权、bridge_hello、hub 指令全�
   })();
 
   try {
-    await guest.offer();
+    // candidate 故意先于 offer 上行,且从 SDP 中移除内嵌候选;
+    // host 若不缓存 pre-offer candidate,这条连接无法建立。
+    await guest.offer({
+      stripEmbeddedCandidates: true,
+      candidateBeforeOffer: true,
+    });
+    const signalStarted = Date.now();
+    while (!rendezvous.guestSignals.some((frame) => frame.kind === "offer")) {
+      if (Date.now() - signalStarted > 2_000) {
+        throw new Error("rendezvous did not receive the guest offer");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const signalKinds = rendezvous.guestSignals.map((frame) => frame.kind);
+    assert.ok(signalKinds.indexOf("candidate") >= 0);
+    assert.ok(signalKinds.indexOf("candidate") < signalKinds.indexOf("offer"));
     await guest.waitChannelOpen();
 
     // 正确 token:接入后应收到 bridge_hello,随后 hub 指令正常。

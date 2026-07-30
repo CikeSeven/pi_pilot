@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import crypto from "node:crypto";
 import WebSocket from "ws";
-import { createRendezvous, sha256Hex, type RendezvousHandle } from "../src/server.js";
+import { normalizeStunUrls, normalizeTurnConfig } from "../src/config.js";
+import {
+  buildClientIceServers,
+  createRendezvous,
+  sha256Hex,
+  type RendezvousHandle,
+} from "../src/server.js";
 
 interface Running {
   url: string;
@@ -15,6 +21,12 @@ async function startRendezvous(): Promise<Running> {
     port: 0,
     host: "127.0.0.1",
     devices: { dev1: "s3cret-pairing" },
+    stunUrls: ["stun:stun.example.test:3478"],
+    turn: {
+      urls: ["turn:turn.example.test:3478?transport=udp"],
+      secret: "turn-rest-secret-for-tests",
+      ttlSeconds: 600,
+    },
   });
   await once(handle.httpServer.listen(0, "127.0.0.1"), "listening");
   const address = handle.httpServer.address();
@@ -64,12 +76,71 @@ class Peer {
   }
 }
 
+test("STUN 配置只接受 stun:地址并去重限量", () => {
+  assert.deepEqual(
+    normalizeStunUrls([
+      " stun:one.example:3478 ",
+      "turn:relay.example:3478",
+      "stun:one.example:3478",
+      42,
+      "stun:two.example:3478",
+    ]),
+    ["stun:one.example:3478", "stun:two.example:3478"],
+  );
+});
+
+test("TURN 配置严格校验并签发 coturn REST 短期凭据", () => {
+  assert.equal(
+    normalizeTurnConfig({ urls: ["https://invalid"], secret: "long-enough-secret" }),
+    undefined,
+  );
+  const turn = normalizeTurnConfig({
+    urls: [" turn:relay.example:3478?transport=udp ", "turn:relay.example:3478?transport=udp"],
+    secret: "long-enough-secret",
+    ttlSeconds: 10,
+  });
+  assert.deepEqual(turn, {
+    urls: ["turn:relay.example:3478?transport=udp"],
+    secret: "long-enough-secret",
+    ttlSeconds: 60,
+  });
+  const servers = buildClientIceServers(
+    {
+      port: 0,
+      host: "127.0.0.1",
+      devices: {},
+      stunUrls: ["stun:stun.example:3478"],
+      turn: {
+        urls: ["turn:relay.example:3478?transport=udp"],
+        secret: "long-enough-secret",
+        ttlSeconds: 600,
+      },
+    },
+    1_000,
+    "client-id",
+  );
+  assert.deepEqual(servers[0], { urls: ["stun:stun.example:3478"] });
+  assert.equal(servers[1]?.username, "1600:pipilot:client-id");
+  assert.equal(
+    servers[1]?.credential,
+    crypto
+      .createHmac("sha1", "long-enough-secret")
+      .update("1600:pipilot:client-id")
+      .digest("base64"),
+  );
+});
+
 test("host 注册、guest 加入,信令双向转发", async () => {
   const running = await startRendezvous();
   try {
     const host = await Peer.connect(running.url);
     const hostHello = await host.hello("host", "dev1", "s3cret-pairing");
     assert.equal(hostHello.type, "ok");
+    const hostIceServers = hostHello.iceServers as Array<Record<string, unknown>>;
+    assert.deepEqual(hostIceServers[0], { urls: ["stun:stun.example.test:3478"] });
+    assert.deepEqual((hostIceServers[1]?.urls as string[] | undefined)?.[0], "turn:turn.example.test:3478?transport=udp");
+    assert.match(String(hostIceServers[1]?.username), /^\d+:pipilot:[a-f0-9]{12}$/);
+    assert.ok(String(hostIceServers[1]?.credential).length > 0);
 
     const guest = await Peer.connect(running.url);
     const guestHello = await guest.hello("guest", "dev1", "s3cret-pairing");
@@ -157,6 +228,9 @@ test("配对密钥永不上行:抓包视角只有 nonce 和 sha256 应答", asyn
     const peer = await Peer.connect(running.url);
     const welcome = await peer.waitFor((f) => f.type === "welcome");
     assert.ok(typeof welcome.nonce === "string" && (welcome.nonce as string).length >= 16);
+    assert.deepEqual(welcome.stunUrls, ["stun:stun.example.test:3478"]);
+    assert.equal(welcome.iceServers, undefined);
+    assert.ok(!JSON.stringify(welcome).includes("turn-rest-secret-for-tests"));
     // 模拟一次 hello,断言线上只有哈希
     const response = crypto
       .createHash("sha256")

@@ -62,6 +62,32 @@ npm run configure:extension
 
 WebSocket token 可放在 `?token=` 或 `Authorization: Bearer`。比较使用 constant-time equality。
 
+## P2P 信令与 TLS
+
+P2P 的 SDP 包含 DTLS 指纹,因此公网信令必须经过认证的 TLS。App 与 bridge
+会拒绝任何非回环地址的 `ws://`；明文只允许 `localhost`、`127.0.0.0/8` 和
+`[::1]` 做本机测试。公网配置应使用：
+
+```text
+PIPILOT_P2P_RENDEZVOUS=wss://signal.example.com/pipilot
+```
+
+推荐让 `rendezvous/` 只监听回环地址,由 Caddy 或 Nginx 负责证书、WebSocket
+Upgrade 与公网入口。Nginx 最小反代示例：
+
+```nginx
+location /pipilot {
+    proxy_pass http://127.0.0.1:9378;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+}
+```
+
+TURN/STUN 的 UDP 端口不经过上述 HTTP 反代；coturn 继续独立监听自己的公网端口。
+配对密钥、Hub token 与 TURN REST shared secret 都不得写入仓库或反代配置。
+
 ## Source Hub 协议
 
 握手：
