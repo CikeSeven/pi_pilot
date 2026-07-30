@@ -10,6 +10,7 @@ import {
   iceServersForMode,
   isAllowedP2pSignalingUrl,
   normalizeIceServers,
+  normalizeP2pSignalingUrl,
   P2pHost,
   turnCredentialRefreshDelay,
 } from "../src/p2p_host.js";
@@ -294,8 +295,27 @@ function onceExit(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
+test("P2P 裸域名自动补 WSS,显式 scheme 保持原样", () => {
+  assert.equal(
+    normalizeP2pSignalingUrl(" signal.example.com "),
+    "wss://signal.example.com",
+  );
+  assert.equal(
+    normalizeP2pSignalingUrl("signal.example.com:443/pipilot"),
+    "wss://signal.example.com:443/pipilot",
+  );
+  assert.equal(
+    normalizeP2pSignalingUrl("ws://127.0.0.1:9378"),
+    "ws://127.0.0.1:9378",
+  );
+  assert.equal(
+    normalizeP2pSignalingUrl("https://signal.example.com"),
+    "https://signal.example.com",
+  );
+});
+
 test("P2P 公网信令必须使用 wss,ws 只允许回环地址", () => {
-  assert.equal(isAllowedP2pSignalingUrl("wss://signal.example.com/p2p"), true);
+  assert.equal(isAllowedP2pSignalingUrl("signal.example.com/p2p"), true);
   assert.equal(isAllowedP2pSignalingUrl("ws://127.0.0.1:9378"), true);
   assert.equal(isAllowedP2pSignalingUrl("ws://127.99.1.2:9378"), true);
   assert.equal(isAllowedP2pSignalingUrl("ws://localhost:9378"), true);

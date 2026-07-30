@@ -55,8 +55,27 @@ void main() {
   });
 
   group('信令地址安全', () {
+    test('裸域名自动补 WSS,显式 scheme 保持原样', () {
+      expect(
+        normalizeP2pSignalingUrl(' signal.example.com '),
+        'wss://signal.example.com',
+      );
+      expect(
+        normalizeP2pSignalingUrl('signal.example.com:443/pipilot'),
+        'wss://signal.example.com:443/pipilot',
+      );
+      expect(
+        normalizeP2pSignalingUrl('ws://127.0.0.1:9378'),
+        'ws://127.0.0.1:9378',
+      );
+      expect(
+        normalizeP2pSignalingUrl('https://signal.example.com'),
+        'https://signal.example.com',
+      );
+    });
+
     test('公网必须 wss,ws 只允许回环地址', () {
-      expect(isAllowedP2pSignalingUrl('wss://signal.example.com/p2p'), isTrue);
+      expect(isAllowedP2pSignalingUrl('signal.example.com/p2p'), isTrue);
       expect(isAllowedP2pSignalingUrl('ws://127.0.0.1:9378'), isTrue);
       expect(isAllowedP2pSignalingUrl('ws://127.20.30.40:9378'), isTrue);
       expect(isAllowedP2pSignalingUrl('ws://localhost:9378'), isTrue);

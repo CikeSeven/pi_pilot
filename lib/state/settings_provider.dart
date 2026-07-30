@@ -64,7 +64,7 @@ class AppSettings {
   /// v1 只有前台聊天走 P2P;后台通知的原生 watcher 仍是直连-only。
   final bool p2pEnabled;
 
-  /// 信令服地址(ws://host:port;域名+WSS 是后续档位)。
+  /// 信令服地址。裸域名会自动补 wss://;显式 ws:// 只允许回环测试。
   final String p2pRendezvous;
 
   /// 家里电脑在信令服上的设备名。

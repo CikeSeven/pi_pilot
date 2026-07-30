@@ -69,8 +69,11 @@ P2P 的 SDP 包含 DTLS 指纹,因此公网信令必须经过认证的 TLS。App
 `[::1]` 做本机测试。公网配置应使用：
 
 ```text
-PIPILOT_P2P_RENDEZVOUS=wss://signal.example.com/pipilot
+PIPILOT_P2P_RENDEZVOUS=signal.example.com/pipilot
 ```
+
+App 与 bridge 都会给裸域名自动补上 `wss://`；只有本机测试需要显式写
+`ws://127.0.0.1:9378`。
 
 推荐让 `rendezvous/` 只监听回环地址,由 Caddy 或 Nginx 负责证书、WebSocket
 Upgrade 与公网入口。Nginx 最小反代示例：

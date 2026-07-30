@@ -107,7 +107,7 @@ void main() {
     final p2pSwitch = tester.widget<Switch>(find.byType(Switch));
     p2pSwitch.onChanged?.call(true);
     await tester.pump();
-    await tester.enterText(field('信令服地址'), 'wss://relay.example');
+    await tester.enterText(field('信令服地址'), 'relay.example');
     await tester.enterText(field('设备名'), 'home-pc');
     await tester.enterText(field('配对密钥'), 'pairing-secret');
 

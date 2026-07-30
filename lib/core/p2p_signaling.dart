@@ -9,6 +9,18 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 String pairingResponse(String nonce, String secret) =>
     sha256.convert(utf8.encode('$nonce:$secret')).toString();
 
+final _explicitUrlScheme = RegExp(
+  r'^[a-z][a-z0-9+.-]*://',
+  caseSensitive: false,
+);
+
+/// 裸域名默认走 WSS;显式 scheme 保留给后续安全校验。
+String normalizeP2pSignalingUrl(String value) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty || _explicitUrlScheme.hasMatch(trimmed)) return trimmed;
+  return 'wss://$trimmed';
+}
+
 bool _isLoopbackHost(String host) {
   final normalized = host.toLowerCase();
   if (normalized == 'localhost' || normalized == '::1') return true;
@@ -20,7 +32,7 @@ bool _isLoopbackHost(String host) {
 
 /// 公网信令必须由 TLS 认证;明文 ws 只允许本机测试。
 bool isAllowedP2pSignalingUrl(String value) {
-  final uri = Uri.tryParse(value.trim());
+  final uri = Uri.tryParse(normalizeP2pSignalingUrl(value));
   if (uri == null || uri.host.isEmpty || uri.userInfo.isNotEmpty) return false;
   if (uri.scheme == 'wss') return true;
   return uri.scheme == 'ws' && _isLoopbackHost(uri.host);
@@ -125,10 +137,11 @@ class GuestSignaling {
     required String secret,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    if (!isAllowedP2pSignalingUrl(url)) return null;
+    final normalizedUrl = normalizeP2pSignalingUrl(url);
+    if (!isAllowedP2pSignalingUrl(normalizedUrl)) return null;
     final WebSocketChannel channel;
     try {
-      channel = WebSocketChannel.connect(Uri.parse(url));
+      channel = WebSocketChannel.connect(Uri.parse(normalizedUrl));
     } catch (_) {
       return null;
     }

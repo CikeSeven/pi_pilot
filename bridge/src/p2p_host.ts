@@ -2,32 +2,18 @@ import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { RTCPeerConnection, type RTCDataChannel } from "werift";
+import {
+  isAllowedP2pSignalingUrl,
+  normalizeP2pSignalingUrl,
+} from "./p2p_signaling_url.js";
+
+export {
+  isAllowedP2pSignalingUrl,
+  normalizeP2pSignalingUrl,
+} from "./p2p_signaling_url.js";
 
 function sha256Hex(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex");
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (host === "localhost" || host === "::1") return true;
-  const octets = host.split(".").map(Number);
-  return (
-    octets.length === 4 &&
-    octets[0] === 127 &&
-    octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
-  );
-}
-
-/** 公网信令必须由 TLS 认证;明文 ws 只允许本机测试。 */
-export function isAllowedP2pSignalingUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    if (!url.hostname || url.username || url.password) return false;
-    if (url.protocol === "wss:") return true;
-    return url.protocol === "ws:" && isLoopbackHostname(url.hostname);
-  } catch {
-    return false;
-  }
 }
 
 export interface RelayIceServer {
@@ -261,11 +247,14 @@ export class P2pHost {
   private backoffMs = RECONNECT_MIN_MS;
   private nonce?: string;
   private iceServers: RelayIceServer[] = [];
+  private readonly rendezvousUrl: string;
 
-  constructor(private readonly deps: P2pHostDeps) {}
+  constructor(private readonly deps: P2pHostDeps) {
+    this.rendezvousUrl = normalizeP2pSignalingUrl(deps.rendezvousUrl);
+  }
 
   start(): void {
-    if (!isAllowedP2pSignalingUrl(this.deps.rendezvousUrl)) {
+    if (!isAllowedP2pSignalingUrl(this.rendezvousUrl)) {
       this.log("拒绝不安全的 P2P 信令地址:公网必须使用 wss://");
       return;
     }
@@ -291,7 +280,7 @@ export class P2pHost {
 
   private connect(): void {
     if (this.stopped) return;
-    const ws = new WebSocket(this.deps.rendezvousUrl);
+    const ws = new WebSocket(this.rendezvousUrl);
     this.ws = ws;
     ws.on("message", (data) => {
       let msg: Record<string, unknown>;

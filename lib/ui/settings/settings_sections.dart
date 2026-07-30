@@ -194,7 +194,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
   }
 
   Future<bool> save({bool showNotice = true}) async {
-    final rendezvous = _rendezvous.text.trim();
+    final rendezvous = normalizeP2pSignalingUrl(_rendezvous.text);
     if (_enabled && !isAllowedP2pSignalingUrl(rendezvous)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -246,7 +246,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
             ),
             const SizedBox(height: 8),
             Text(
-              '公网信令必须使用 WSS;直连失败时优先尝试打洞,困难网络自动使用 TURN 中继。'
+              '只需填写信令域名,会自动使用 WSS;直连失败时优先尝试打洞,困难网络自动使用 TURN 中继。'
               'DataChannel 内容由 DTLS 加密,后台通知暂不支持 P2P。',
               style: theme.textTheme.bodySmall,
             ),
@@ -255,7 +255,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               controller: _rendezvous,
               decoration: const InputDecoration(
                 labelText: '信令服地址',
-                hintText: 'wss://signal.example.com',
+                hintText: 'signal.example.com',
                 prefixIcon: Icon(Icons.hub_outlined),
               ),
             ),

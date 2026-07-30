@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeP2pSignalingUrl } from "./p2p_signaling_url.js";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BRIDGE_CONFIG_PATH = path.join(bridgeRoot, "config.json");
@@ -172,6 +173,10 @@ export function loadConfig(): BridgeConfig {
     sessionName: str("session-name") ?? "PiPilot",
   };
 
+  const p2pRendezvous = normalizeP2pSignalingUrl(
+    str("p2p-rendezvous") ?? process.env.PIPILOT_P2P_RENDEZVOUS ?? "",
+  );
+
   const dirSessions: Record<string, string> = { ...(file.dirSessions ?? {}) };
   const sessionId =
     str("session-id") ?? dirSessions[piCwd] ?? readLegacySessionId() ?? crypto.randomUUID();
@@ -219,10 +224,10 @@ export function loadConfig(): BridgeConfig {
         process.env.PIPILOT_P2P_ENABLED !== undefined
           ? process.env.PIPILOT_P2P_ENABLED === "true"
           : Boolean(
-              (str("p2p-rendezvous") ?? process.env.PIPILOT_P2P_RENDEZVOUS) &&
+              p2pRendezvous &&
                 (str("p2p-secret") ?? process.env.PIPILOT_P2P_SECRET),
             ),
-      rendezvousUrl: str("p2p-rendezvous") ?? process.env.PIPILOT_P2P_RENDEZVOUS ?? "",
+      rendezvousUrl: p2pRendezvous,
       deviceId: str("p2p-device-id") ?? process.env.PIPILOT_P2P_DEVICE_ID ?? os.hostname(),
       secret: str("p2p-secret") ?? process.env.PIPILOT_P2P_SECRET ?? "",
     },
