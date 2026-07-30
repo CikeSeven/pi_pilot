@@ -134,9 +134,18 @@ function registerHeadlessSource(sourceId: string, spec: SessionSpec): boolean {
 /// 真正的进程等到有人选中(或显式打开)时才拉起。
 registerHeadlessSource(bootstrapSourceId, { sessionId: currentSessionId, cwd: currentCwd });
 
+/// P2P DataChannel 的排队上限:1MB 快照分片后线体积约 1.5MB,慢速 TURN
+/// 链路上大消息分片 + 流式事件合法地超过 WS 的 2MB 上限,放宽到有界 8MB;
+/// 真死掉的链路仍由 30s drain 超时(1011)与 hub 活性检查收尾。
+const MAX_P2P_BUFFERED_SOCKET_BYTES = 8 * 1024 * 1024;
+
 function sendRaw(ws: WebSocket, data: string): boolean {
   if (ws.readyState !== WebSocket.OPEN) return false;
-  if (ws.bufferedAmount > MAX_BUFFERED_SOCKET_BYTES) {
+  const limit =
+    ws instanceof DataChannelSocket
+      ? MAX_P2P_BUFFERED_SOCKET_BYTES
+      : MAX_BUFFERED_SOCKET_BYTES;
+  if (ws.bufferedAmount > limit) {
     ws.close(1013, "client is too slow");
     return false;
   }
@@ -1458,14 +1467,19 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
 async function handleBridgeCommand(client: MobileClient, msg: BridgeMessage): Promise<void> {
   try {
     switch (msg.type) {
-      case "bridge_ping":
-        sendObject(client.ws, {
+      case "bridge_ping": {
+        const pong = JSON.stringify({
           type: "bridge_pong",
           t: Date.now(),
           // echo 原样回传,客户端据此计算 RTT
           ...(msg.echo !== undefined ? { echo: msg.echo } : {}),
         });
+        // P2P 慢链路上 pong 不能排在 MB 级快照分片后面,否则手机 45s
+        // 收不到 pong 会把健康连接误判成半开。
+        if (client.ws instanceof DataChannelSocket) client.ws.sendPriority(pong);
+        else sendRaw(client.ws, pong);
         return;
+      }
 
       case "bridge_list_dirs":
         respond(client.ws, msg, true, { dirs: listDirs(), sessionsRoot: SESSIONS_ROOT });

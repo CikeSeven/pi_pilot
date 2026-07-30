@@ -167,6 +167,14 @@ export class DataChannelSocket extends EventEmitter {
     bytes: number;
     drainAfter: boolean;
   }> = [];
+  /// 顺序无关的小帧(健康 pong):插到大消息剩余分片之前。慢速 TURN 上
+  /// 一条 1.5MB 快照要传几十秒,pong 若按 FIFO 排在后面,手机 45s 收不到
+  /// pong 就会把健康连接误判成半开。分片按 id/index 重组,交错是安全的。
+  private readonly priorityQueue: Array<{
+    frame: string;
+    bytes: number;
+    drainAfter: boolean;
+  }> = [];
   private queuedBytes = 0;
   private pumping = false;
 
@@ -183,6 +191,7 @@ export class DataChannelSocket extends EventEmitter {
       this.closed = true;
       this.decoder.close();
       this.sendQueue.length = 0;
+      this.priorityQueue.length = 0;
       this.queuedBytes = 0;
       this.emit("close", 1000, Buffer.from(""));
     };
@@ -215,7 +224,12 @@ export class DataChannelSocket extends EventEmitter {
       const frames = this.chunkingEnabled ? encodeP2pFrames(data) : [data];
       // 小帧保留原来的即时发送路径,避免把流式事件限速到每次 SACK 一条。
       // 大帧正在发送时,后来的小帧进入同一队列并排在整条大消息之后。
-      if (frames.length === 1 && !this.pumping && this.sendQueue.length === 0) {
+      if (
+        frames.length === 1 &&
+        !this.pumping &&
+        this.sendQueue.length === 0 &&
+        this.priorityQueue.length === 0
+      ) {
         this.channel.send(frames[0]!);
         return;
       }
@@ -232,12 +246,25 @@ export class DataChannelSocket extends EventEmitter {
     }
   }
 
+  /** 顺序无关的小帧(目前只有 bridge_pong)走优先队列,插到剩余分片之前。 */
+  sendPriority(data: string): void {
+    if (this.closed || this.channel.readyState !== "open") return;
+    try {
+      const bytes = Buffer.byteLength(data);
+      this.priorityQueue.push({ frame: data, bytes, drainAfter: false });
+      this.queuedBytes += bytes;
+      void this.pumpSendQueue();
+    } catch {
+      this.shutdown(1011, "p2p send failed");
+    }
+  }
+
   private async pumpSendQueue(): Promise<void> {
     if (this.pumping || this.closed) return;
     this.pumping = true;
     try {
       while (!this.closed && this.channel.readyState === "open") {
-        const next = this.sendQueue.shift();
+        const next = this.priorityQueue.shift() ?? this.sendQueue.shift();
         if (!next) break;
         this.queuedBytes = Math.max(0, this.queuedBytes - next.bytes);
         // 前面可能是一批即时小帧;开始下一条大消息前先等它们排空。
@@ -251,7 +278,12 @@ export class DataChannelSocket extends EventEmitter {
       this.shutdown(1011, "p2p send failed");
     } finally {
       this.pumping = false;
-      if (!this.closed && this.sendQueue.length > 0) void this.pumpSendQueue();
+      if (
+        !this.closed &&
+        (this.sendQueue.length > 0 || this.priorityQueue.length > 0)
+      ) {
+        void this.pumpSendQueue();
+      }
     }
   }
 
@@ -293,6 +325,7 @@ export class DataChannelSocket extends EventEmitter {
     this.closed = true;
     this.decoder.close();
     this.sendQueue.length = 0;
+    this.priorityQueue.length = 0;
     this.queuedBytes = 0;
     try {
       this.channel.close();
@@ -315,6 +348,8 @@ interface SignalData {
 
 interface P2pPeerSession {
   pc: RTCPeerConnection;
+  /** DataChannel 是否已建立。已建链的连接不再依赖信令,peer_left 不杀。 */
+  channelOpen: boolean;
   close: () => Promise<void>;
 }
 
@@ -434,7 +469,17 @@ export class P2pHost {
         const peerId = typeof msg.peerId === "string" ? msg.peerId : "";
         this.pendingCandidatesByPeer.delete(peerId);
         const peer = this.peers.get(peerId);
-        if (peer) void peer.close();
+        if (peer) {
+          if (peer.channelOpen) {
+            // 已建链的 DataChannel 不经过信令服:信令断 ≠ 媒体断。
+            // 手机的信令 WS 在运营商/VPN 路径上很脆,不能让它株连健康连接;
+            // 真死掉的媒体由 ICE 活性检测自行收尾。
+            this.log(`信令服通知 peer 离开(${peerId}),已建链连接保留`);
+          } else {
+            this.log(`信令服通知 peer 离开(${peerId}),建链未完成,关闭`);
+            void peer.close();
+          }
+        }
         return;
       }
       default:
@@ -527,6 +572,7 @@ export class P2pHost {
     let closePromise: Promise<void> | undefined;
     const peer: P2pPeerSession = {
       pc,
+      channelOpen: false,
       close: () => {
         if (closePromise) return closePromise;
         if (this.peers.get(peerId) === peer) this.peers.delete(peerId);
@@ -566,8 +612,12 @@ export class P2pHost {
     channel: RTCDataChannel,
   ): void {
     this.log(`DataChannel 已开(${peerId})`);
+    peer.channelOpen = true;
     const socket = new DataChannelSocket(channel);
-    const authTimer = setTimeout(() => socket.terminate(), AUTH_TIMEOUT_MS);
+    const authTimer = setTimeout(() => {
+      this.log(`P2P 客户端 ${AUTH_TIMEOUT_MS / 1000}s 未鉴权(${peerId})`);
+      socket.terminate();
+    }, AUTH_TIMEOUT_MS);
     authTimer.unref();
     const onFirstMessage = (data: Buffer) => {
       socket.off("message", onFirstMessage);
@@ -599,8 +649,10 @@ export class P2pHost {
       this.deps.acceptMobile(socket.asWebSocket(), typeof msg.clientId === "string" ? msg.clientId : null);
     };
     socket.on("message", onFirstMessage);
-    socket.on("close", () => {
+    socket.on("close", (code: number, reason: Buffer) => {
       clearTimeout(authTimer);
+      const why = reason.length > 0 ? ` ${reason.toString("utf8")}` : "";
+      this.log(`DataChannel 关闭(${peerId}) code=${code}${why}`);
       void peer.close();
     });
   }

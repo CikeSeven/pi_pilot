@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import net from "node:net";
 import path from "node:path";
 import test from "node:test";
@@ -12,6 +13,7 @@ import {
   P2pChunkDecoder,
 } from "../src/p2p_chunking.js";
 import {
+  DataChannelSocket,
   iceServersForMode,
   isAllowedP2pSignalingUrl,
   normalizeIceServers,
@@ -314,6 +316,15 @@ class GuestPeer {
     this.channel.close();
   }
 
+  /// 只关信令 WS(模拟手机信令抖动),DataChannel 保持打开。
+  async closeSignalingOnly(): Promise<void> {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    await new Promise<void>((resolve) => {
+      this.ws.once("close", () => resolve());
+      this.ws.close();
+    });
+  }
+
   async close(): Promise<void> {
     this.chunkDecoder.close();
     this.ws.close();
@@ -549,6 +560,242 @@ test("远端只关闭 DataChannel 时 host 也释放对应 PeerConnection", asyn
     host.stop();
     rendezvous.close();
   }
+});
+
+test("peer_left 不杀已建链的 P2P 连接,通道仍可用", async () => {
+  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvousUrl = await rendezvous.url();
+  const logs: string[] = [];
+  let accepted: WebSocket | undefined;
+  const host = new P2pHost({
+    rendezvousUrl,
+    deviceId: "test-dev",
+    secret: "s3cret",
+    validateMobileToken: () => true,
+    acceptMobile: (socket) => {
+      accepted = socket;
+    },
+    log: (line) => logs.push(line),
+  });
+  host.start();
+  let guest: GuestPeer | undefined;
+  const started = Date.now();
+  const waitFor = async (
+    predicate: () => boolean,
+    what: string,
+    timeoutMs = 8_000,
+  ): Promise<void> => {
+    for (;;) {
+      if (predicate()) return;
+      if (Date.now() - started > timeoutMs) {
+        throw new Error(`${what} timed out; logs=${JSON.stringify(logs)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  try {
+    await rendezvous.waitForHost();
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    await guest.offer();
+    await guest.waitChannelOpen();
+    guest.channel.send(
+      JSON.stringify({ type: "auth", token: "t", clientId: "keep-test" }),
+    );
+    await waitFor(() => accepted !== undefined, "acceptMobile");
+    assert.equal(host.activePeerCount, 1);
+
+    // 手机信令 WS 抖动断开:rendezvous 通知 peer_left,但已建链连接必须保留。
+    await guest.closeSignalingOnly();
+    await waitFor(
+      () =>
+        logs.some(
+          (line) =>
+            line.includes("peer 离开") && line.includes("已建链连接保留"),
+        ),
+      "peer_left 保留日志",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(host.activePeerCount, 1);
+
+    // 信令死了,媒体仍然活着:帧照常送达。
+    const received: string[] = [];
+    accepted!.on("message", (data: Buffer) => received.push(data.toString()));
+    guest.channel.send(JSON.stringify({ type: "bridge_ping", echo: 1 }));
+    await waitFor(() => received.length > 0, "信令断后 DataChannel 收帧");
+    assert.equal(
+      (JSON.parse(received[0]!) as { type?: string }).type,
+      "bridge_ping",
+    );
+  } finally {
+    await guest?.close();
+    host.stop();
+    rendezvous.close();
+  }
+});
+
+test("建链未完成时 peer_left 仍清理对应 PeerConnection", async () => {
+  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvousUrl = await rendezvous.url();
+  const logs: string[] = [];
+  const host = new P2pHost({
+    rendezvousUrl,
+    deviceId: "test-dev",
+    secret: "s3cret",
+    validateMobileToken: () => true,
+    acceptMobile: () => {},
+    log: (line) => logs.push(line),
+  });
+  host.start();
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  let ws: WebSocket | undefined;
+
+  try {
+    await rendezvous.waitForHost();
+    // 手工 guest:发完 offer 不做 answer 处理,DataChannel 永远建不起来。
+    ws = new WebSocket(rendezvousUrl);
+    const wsFrames: Frame[] = [];
+    ws.on("message", (data) => {
+      wsFrames.push(JSON.parse(data.toString()) as Frame);
+    });
+    await new Promise<void>((resolve, reject) => {
+      ws!.once("open", resolve);
+      ws!.once("error", reject);
+    });
+    // 各阶段独立计时:全量并发时握手可能吃掉大部分预算,共享起点会假性超时。
+    const waitFor = async (
+      predicate: () => boolean,
+      what: string,
+      timeoutMs: number,
+    ): Promise<void> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (predicate()) return;
+        if (Date.now() > deadline) {
+          throw new Error(`${what} 超时; logs=${JSON.stringify(logs)}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    const waitFrame = async (type: string): Promise<Frame> => {
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        const index = wsFrames.findIndex((frame) => frame.type === type);
+        if (index >= 0) return wsFrames.splice(index, 1)[0]!;
+        if (Date.now() > deadline) throw new Error(`${type} 超时`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    const welcome = await waitFrame("welcome");
+    ws.send(
+      JSON.stringify({
+        type: "hello",
+        role: "guest",
+        deviceId: "test-dev",
+        response: crypto
+          .createHash("sha256")
+          .update(`${welcome.nonce as string}:s3cret`)
+          .digest("hex"),
+      }),
+    );
+    await waitFrame("ok");
+
+    pc.createDataChannel("hub");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(
+      JSON.stringify({
+        type: "signal",
+        data: { kind: "offer", sdp: pc.localDescription!.sdp },
+      }),
+    );
+    await waitFor(() => host.activePeerCount === 1, "host 创建 peer", 8_000);
+
+    ws.close();
+    await waitFor(() => host.activePeerCount === 0, "peer_left 清理", 8_000);
+    assert.ok(
+      logs.some(
+        (line) =>
+          line.includes("peer 离开") && line.includes("建链未完成"),
+      ),
+    );
+  } finally {
+    ws?.close();
+    await pc.close().catch(() => {});
+    host.stop();
+    rendezvous.close();
+  }
+});
+
+/// 假 DataChannel:记录发出的每一帧,send 后异步排空缓冲,模拟 SCTP。
+class FakeDataChannel extends EventEmitter {
+  readyState = "open";
+  bufferedAmountLowThreshold = 0;
+  onclose?: () => void;
+  readonly sent: string[] = [];
+  private buffered = 0;
+  readonly onMessage = {
+    subscribe: () => ({ unsubscribe: () => {} }),
+  };
+  readonly stateChanged = {
+    subscribe: () => ({ unsubscribe: () => {} }),
+  };
+
+  get bufferedAmount(): number {
+    return this.buffered;
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+    this.buffered = Buffer.byteLength(data);
+    setImmediate(() => {
+      this.buffered = 0;
+    });
+  }
+
+  close(): void {
+    this.readyState = "closed";
+  }
+}
+
+test("DataChannelSocket: 优先帧插到大消息剩余分片之前", async () => {
+  const fake = new FakeDataChannel();
+  const socket = new DataChannelSocket(
+    fake as unknown as ConstructorParameters<typeof DataChannelSocket>[0],
+  );
+  socket.enableChunking();
+  const big = "快照内容".repeat(40_000); // >48KB,必分片
+  const expectedChunks = encodeP2pFrames(big).length;
+  assert.ok(expectedChunks > 2);
+
+  const pong = JSON.stringify({ type: "bridge_pong", echo: 1 });
+  socket.send(big);
+  socket.sendPriority(pong);
+
+  const started = Date.now();
+  for (;;) {
+    if (fake.sent.length === expectedChunks + 1) break;
+    if (Date.now() - started > 5_000) {
+      throw new Error(`pump 未完成,sent=${fake.sent.length}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  // chunk0 由 send(big) 同步发出;随后优先帧插队;其余分片按序跟上。
+  const pongIndex = fake.sent.indexOf(pong);
+  assert.ok(pongIndex > 0, "优先帧不应抢在首片之前(同步首片)");
+  assert.ok(
+    pongIndex < fake.sent.length - 1,
+    "优先帧必须排在最后一片之前,而不是等整条大消息发完",
+  );
+  const chunkFrames = fake.sent.filter((frame) => frame !== pong);
+  const decoder = new P2pChunkDecoder();
+  let decoded: string | undefined;
+  for (const frame of chunkFrames) {
+    decoded = decoder.add(frame) ?? decoded;
+  }
+  assert.equal(decoded, big);
+  decoder.close();
 });
 
 test("手机经打洞 DataChannel 接入:1MB hub_sync 快照分片后完整抵达", async () => {
