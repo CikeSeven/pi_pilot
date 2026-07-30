@@ -23,7 +23,8 @@ import { CommandQueue } from "./command_queue.js";
 import { quiesceSourceForHandoff } from "./source_handoff.js";
 import { PiPool, sourceIdForSession, type SessionSpec } from "./pi_pool.js";
 import { listDirs, listSessions, SESSIONS_ROOT } from "./sessions.js";
-import { P2pHost } from "./p2p_host.js";
+import { DataChannelSocket, P2pHost } from "./p2p_host.js";
+import { P2P_CHUNK_CAPABILITY } from "./p2p_chunking.js";
 import {
   SourceRegistry,
   type SequencedSourceEvent,
@@ -2211,6 +2212,9 @@ function acceptMobileClient(ws: WebSocket, requestedClientId: string | null): vo
       "sessions",
       "concurrent-sessions",
       "navigate-tree",
+      ...(ws instanceof DataChannelSocket && ws.supportsChunking
+        ? [P2P_CHUNK_CAPABILITY]
+        : []),
     ],
   });
 

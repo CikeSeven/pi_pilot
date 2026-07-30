@@ -3,6 +3,11 @@ import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { RTCPeerConnection, type RTCDataChannel } from "werift";
 import {
+  encodeP2pFrames,
+  P2P_CHUNK_CAPABILITY,
+  P2pChunkDecoder,
+} from "./p2p_chunking.js";
+import {
   isAllowedP2pSignalingUrl,
   normalizeP2pSignalingUrl,
 } from "./p2p_signaling_url.js";
@@ -133,6 +138,7 @@ function normalizeLegacyStunUrls(value: unknown): string[] {
 /// - hub token 在 DataChannel 内校验(首帧 auth),信令服永远见不到它。
 
 const AUTH_TIMEOUT_MS = 10_000;
+const P2P_SEND_DRAIN_TIMEOUT_MS = 30_000;
 const RECONNECT_MIN_MS = 2_000;
 const RECONNECT_MAX_MS = 60_000;
 const MAX_PENDING_CANDIDATES = 64;
@@ -154,16 +160,30 @@ export interface P2pHostDeps {
  */
 export class DataChannelSocket extends EventEmitter {
   private closed = false;
+  private chunkingEnabled = false;
+  private readonly decoder = new P2pChunkDecoder();
+  private readonly sendQueue: Array<{
+    frame: string;
+    bytes: number;
+    drainAfter: boolean;
+  }> = [];
+  private queuedBytes = 0;
+  private pumping = false;
 
   constructor(private readonly channel: RTCDataChannel) {
     super();
+    channel.bufferedAmountLowThreshold = 0;
     channel.onMessage.subscribe((data) => {
-      // server.ts 的处理器对入站做 data.toString(),与 ws 的 Buffer 行为对齐。
-      this.emit("message", typeof data === "string" ? Buffer.from(data) : data);
+      const frame = typeof data === "string" ? data : data.toString("utf8");
+      const decoded = this.decoder.add(frame);
+      if (decoded !== undefined) this.emit("message", Buffer.from(decoded));
     });
     const onClosed = () => {
       if (this.closed) return;
       this.closed = true;
+      this.decoder.close();
+      this.sendQueue.length = 0;
+      this.queuedBytes = 0;
       this.emit("close", 1000, Buffer.from(""));
     };
     channel.stateChanged.subscribe((state) => {
@@ -178,15 +198,73 @@ export class DataChannelSocket extends EventEmitter {
   }
 
   get bufferedAmount(): number {
-    return this.channel.bufferedAmount;
+    return this.channel.bufferedAmount + this.queuedBytes;
+  }
+
+  get supportsChunking(): boolean {
+    return this.chunkingEnabled;
+  }
+
+  enableChunking(): void {
+    this.chunkingEnabled = true;
   }
 
   send(data: string): void {
     if (this.closed || this.channel.readyState !== "open") return;
     try {
-      this.channel.send(data);
+      const frames = this.chunkingEnabled ? encodeP2pFrames(data) : [data];
+      // 小帧保留原来的即时发送路径,避免把流式事件限速到每次 SACK 一条。
+      // 大帧正在发送时,后来的小帧进入同一队列并排在整条大消息之后。
+      if (frames.length === 1 && !this.pumping && this.sendQueue.length === 0) {
+        this.channel.send(frames[0]!);
+        return;
+      }
+      const drainAfter = frames.length > 1;
+      for (const frame of frames) {
+        const bytes = Buffer.byteLength(frame);
+        this.sendQueue.push({ frame, bytes, drainAfter });
+        this.queuedBytes += bytes;
+      }
+      void this.pumpSendQueue();
     } catch {
-      // 对端已离开,close 事件会随后收拾。
+      // 发送失败不能继续伪装成已连接,否则上层只会看到“成功”但永远收不到快照。
+      this.shutdown(1011, "p2p send failed");
+    }
+  }
+
+  private async pumpSendQueue(): Promise<void> {
+    if (this.pumping || this.closed) return;
+    this.pumping = true;
+    try {
+      while (!this.closed && this.channel.readyState === "open") {
+        const next = this.sendQueue.shift();
+        if (!next) break;
+        this.queuedBytes = Math.max(0, this.queuedBytes - next.bytes);
+        // 前面可能是一批即时小帧;开始下一条大消息前先等它们排空。
+        if (next.drainAfter && this.channel.bufferedAmount > 0) {
+          await this.waitForChannelDrain();
+        }
+        this.channel.send(next.frame);
+        if (next.drainAfter) await this.waitForChannelDrain();
+      }
+    } catch {
+      this.shutdown(1011, "p2p send failed");
+    } finally {
+      this.pumping = false;
+      if (!this.closed && this.sendQueue.length > 0) void this.pumpSendQueue();
+    }
+  }
+
+  private async waitForChannelDrain(): Promise<void> {
+    const deadline = Date.now() + P2P_SEND_DRAIN_TIMEOUT_MS;
+    while (this.channel.bufferedAmount > 0) {
+      if (this.closed || this.channel.readyState !== "open") {
+        throw new Error("DataChannel closed while sending");
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("DataChannel send drain timed out");
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
   }
 
@@ -213,6 +291,9 @@ export class DataChannelSocket extends EventEmitter {
   private shutdown(code: number, reason: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.decoder.close();
+    this.sendQueue.length = 0;
+    this.queuedBytes = 0;
     try {
       this.channel.close();
     } catch {}
@@ -491,7 +572,12 @@ export class P2pHost {
     const onFirstMessage = (data: Buffer) => {
       socket.off("message", onFirstMessage);
       clearTimeout(authTimer);
-      let msg: { type?: string; token?: string; clientId?: string };
+      let msg: {
+        type?: string;
+        token?: string;
+        clientId?: string;
+        capabilities?: unknown;
+      };
       try {
         msg = JSON.parse(data.toString()) as typeof msg;
       } catch {
@@ -502,6 +588,12 @@ export class P2pHost {
         socket.sendThenTerminate(JSON.stringify({ type: "bridge_error", error: "unauthorized" }));
         this.log(`P2P 客户端鉴权失败(${peerId})`);
         return;
+      }
+      if (
+        Array.isArray(msg.capabilities) &&
+        msg.capabilities.includes(P2P_CHUNK_CAPABILITY)
+      ) {
+        socket.enableChunking();
       }
       this.log(`P2P 客户端接入(${peerId})`);
       this.deps.acceptMobile(socket.asWebSocket(), typeof msg.clientId === "string" ? msg.clientId : null);

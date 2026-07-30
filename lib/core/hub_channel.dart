@@ -6,6 +6,12 @@ abstract class HubChannel {
   /// 入站文本帧流。
   Stream<dynamic> get stream;
 
+  /// 建链首帧里声明的传输能力。WS 默认不需要额外能力协商。
+  List<String> get transportCapabilities => const <String>[];
+
+  /// 收到 bridge_hello 后让具体传输启用双方都支持的扩展。
+  void applyHandshake(Map<String, dynamic> hello) {}
+
   /// 发送一帧文本。
   void add(String data);
 
@@ -21,6 +27,12 @@ class WsHubChannel implements HubChannel {
 
   @override
   Stream<dynamic> get stream => _channel.stream;
+
+  @override
+  List<String> get transportCapabilities => const <String>[];
+
+  @override
+  void applyHandshake(Map<String, dynamic> hello) {}
 
   @override
   void add(String data) => _channel.sink.add(data);

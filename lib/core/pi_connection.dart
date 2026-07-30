@@ -124,6 +124,8 @@ class PiConnection {
         'type': 'auth',
         'token': token,
         'clientId': ?clientId,
+        if (channel.transportCapabilities.isNotEmpty)
+          'capabilities': channel.transportCapabilities,
       });
     }, timeout);
   }
@@ -151,6 +153,7 @@ class PiConnection {
 
         if (!handshakeDone) {
           if (decoded['type'] == 'bridge_hello') {
+            channel.applyHandshake(decoded);
             handshakeDone = true;
             _status.add(PiConnStatus.connected);
             if (!ready.isCompleted) ready.complete(decoded);

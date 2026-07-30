@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'hub_channel.dart';
+import 'p2p_chunking.dart';
 import 'p2p_signaling.dart';
 
 typedef P2pCleanup = Future<void> Function();
@@ -58,14 +59,20 @@ class P2pChannelLifecycle {
   }
 }
 
+const _p2pSendDrainTimeout = Duration(seconds: 30);
+
 /// DataChannel 通道适配:把 RTCDataChannel 包装成 [HubChannel],
 /// 让 hub 协议(JSON 文本帧)原样跑在打洞通道上。
 /// close 级联关闭 DataChannel、PeerConnection 与信令连接。
 class RtcHubChannel implements HubChannel {
   RtcHubChannel(this._dc, this._pc, this._signaling, this._cancelSignaling) {
     _lifecycle = P2pChannelLifecycle(
-      closeStream: () =>
-          _controller.isClosed ? Future<void>.value() : _controller.close(),
+      closeStream: () {
+        _decoder.close();
+        return _controller.isClosed
+            ? Future<void>.value()
+            : _controller.close();
+      },
       cancelSignalingSubscription: _cancelSignaling,
       closeDataChannel: _dc.close,
       closePeerConnection: _pc.close,
@@ -74,7 +81,8 @@ class RtcHubChannel implements HubChannel {
     _dc.onMessage = (RTCDataChannelMessage message) {
       // hub 协议只有文本帧;二进制帧不属于本协议,丢弃。
       if (message.isBinary) return;
-      if (!_controller.isClosed) _controller.add(message.text);
+      final decoded = _decoder.add(message.text);
+      if (decoded != null && !_controller.isClosed) _controller.add(decoded);
     };
     _dc.onDataChannelState = (RTCDataChannelState state) {
       unawaited(_lifecycle.onDataChannelState(state));
@@ -86,15 +94,62 @@ class RtcHubChannel implements HubChannel {
   final GuestSignaling _signaling;
   final P2pCleanup _cancelSignaling;
   final StreamController<dynamic> _controller = StreamController<dynamic>();
+  final P2pChunkDecoder _decoder = P2pChunkDecoder();
   late final P2pChannelLifecycle _lifecycle;
+  Future<void> _sendQueue = Future<void>.value();
+  bool _chunkingEnabled = false;
 
   @override
   Stream<dynamic> get stream => _controller.stream;
 
   @override
+  List<String> get transportCapabilities => const <String>[p2pChunkCapability];
+
+  @override
+  void applyHandshake(Map<String, dynamic> hello) {
+    final capabilities = hello['capabilities'];
+    _chunkingEnabled =
+        capabilities is List && capabilities.contains(p2pChunkCapability);
+  }
+
+  @override
   void add(String data) {
     if (_controller.isClosed) return;
-    unawaited(_dc.send(RTCDataChannelMessage(data)));
+    late final List<String> frames;
+    try {
+      frames = _chunkingEnabled ? encodeP2pFrames(data) : <String>[data];
+    } catch (_) {
+      unawaited(_lifecycle.close());
+      return;
+    }
+    _sendQueue = _sendQueue.then((_) => _sendFrames(frames));
+  }
+
+  Future<void> _sendFrames(List<String> frames) async {
+    try {
+      for (final frame in frames) {
+        if (_controller.isClosed) return;
+        await _dc.send(RTCDataChannelMessage(frame));
+        await _waitForDataChannelDrain();
+      }
+    } catch (_) {
+      await _lifecycle.close();
+    }
+  }
+
+  Future<void> _waitForDataChannelDrain() async {
+    final deadline = DateTime.now().add(_p2pSendDrainTimeout);
+    while (await _dc.getBufferedAmount() > 0) {
+      final state = _dc.state;
+      if (state == RTCDataChannelState.RTCDataChannelClosing ||
+          state == RTCDataChannelState.RTCDataChannelClosed) {
+        throw StateError('DataChannel closed while sending');
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        throw TimeoutException('DataChannel send drain timed out');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
   }
 
   @override
