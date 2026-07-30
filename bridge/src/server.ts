@@ -11,6 +11,7 @@ import {
   MAX_DESKTOP_MESSAGE_BYTES,
   MAX_MOBILE_ENTRIES_BYTES,
   MIN_MOBILE_ENTRIES,
+  MOBILE_ENTRY_TEXT_CAP,
   clampLeaseTtl,
   isDesktopMutationCommand,
   isReadOnlySourceCommand,
@@ -857,26 +858,85 @@ interface ClippedEntries {
   omitted: number;
   /// 砍完之后最靠前那条的 id,App 用它作往前分页的游标。
   oldestId: string | null;
+  /// 是否有 entry 被单条封顶改过(图片块替换/超长文本截断)。为 true 时
+  /// 即便 omitted 为 0,调用方也必须用 entries 浅拷贝,不能用注册表原快照。
+  capped: boolean;
+}
+
+/// 单条 entry 封顶:不改注册表里的原对象,真改了才返回新对象。
+/// - image 等带大 data 的块:手机工具卡片不渲染 base64 图,整块换成占位文本;
+/// - text/thinking/content 字符串超过 MOBILE_ENTRY_TEXT_CAP:截断留标记。
+/// 实测 read 工具的截图结果单条 1.7MB、compaction 摘要 0.5MB,条数下限会把
+/// 它们硬塞进快照,慢速链路上直接把 P2P 缓冲顶爆。
+function capEntryForMobile(entry: JsonObject): JsonObject {
+  const message = entry.message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) return entry;
+  const msg = message as JsonObject;
+  const content = msg.content;
+  if (typeof content === "string") {
+    if (content.length <= MOBILE_ENTRY_TEXT_CAP) return entry;
+    return {
+      ...entry,
+      message: {
+        ...msg,
+        content: `${content.slice(0, MOBILE_ENTRY_TEXT_CAP)}\n…[过长内容已截断,完整内容在电脑上可见]`,
+      },
+    };
+  }
+  if (!Array.isArray(content)) return entry;
+  let changed = false;
+  const cappedContent = content.map((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) return block;
+    const b = block as JsonObject;
+    // 图片等二进制块:base64 data 动辄上 MB,手机端省略。
+    if (typeof b.data === "string" && b.data.length > 8192) {
+      changed = true;
+      return { type: "text", text: "[图片等内容已在手机端省略,请在电脑上查看]" };
+    }
+    let blockChanged = false;
+    const out: JsonObject = { ...b };
+    for (const key of ["text", "thinking"] as const) {
+      const v = out[key];
+      if (typeof v === "string" && v.length > MOBILE_ENTRY_TEXT_CAP) {
+        out[key] = `${v.slice(0, MOBILE_ENTRY_TEXT_CAP)}\n…[过长内容已截断,完整内容在电脑上可见]`;
+        blockChanged = true;
+      }
+    }
+    if (blockChanged) {
+      changed = true;
+      return out;
+    }
+    return block;
+  });
+  if (!changed) return entry;
+  return { ...entry, message: { ...msg, content: cappedContent } };
 }
 
 function clipEntriesForMobile(entries: JsonObject[]): ClippedEntries {
+  let capped = false;
+  const cappedEntries = entries.map((entry) => {
+    const next = capEntryForMobile(entry);
+    if (next !== entry) capped = true;
+    return next;
+  });
   let bytes = 0;
-  let start = entries.length;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const size = JSON.stringify(entries[i]).length;
-    const taken = entries.length - i;
-    // 条数下限优先于字节预算:单条 entry 实测最大能到 1.16MB(大段工具输出),
-    // 只按字节封顶会在这种条目面前退化成只发 1 条,聊天页就只剩一句话。
+  let start = cappedEntries.length;
+  for (let i = cappedEntries.length - 1; i >= 0; i--) {
+    const size = JSON.stringify(cappedEntries[i]).length;
+    const taken = cappedEntries.length - i;
+    // 条数下限优先于字节预算:单条 entry 封顶后仍可能不小,只按字节封顶会在
+    // 这种条目面前退化成只发 1 条,聊天页就只剩一句话。
     if (bytes + size > MAX_MOBILE_ENTRIES_BYTES && taken > MIN_MOBILE_ENTRIES) break;
     bytes += size;
     start = i;
   }
-  const clipped = start === 0 ? entries : entries.slice(start);
+  const clipped = start === 0 ? cappedEntries : cappedEntries.slice(start);
   const first = clipped[0];
   return {
     entries: clipped,
     omitted: start,
     oldestId: typeof first?.id === "string" ? first.id : null,
+    capped,
   };
 }
 
@@ -1246,8 +1306,11 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
         if (sync.mode === "snapshot") {
           const clipped = clipEntriesForMobile(sync.snapshot.entries);
           // 浅拷贝:注册表里那份必须保持完整,别的客户端和往前分页都还要用。
+          // omitted 为 0 但有 entry 被封顶时同样要用改过的新数组。
           payload.snapshot =
-            clipped.omitted > 0 ? { ...sync.snapshot, entries: clipped.entries } : sync.snapshot;
+            clipped.omitted > 0 || clipped.capped
+              ? { ...sync.snapshot, entries: clipped.entries }
+              : sync.snapshot;
           if (clipped.omitted > 0) {
             payload.entriesOmitted = clipped.omitted;
             payload.entriesOldestId = clipped.oldestId;

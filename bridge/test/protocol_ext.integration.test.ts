@@ -674,6 +674,132 @@ test("mobile snapshots are clipped to a byte budget and older history pages back
   }
 });
 
+test("手机快照把图片块和超长文本压小,小条目原样通过", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+
+    // 82 条小消息( omitted=0,专门验证 capped 时也会换成浅拷贝的新数组)
+    // + 1 条带 1.7MB base64 图片块的 read 结果 + 1 条 300KB 文本输出。
+    const entries = [
+      ...Array.from({ length: 80 }, (_, i) => ({
+        id: `s${i}`,
+        type: "message",
+        timestamp: i + 1,
+        message: { role: "user", content: `小消息 ${i}`, timestamp: i + 1 },
+      })),
+      {
+        id: "img",
+        type: "message",
+        timestamp: 100,
+        message: {
+          role: "toolResult",
+          toolName: "read",
+          content: [
+            { type: "text", text: "读取到图片文件" },
+            { type: "image", data: "A".repeat(1_700_000), mimeType: "image/png" },
+          ],
+          timestamp: 100,
+        },
+      },
+      {
+        id: "huge",
+        type: "message",
+        timestamp: 101,
+        message: {
+          role: "toolResult",
+          toolName: "bash",
+          content: [{ type: "text", text: "y".repeat(300_000) }],
+          timestamp: 101,
+        },
+      },
+    ];
+
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:cap",
+          label: "Cap desktop",
+          cwd: "/tmp/pipilot-cap",
+          sessionId: "session-cap",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-cap",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-cap", isStreaming: false },
+          entries,
+          leafId: "huge",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:cap" })).success,
+      true,
+    );
+
+    const sync = await phone.request("hub_sync");
+    assert.equal(sync.success, true);
+    const sent = sync.data.snapshot.entries;
+    // 条数不变(82 > 条数下限 80,omitted=0),但巨型单条已被封顶。
+    assert.equal(sent.length, 82);
+    assert.equal(sync.data.entriesHasMore, undefined);
+    assert.equal(sent[sent.length - 1].id, "huge");
+
+    const img = sent.find((e) => e.id === "img");
+    assert.equal(img.message.content.length, 2);
+    assert.equal(img.message.content[0].text, "读取到图片文件");
+    assert.deepEqual(img.message.content[1], {
+      type: "text",
+      text: "[图片等内容已在手机端省略,请在电脑上查看]",
+    });
+
+    const huge = sent.find((e) => e.id === "huge");
+    const hugeText = huge.message.content[0].text;
+    assert.ok(hugeText.startsWith("yyy"));
+    assert.ok(
+      hugeText.length < 70_000,
+      `300KB 文本应被截到 64KB 级,实际 ${hugeText.length}`,
+    );
+    assert.ok(hugeText.endsWith("[过长内容已截断,完整内容在电脑上可见]"));
+
+    // 小条目一个字都不能动
+    const smallEntry = sent.find((e) => e.id === "s0");
+    assert.equal(smallEntry.message.content, "小消息 0");
+
+    // 整帧从 ~2MB 压到 200KB 以内,慢速链路才有机会传完。
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(sync)) < 200 * 1024,
+      "封顶后 hub_sync 整帧必须足够小",
+    );
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});
+
 test("streaming flips broadcast refreshed sessions so keepalive counts stay fresh", async () => {
   const port = await freePort();
   const bridgeRoot = path.resolve(import.meta.dirname, "..");

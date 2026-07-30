@@ -23,6 +23,15 @@ export const MAX_MOBILE_ENTRIES_BYTES = 1024 * 1024;
  */
 export const MIN_MOBILE_ENTRIES = 80;
 
+/**
+ * 手机端单条文本字段(text/thinking/content 字符串)的字符上限。
+ *
+ * 条数下限优先于字节预算,所以巨型单条必须先自己瘦身:实测 read 工具返回的
+ * 截图 image 块单条 1.7MB、compaction 摘要 0.5MB,80 条下限会把它们硬塞进快照,
+ * 4MB JSON 经 base64 分片变 5.6MB,慢速链路上直接把 P2P 缓冲顶爆(1013)。
+ */
+export const MOBILE_ENTRY_TEXT_CAP = 64 * 1024;
+
 /** 向桌面 relay 索要新快照的等待上限(远小于 App 的 20s 请求超时)。 */
 export const SNAPSHOT_REQUEST_TIMEOUT_MS = 4_000;
 
