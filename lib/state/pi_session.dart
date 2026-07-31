@@ -7,7 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/pi_connection.dart';
+import '../core/hub_channel.dart';
 import '../core/p2p_connector.dart';
+import '../core/sync_store.dart';
 import 'hub_models.dart';
 import 'settings_provider.dart';
 import 'source_cursor.dart';
@@ -423,9 +425,24 @@ enum PiDelivery {
 // State
 // ---------------------------------------------------------------------------
 
+/// 业务就绪阶段:与传输状态(PiConnStatus)分离。
+/// "传输在线"不等于"会话可用" —— 旧实现把两者混成一个 connected,
+/// 才会出现"心跳正常但列表永远空白"的假象。
+enum SyncPhase {
+  offline,
+  connecting,
+  authenticated,
+  catalogReady,
+  selected,
+  syncing,
+  synced,
+  degraded,
+}
+
 class PiState {
   const PiState({
     required this.status,
+    this.sessionPhase = SyncPhase.offline,
     required this.items,
     required this.revision,
     required this.isStreaming,
@@ -480,6 +497,10 @@ class PiState {
   );
 
   final PiConnStatus status;
+
+  /// 业务就绪阶段(transport→auth→catalog→selected→synced)。
+  /// UI 的"连接中/同步中/已同步/降级"四态以此渲染,不看裸 status。
+  final SyncPhase sessionPhase;
   final List<ChatItem> items;
   final int revision;
   final bool isStreaming;
@@ -587,6 +608,7 @@ class PiState {
 
   PiState copyWith({
     PiConnStatus? status,
+    SyncPhase? sessionPhase,
     List<ChatItem>? items,
     int? revision,
     bool? isStreaming,
@@ -630,6 +652,7 @@ class PiState {
   }) {
     return PiState(
       status: status ?? this.status,
+      sessionPhase: sessionPhase ?? this.sessionPhase,
       items: items ?? this.items,
       revision: revision ?? this.revision,
       isStreaming: isStreaming ?? this.isStreaming,
@@ -737,7 +760,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 旧消息会排在新消息后面,时间线直接反了。逐条自增而不是固定插 0,
   /// 是为了保住这一批内部的先后顺序。
   int? _prependAt;
-  ({String host, int port, String token})? _creds;
+  ({String host, int port, String token, String? clientId})? _creds;
 
   /// 打洞配置快照(与 _creds 同生命周期):connect() 时从设置取,
   /// 四要素不齐为 null——_open() 据此决定直连失败后是否落 P2P。
@@ -771,6 +794,11 @@ class PiSessionNotifier extends Notifier<PiState> {
   int _activeSyncGeneration = 0;
   Timer? _resyncTimer;
   int _resyncAttempt = 0;
+
+  /// 事件页连续翻页轮数。bridge 的事件重放页有硬上限,落后很多时要翻几轮才
+  /// 追平;有界是为了防止"每轮都被截断"时无限递归(例如单条事件本身超预算)。
+  int _eventPageRounds = 0;
+  static const _maxEventPageRounds = 50;
   bool _resyncRunning = false;
   int _inOrderStreak = 0;
   bool _bufferOverflowed = false;
@@ -803,6 +831,11 @@ class PiSessionNotifier extends Notifier<PiState> {
       _autoConnectAttempted = true;
       connect();
     });
+    unawaited(
+      SyncStore.open().then((store) {
+        if (!_disposed) _syncStore = store;
+      }),
+    );
     return PiState.initial();
   }
 
@@ -819,7 +852,12 @@ class PiSessionNotifier extends Notifier<PiState> {
       return;
     }
     _intentionalDisconnect = false;
-    _creds = (host: settings.host, port: settings.port, token: settings.token);
+    _creds = (
+      host: settings.host,
+      port: settings.port,
+      token: settings.token,
+      clientId: settings.clientId.isNotEmpty ? settings.clientId : null,
+    );
     _p2p = settings.hasP2p
         ? (
             rendezvous: settings.p2pRendezvous,
@@ -827,7 +865,11 @@ class PiSessionNotifier extends Notifier<PiState> {
             secret: settings.p2pSecret,
           )
         : null;
-    state = state.copyWith(status: PiConnStatus.connecting, clearError: true);
+    state = state.copyWith(
+      status: PiConnStatus.connecting,
+      sessionPhase: SyncPhase.connecting,
+      clearError: true,
+    );
 
     bool ok;
     try {
@@ -939,7 +981,62 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (!await _ensureLease(sourceId)) return false;
     final meta = _leaseMetadata(sourceId);
     if (meta.isEmpty) return false;
-    return _conn?.send({...frame, ...meta}) ?? false;
+    // opId 幂等:发送前落 WAL,断线恢复后按 hub_op_status 对账,
+    // 查不到的一律"结果未知"提示用户,绝不自动重放(防重复提交)。
+    final opId = await _nextOpId();
+    final sent = _conn?.send({
+      ...frame,
+      ...meta,
+      'opId': ?opId,
+    }) ?? false;
+    if (sent && opId != null) {
+      unawaited(
+        _syncStore?.insertOp(
+          opId: opId,
+          clientId: _creds?.clientId ?? '',
+          type: frame['type'] as String? ?? 'unknown',
+          sourceId: sourceId,
+          sessionId: state.sessionId,
+        ),
+      );
+    }
+    return sent;
+  }
+
+  /// opId = {clientId}-op-{n},n 持久化递增,重发同一逻辑请求可用同 ID。
+  Future<String?> _nextOpId() async {
+    final clientId = _creds?.clientId;
+    if (clientId == null || clientId.isEmpty) return null;
+    final prefs = await SharedPreferences.getInstance();
+    final n = (prefs.getInt('op.seq') ?? 0) + 1;
+    await prefs.setInt('op.seq', n);
+    return '$clientId-op-$n';
+  }
+
+  /// 重连后对账 pending 写操作:accepted/executed 标完成;
+  /// unknown 一律提示"结果未知",禁止自动重放。
+  Future<void> _reconcilePendingOps() async {
+    final store = _syncStore;
+    if (store == null || !_hubV2) return;
+    final pending = await store.pendingOps();
+    for (final op in pending) {
+      if (_disposed || _conn?.isOpen != true) return;
+      final opId = op['op_id'] as String?;
+      if (opId == null) continue;
+      final resp = await _request('hub_op_status', {'opId': opId});
+      final status = (resp?['data'] as Map?)?['status'] as String?;
+      if (status == 'accepted' || status == 'executed') {
+        await store.updateOpStatus(opId, status!);
+      } else if (resp != null) {
+        await store.updateOpStatus(opId, 'unknown');
+        _addSystem(
+          '断线前的「${op['type']}」结果未知,请确认后手动重试',
+          SystemKind.error,
+        );
+        _write(state.copyWith());
+      }
+      // resp == null:桥没回,保持 pending,下次重连再对账。
+    }
   }
 
   /// 发送失败:把原文交还给用户,而不是让它消失在被清空的输入框里。
@@ -1023,22 +1120,47 @@ class PiSessionNotifier extends Notifier<PiState> {
       for (final source in raw)
         if (source is Map) SourceInfo.fromMap(source),
     ];
-    _write(state.copyWith(sources: parsed));
+    _write(state.copyWith(sources: parsed, sessionPhase: SyncPhase.catalogReady));
     return parsed;
   }
 
   /// 拉取会话总表(活跃 + 磁盘上的)。
-  Future<List<HubSession>> refreshHubSessions({String? cwd}) async {
+  /// 失败返回 null(保留旧列表),成功返回新列表 —— 调用方据此重试,
+  /// 不再把"加载失败"和"没有会话"混为一谈。
+  Future<List<HubSession>?> refreshHubSessions({String? cwd}) async {
     if (!_hubV2) return const [];
     final resp = await _request('hub_list_sessions', {'cwd': ?cwd});
     final raw = (resp?['data'] as Map?)?['sessions'] as List?;
-    if (resp?['success'] != true || raw == null) return state.sessions;
+    if (resp?['success'] != true || raw == null) {
+      _logP2p(
+        'hub_list_sessions failed(success=${resp?['success']}),keep stale',
+      );
+      return null;
+    }
     final parsed = [
       for (final entry in raw)
         if (entry is Map) HubSession.fromMap(entry),
     ];
     _write(state.copyWith(sessions: parsed));
     return parsed;
+  }
+
+  /// catalog 加载的失败重试(1s/2s/4s):连接刚建立时 P2P 慢链路上
+  /// 一次超时是常态,放弃重试就是"列表永远空白"。
+  Future<void> refreshHubSessionsWithRetry({String? cwd}) async {
+    const delays = <Duration>[
+      Duration(seconds: 1),
+      Duration(seconds: 2),
+      Duration(seconds: 4),
+    ];
+    for (var attempt = 0; attempt <= delays.length; attempt++) {
+      if (_disposed || _conn?.isOpen != true) return;
+      final result = await refreshHubSessions(cwd: cwd);
+      if (result != null) return;
+      if (attempt < delays.length) {
+        await Future<void>.delayed(delays[attempt]);
+      }
+    }
   }
 
   /// 打开一个会话:订阅它,并按需拉起进程。
@@ -1113,7 +1235,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     await _syncSelectedSource(forceFull: true, generation: gen);
     unawaited(refreshSources());
-    unawaited(refreshHubSessions());
+    unawaited(refreshHubSessionsWithRetry());
     return true;
   }
 
@@ -1128,7 +1250,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     _leafId = null;
     _resetConversation();
     state = state.copyWith(clearSource: true);
-    state = state.copyWith(selectedSourceId: sourceId);
+    state = state.copyWith(
+      selectedSourceId: sourceId,
+      sessionPhase: SyncPhase.syncing,
+    );
 
     final resp = await _request('hub_select_source', {'sourceId': sourceId});
     if (gen != _syncGeneration) return false;
@@ -1355,7 +1480,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       healPreference = true;
     }
 
-    unawaited(refreshHubSessions());
+    unawaited(refreshHubSessionsWithRetry());
     if (target != null) {
       await selectSource(
         target.id,
@@ -1893,19 +2018,38 @@ class PiSessionNotifier extends Notifier<PiState> {
       host: creds.host,
       port: creds.port,
       token: creds.token,
+      clientId: creds.clientId,
+      capabilities: const [msgDeltaCapability],
       timeout: p2p != null
           ? const Duration(seconds: 5)
           : const Duration(seconds: 12),
     );
     if (hello == null && p2p != null && identical(_conn, conn)) {
-      final channel = await P2pConnector().connect(
+      final settings = ref.read(settingsProvider.notifier);
+      final channel = await P2pConnector(onLog: _logP2p).connect(
         rendezvousUrl: p2p.rendezvous,
         deviceId: p2p.deviceId,
         secret: p2p.secret,
+        modeCache: (
+          read: () async {
+            final mode = await settings.p2pIceMode(p2p.deviceId);
+            return switch (mode) {
+              'direct' => P2pIceMode.direct,
+              'relay' => P2pIceMode.relay,
+              _ => null,
+            };
+          },
+          onSuccess: (mode) => settings.setP2pIceMode(p2p.deviceId, mode.name),
+          onFailure: () => settings.failP2pIceMode(p2p.deviceId),
+        ),
       );
       if (channel != null) {
         if (identical(_conn, conn)) {
-          hello = await conn.connectViaChannel(channel, token: creds.token);
+          hello = await conn.connectViaChannel(
+            channel,
+            token: creds.token,
+            clientId: creds.clientId,
+          );
         } else {
           // 打洞期间用户已断开/换了连接:通道不能漏,关掉。
           await channel.close();
@@ -1948,7 +2092,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (_intentionalDisconnect || !state.hasSession) return;
     if (status == PiConnStatus.disconnected || status == PiConnStatus.failed) {
       _stopHealthMonitor();
-      state = state.copyWith(status: PiConnStatus.connecting);
+      state = state.copyWith(
+        status: PiConnStatus.connecting,
+        sessionPhase: SyncPhase.offline,
+      );
       _scheduleReconnect();
     }
   }
@@ -2025,6 +2172,42 @@ class PiSessionNotifier extends Notifier<PiState> {
     unawaited(_attemptReconnect());
   }
 
+  /// 网络接口发生变化(WiFi↔蜂窝切换、重新入网)。
+  ///
+  /// 与 [onAppResumed] 的区别:切网时 app 一直在前台,不会有生命周期回调。
+  /// 而旧连接此时已经死了 —— 但对端和本地都还不知道:
+  /// - ICE consent freshness 要 5~10s 才判定 disconnected;
+  /// - 健康心跳要 2 个周期(30s+)才判半开。
+  /// 期间用户看到的就是"卡住不动"。拿到即时信号后主动重连能省掉这段空等。
+  ///
+  /// 注意不能无脑重连:切网事件在某些机型上会连发数次(WiFi 掉→蜂窝起→
+  /// WiFi 回),每次都推倒重连反而更慢。所以先探活,确实死了才重连。
+  void onNetworkChanged(String reason) {
+    if (_disposed) return;
+    if (_intentionalDisconnect || _creds == null || !state.hasSession) return;
+    _logP2p('network_changed{reason:$reason,status:${state.status.name}}');
+    // 已经在连了就不打断:重复推倒会把退避计数器清零并反复重建 PeerConnection。
+    if (state.status == PiConnStatus.connecting) return;
+    final lastPong = _lastPongAt;
+    final connectionFresh =
+        state.status == PiConnStatus.connected &&
+        _conn?.isOpen == true &&
+        lastPong != null &&
+        DateTime.now().difference(lastPong) <= _healthInterval;
+    if (connectionFresh) {
+      // 看起来还活着:立刻探一次活。真死了心跳路径会在下个周期收口,
+      // 不必在这里就推倒一条可能仍然可用的连接。
+      _healthTick();
+      return;
+    }
+    // 旧连接大概率已随接口消失而失效:立即重连,跳过退避。
+    state = state.copyWith(status: PiConnStatus.connecting);
+    _reconnectAttempt = 0;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    unawaited(_attemptReconnect());
+  }
+
   // -- connection health ------------------------------------------------------
 
   static const _healthInterval = Duration(seconds: 15);
@@ -2060,6 +2243,14 @@ class PiSessionNotifier extends Notifier<PiState> {
       'type': 'bridge_ping',
       'echo': DateTime.now().millisecondsSinceEpoch,
     });
+    // 每个健康周期打一行传输层遥测。慢链路上这是区分「网络背压」与
+    // 「应用排队」的唯一依据:buffered 高说明卡在 SCTP,normalQ 高说明
+    // 卡在应用队列,drainBps 说明实测吞吐到底是多少。
+    unawaited(
+      conn.transportTelemetry().then((line) {
+        if (line != null && !_disposed) _logP2p(line);
+      }),
+    );
   }
 
   /// hub 存下新快照后的提示帧。这是卡死客户端的兜底自愈通道:
@@ -2170,6 +2361,35 @@ class PiSessionNotifier extends Notifier<PiState> {
         ).toMap(),
       ),
     );
+    // cursor v2:附带 entryId rebase 锚点。bridge 重启(hubId 必变)后
+    // 事件游标作废,但可从最后一条 entry 正向补齐,历史不用重拉。
+    final store = _syncStore;
+    final sourceKey = _syncSourceKey;
+    if (store != null && sourceKey != null) {
+      unawaited(
+        store.commitEventWithCursor(
+          sourceKey: sourceKey,
+          cursor: <String, dynamic>{
+            'v': 2,
+            'hubId': hubId,
+            'sourceId': sourceId,
+            'sourceEpoch': epoch,
+            'seq': state.lastSourceSeq,
+            'sessionId': state.sessionId,
+            'lastEntryId': _leafId,
+            'savedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ),
+      );
+    }
+  }
+
+  /// cursor v2(含 lastEntryId rebase 锚点):按 sessionId 主键查,
+  /// bridge/桌面重启后仍可命中。
+  Future<Map<String, dynamic>?> _loadHubCursorV2() async {
+    final sourceKey = _syncSourceKey;
+    if (sourceKey == null) return null;
+    return _syncStore?.loadCursor(sourceKey);
   }
 
   Future<void> _syncSelectedSource({
@@ -2195,16 +2415,67 @@ class PiSessionNotifier extends Notifier<PiState> {
           lastSourceSeq: cursor.seq,
         );
       }
+      // bridge 重启(hubId 变)时本地事件游标必然失配:加载 v2 拿 rebase
+      // 锚点,并先用本地缓存渲染首屏,再对账(慢链路下 10s 内可见上次内容)。
+      String? rebaseEntryId;
+      if (cursor == null && !forceFull) {
+        final v2 = await _loadHubCursorV2();
+        if (stale()) return;
+        final anchor = v2?['lastEntryId'];
+        if (anchor is String && anchor.isNotEmpty) rebaseEntryId = anchor;
+        final store = _syncStore;
+        final sourceKey = _syncSourceKey;
+        if (store != null && sourceKey != null) {
+          final cached = await store.loadRecentEntries(sourceKey);
+          if (stale()) return;
+          if (cached.isNotEmpty) {
+            _resetConversation();
+            for (final entry in cached) {
+              _ingestEntry(entry);
+            }
+            _emit();
+          }
+        }
+      }
       final resp = await _request('hub_sync', {
         if (cursor != null) 'cursor': cursor.toMap(),
       });
       if (stale()) return;
       final data = resp?['data'] as Map?;
-      if (resp?['success'] != true || data == null) return;
+      if (resp?['success'] != true || data == null) {
+        // 旧实现在这里静默 return:初次同步失败后只有 seq 缺口/epoch 变化
+        // 才会再来一次 —— 链路差到事件也排在后面时,会话永远空白。
+        _logP2p(
+          'hub_sync failed(success=${resp?['success']}),schedule resync',
+        );
+        state = state.copyWith(sessionPhase: SyncPhase.degraded);
+        _scheduleSourceResync(reason: 'sync-failed');
+        return;
+      }
       final mode = data['mode'];
       if (mode == 'snapshot') {
         final snapshot = data['snapshot'];
-        if (snapshot is Map) _applyHubSnapshot(snapshot, reconcile: reconcile);
+        if (snapshot is Map) {
+          final snapshotEntries = snapshot['entries'] as List? ?? const [];
+          final anchorHit =
+              rebaseEntryId != null &&
+              snapshotEntries.any((e) => e is Map && e['id'] == rebaseEntryId);
+          if (rebaseEntryId == null || anchorHit) {
+            _applyHubSnapshot(snapshot, reconcile: reconcile || anchorHit);
+          } else {
+            // rebase:快照头与本地历史接不上 —— 只取会话状态,
+            // entries 从锚点正向补齐,历史不整段重拉。
+            final stateData = snapshot['state'];
+            if (stateData is Map) {
+              _applyStateData(Map<String, dynamic>.from(stateData));
+            }
+            state = state.copyWith(
+              sourceEpoch: snapshot['epoch'] as String?,
+              lastSourceSeq: snapshot['baseSeq'] as int? ?? 0,
+            );
+            unawaited(_rebaseFromEntry(rebaseEntryId, generation: gen));
+          }
+        }
         // 桥为了不撞爆手机的 2MB 套接字缓冲,只发了 entries 的尾巴。
         // 更早的仍在桥上,记住游标以便「加载更早」往前取。
         if (data['entriesHasMore'] == true) {
@@ -2235,12 +2506,86 @@ class PiSessionNotifier extends Notifier<PiState> {
         _resyncAttempt = 0;
         _gapNoticeShown = false;
       }
+      // bridge 的事件重放页有 64KiB 硬上限:手机离开很久后回来,cursor 之后
+      // 那段事件本身可能几 MB,一帧发不下。被截断时 bridge 置 eventsTruncated,
+      // 这里必须立刻带着已推进的 cursor 再来一轮 —— 否则客户端会误以为已经
+      // 追平,后面那段事件永远不会被应用。
+      if (data['eventsTruncated'] == true && events.isNotEmpty) {
+        await _saveHubCursor();
+        if (stale()) return;
+        if (_eventPageRounds++ < _maxEventPageRounds) {
+          _logP2p(
+            'events_truncated{remaining:${data['eventsRemaining']},'
+            'round:$_eventPageRounds}',
+          );
+          // 交回当前一代继续翻:cursor 已前进,下一轮取后续事件页。
+          await _syncSelectedSource(reconcile: reconcile, generation: gen);
+          return;
+        }
+        _logP2p('events_truncated: 连续翻页超过 $_maxEventPageRounds 轮,改走全量');
+        _eventPageRounds = 0;
+        await _syncSelectedSource(forceFull: true, generation: gen);
+        return;
+      }
+      _eventPageRounds = 0;
+      state = state.copyWith(sessionPhase: SyncPhase.synced);
+      unawaited(_reconcilePendingOps());
       await _saveHubCursor();
     } finally {
       if (gen == _syncGeneration) {
         _activeSyncGeneration = 0;
         _drainBufferedEvents();
       }
+    }
+  }
+
+  /// bridge 重启后的 entryId rebase:从本地最后一条 entry 正向分页补齐,
+  /// 历史不整段重拉。失败回退全量快照。
+  Future<void> _rebaseFromEntry(String anchorEntryId, {int? generation}) async {
+    final gen = generation ?? _syncGeneration;
+    final sourceId = state.selectedSourceId;
+    bool stale() =>
+        _disposed ||
+        gen != _syncGeneration ||
+        state.selectedSourceId != sourceId;
+    String? since = anchorEntryId;
+    String? tipId;
+    var guard = 0;
+    while (!stale()) {
+      if (guard++ > 200) {
+        _logP2p('rebase: 翻页超过 200 次,中止');
+        return;
+      }
+      final resp = await _request('get_entries', {
+        'since': ?since,
+        'forward': true,
+        // 与 bridge 的 MAX_ENTRIES_PAGE_BYTES 硬上限对齐(96KiB)。
+        // 50KB/s 下单页约 2s,能连续翻页而不撞请求超时;要更大也会被
+        // bridge 端 clamp 回去,这里保持双端一致便于对账。
+        'limitBytes': maxEntriesPageBytes,
+        'tipId': ?tipId,
+      });
+      if (stale()) return;
+      final data = resp?['data'] as Map?;
+      if (resp?['success'] != true || data == null) {
+        _logP2p('rebase: get_entries 失败,回退全量快照');
+        await _syncSelectedSource(forceFull: true);
+        return;
+      }
+      tipId = data['tipId'] as String?;
+      final entries = data['entries'] as List? ?? const [];
+      for (final entry in entries) {
+        if (entry is Map) _ingestEntry(Map<String, dynamic>.from(entry));
+      }
+      _emit();
+      if (data['hasMore'] != true) break;
+      since = data['nextSinceId'] as String?;
+      if (since == null) break;
+    }
+    if (!stale()) {
+      _logP2p('rebase: entryId 锚点补齐完成');
+      state = state.copyWith(sessionPhase: SyncPhase.synced);
+      unawaited(_saveHubCursor());
     }
   }
 
@@ -2277,6 +2622,29 @@ class PiSessionNotifier extends Notifier<PiState> {
       lastSourceSeq: snapshot['baseSeq'] as int? ?? 0,
     );
     _emit();
+    // 快照 entries 落盘:下次打开(尤其 bridge 重启后)先渲染缓存再对账。
+    final store = _syncStore;
+    final sourceKey = _syncSourceKey;
+    if (store != null && sourceKey != null) {
+      final rows = <({String id, int? seq, Map<String, dynamic> payload})>[
+        for (final entry in entries)
+          if (entry is Map && entry['id'] is String)
+            (
+              id: entry['id'] as String,
+              seq: null,
+              payload: Map<String, dynamic>.from(entry),
+            ),
+      ];
+      if (rows.isNotEmpty) {
+        // 覆盖后立刻修剪:pruneEntries 此前没有任何生产调用点,持久化历史
+        // 实际上是无界的。20MB 量级会话累积几场就能吃光手机存储。
+        unawaited(
+          store.replaceEntries(sourceKey, rows).then(
+            (_) => store.pruneEntries(sourceKey, SyncStore.maxPersistedEntries),
+          ),
+        );
+      }
+    }
     final inFlight = snapshot['inFlightMessage'];
     _sawInFlightMessage = inFlight is Map;
     if (inFlight is Map) {
@@ -2407,6 +2775,54 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
   }
 
+  int _lateResponseCount = 0;
+
+  /// 本地同步存储(entries/cursor/op_log)。打开失败为 null,降级纯内存。
+  SyncStore? _syncStore;
+
+  /// 自上次修剪以来新增的 entry 数。
+  ///
+  /// 每条增量都 prune 会让长会话在流式输出期间反复扫全表;按批修剪即可 ——
+  /// 上限本身是软目标,超出几百条不影响正确性,只影响存储占用。
+  int _entriesSincePrune = 0;
+  static const _pruneEveryEntries = 200;
+
+  /// 增量写入路径的按批修剪。与快照覆盖路径一起,补上 pruneEntries 此前
+  /// 完全没有生产调用点的缺口(持久化历史实际无界)。
+  Future<void> _maybePruneEntries(SyncStore store, String sourceKey) async {
+    if (++_entriesSincePrune < _pruneEveryEntries) return;
+    _entriesSincePrune = 0;
+    try {
+      await store.pruneEntries(sourceKey, SyncStore.maxPersistedEntries);
+    } catch (_) {
+      // 修剪失败不影响正确性:下一批还会再试。
+    }
+  }
+
+  /// 持久化主键:与 hubId/sourceId 解耦 —— bridge 重启 hubId 必变、
+  /// 桌面 pi 重启 sourceId 必变,只有 sessionId 跨重启稳定。
+  String? get _syncSourceKey => state.sessionId ?? state.selectedSourceId;
+
+  void _logP2p(String message) {
+    debugPrint('[p2p] $message');
+  }
+
+  /// 慢速 P2P 上 hub_sync 等大数据响应的合法传输时间远超固定 20s。
+  /// 这些请求改用进度型超时:通道仍有字节推进(分片级活动)就续命,
+  /// 连续无进展才判超时 —— 固定 20s 是"心跳正常但数据永远不来"的根因。
+  static const _progressTimeoutTypes = <String>{
+    'hub_sync',
+    'get_entries',
+    'hub_open_session',
+    'hub_select_source',
+  };
+  static const _noProgressTimeout = Duration(seconds: 45);
+
+  /// 请求总时长硬上限。进度型超时只能避免"慢但在动"被误杀,不能当作
+  /// 无上限等待:一个永远满不了的传输(对端反复重发同一页)会一直有数据进度,
+  /// 却永远不完成。按 50KB/s 估,20MB 会话大约 7 分钟,给 10 分钟余量。
+  static const _hardRequestTimeout = Duration(minutes: 10);
+
   Future<Map<String, dynamic>?> _request(
     String type, [
     Map<String, dynamic> extra = const {},
@@ -2418,13 +2834,115 @@ class PiSessionNotifier extends Notifier<PiState> {
     final completer = Completer<Map<String, dynamic>?>();
     _pending[id] = completer;
     conn.send({'id': id, 'type': type, ...extra});
-    return completer.future.timeout(
-      timeout ?? const Duration(seconds: 20),
-      onTimeout: () {
+
+    // 端到端 RPC 耗时。这是唯一能反映**传输时间**的量:bridge 侧日志里的
+    // ms 只是组包时间(实测 12ms),不含线上传输。慢链路诊断必须看这个数 ——
+    // 128KiB 首屏在 50KB/s 上要 2.6s,在服务端看却只有 12ms。
+    final started = DateTime.now();
+    void logDuration(Map<String, dynamic>? value) {
+      if (!_measuredRpcTypes.contains(type)) return;
+      final ms = DateTime.now().difference(started).inMilliseconds;
+      _logP2p('rpc_done{type:$type,id:$id,ok:${value != null},ms:$ms}');
+    }
+
+    if (timeout == null && _progressTimeoutTypes.contains(type)) {
+      final result = _withProgressTimeout(id, type, conn, completer);
+      return result.then((value) {
+        logDuration(value);
+        return value;
+      });
+    }
+    return completer.future
+        .timeout(
+          timeout ?? const Duration(seconds: 20),
+          onTimeout: () {
+            _pending.remove(id);
+            _logP2p('rpc_timeout{type:$type,id:$id}');
+            return null;
+          },
+        )
+        .then((value) {
+          logDuration(value);
+          return value;
+        });
+  }
+
+  /// 需要记录端到端耗时的请求类型(大数据路径 + 会话打开路径)。
+  static const _measuredRpcTypes = <String>{
+    'hub_sync',
+    'get_entries',
+    'hub_open_session',
+    'hub_select_source',
+    'hub_list_sessions',
+  };
+
+  /// 请求级进度型超时。
+  ///
+  /// 三个关键点(对应三个已确认的缺陷):
+  /// 1. 进度源是 `conn.dataProgressTicks` 而不是 `conn.lastActivityAt`。后者会被
+  ///    周期 bridge_pong 刷新,于是一个卡死的大 RPC 只要心跳正常就永远不超时。
+  /// 2. 加总时长硬上限:否则"一直有进度但永远不完成"仍会无限等待。
+  /// 3. 四条终止路径(成功/断线/无进度/硬超时)全部 cancel watchdog。原实现只在
+  ///    completer 完成时 cancel,而 watchdog 自己先完成 result 后,原请求可能永远
+  ///    不完成 —— Timer 就每 5 秒醒一次永不停止。
+  Future<Map<String, dynamic>?> _withProgressTimeout(
+    String id,
+    String type,
+    PiConnection conn,
+    Completer<Map<String, dynamic>?> completer,
+  ) {
+    final result = Completer<Map<String, dynamic>?>();
+    final startedAt = DateTime.now();
+    var lastTicks = conn.dataProgressTicks;
+    var lastProgressAt = startedAt;
+    Timer? watchdog;
+
+    void finish(Map<String, dynamic>? value) {
+      // 单一收口:无论哪条终止路径,Timer 都在这里被 cancel。
+      watchdog?.cancel();
+      watchdog = null;
+      if (!result.isCompleted) result.complete(value);
+    }
+
+    watchdog = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (result.isCompleted) {
+        // 防御:result 已完成但 Timer 还活着(不应发生),立即自杀。
+        watchdog?.cancel();
+        watchdog = null;
+        return;
+      }
+      // 连接已换/已死:立即放行,不等满无进展时长。
+      if (!identical(_conn, conn) || !conn.isOpen) {
         _pending.remove(id);
-        return null;
-      },
-    );
+        _logP2p('rpc_abort_disconnected{type:$type,id:$id}');
+        finish(null);
+        return;
+      }
+      final now = DateTime.now();
+      final ticks = conn.dataProgressTicks;
+      if (ticks != lastTicks) {
+        lastTicks = ticks;
+        lastProgressAt = now;
+      }
+      final total = now.difference(startedAt);
+      if (total > _hardRequestTimeout) {
+        _pending.remove(id);
+        _logP2p('rpc_hard_timeout{type:$type,id:$id,totalMs:${total.inMilliseconds}}');
+        finish(null);
+        return;
+      }
+      final silence = now.difference(lastProgressAt);
+      if (silence > _noProgressTimeout) {
+        _pending.remove(id);
+        _logP2p(
+          'rpc_no_progress{type:$type,id:$id,silenceMs:${silence.inMilliseconds}}',
+        );
+        finish(null);
+      }
+    });
+
+    completer.future.then(finish, onError: (Object _) => finish(null));
+    return result.future;
   }
 
   // -- event handling -----------------------------------------------------------
@@ -2454,6 +2972,14 @@ class PiSessionNotifier extends Notifier<PiState> {
         return;
       case 'hub_control_moved':
         _onControlMoved(event);
+        return;
+      case 'bridge_ping':
+        // bridge 侧活性探测(真 ping):对称回 pong,双向半开检测才成立。
+        _conn?.send(<String, dynamic>{
+          'type': 'bridge_pong',
+          't': DateTime.now().millisecondsSinceEpoch,
+          if (event['echo'] != null) 'echo': event['echo'],
+        });
         return;
       case 'bridge_pong':
         _onBridgePong(event);
@@ -2679,6 +3205,33 @@ class PiSessionNotifier extends Notifier<PiState> {
       case SourceApply.apply:
         state = state.copyWith(sourceEpoch: epoch, lastSourceSeq: seq);
         _applyPiEvent(event);
+        // entry 型事件与游标同一事务落盘:游标永不先于数据,
+        // 进程在两步之间被杀也不会出现"游标超前于缓存"的静默丢段。
+        final appendedEntry =
+            event['type'] == 'entry_appended' ? event['entry'] : null;
+        final store = _syncStore;
+        final sourceKey = _syncSourceKey;
+        if (appendedEntry is Map && store != null && sourceKey != null) {
+          unawaited(
+            store.commitEventWithCursor(
+              sourceKey: sourceKey,
+              entry: Map<String, dynamic>.from(appendedEntry),
+              entryId: appendedEntry['id'] as String?,
+              seq: seq,
+              epoch: epoch,
+              cursor: <String, dynamic>{
+                'v': 2,
+                'hubId': state.hubId,
+                'sourceId': sourceId,
+                'sourceEpoch': epoch,
+                'seq': seq,
+                'sessionId': state.sessionId,
+                'lastEntryId': _leafId,
+                'savedAt': DateTime.now().millisecondsSinceEpoch,
+              },
+            ).then((_) => _maybePruneEntries(store, sourceKey)),
+          );
+        }
         unawaited(_saveHubCursor());
         if (++_inOrderStreak >= 32) {
           _inOrderStreak = 0;
@@ -2734,6 +3287,8 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 旧实现每个被拒事件都触发一次全量重拉,峰值 ~40 次/秒。
   void _scheduleSourceResync({required String reason}) {
     if (!_hubV2 || _disposed || _resyncTimer != null || _resyncRunning) return;
+    // 断线期间重同步只会空转失败:重连流程自己会触发首次同步。
+    if (_conn?.isOpen != true) return;
     final base = math.min(8000, 250 * math.pow(2, _resyncAttempt).toInt());
     final delay = (base * (0.8 + _jitterRandom.nextDouble() * 0.4)).round();
     _resyncAttempt++;
@@ -2800,6 +3355,8 @@ class PiSessionNotifier extends Notifier<PiState> {
         _onMessageBoundary(event);
       case 'message_update':
         _onMessageUpdate(event);
+      case 'message_delta':
+        _onMessageDelta(event);
       case 'tool_execution_start':
         _onToolStart(event);
       case 'tool_execution_update':
@@ -2933,6 +3490,15 @@ class PiSessionNotifier extends Notifier<PiState> {
         '${event['command'] ?? 'command'} 失败: ${event['error']}',
         SystemKind.error,
       );
+      return;
+    }
+    // 晚到的成功响应:请求已超时/被取消,不能再应用,但必须留痕 ——
+    // 这是慢链路诊断的关键计数(旧实现静默丢弃)。
+    if (id != null) {
+      _lateResponseCount++;
+      _logP2p(
+        'late_response{id:$id,type:${event['command'] ?? event['type']},count:$_lateResponseCount}',
+      );
     }
   }
 
@@ -2940,6 +3506,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     final message = event['message'];
     if (message is! Map<String, dynamic>) return;
     final role = message['role'];
+    if (event['type'] == 'message_end') {
+      // 流式结束,该键的 msg-delta 基线不再需要。
+      _deltaBaseByKey.remove('assistant:${message['timestamp']}');
+    }
 
     if (role == 'user') {
       _ingestMessage(message);
@@ -2984,10 +3554,56 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
   }
 
+  /// msg-delta 基线:每个流式 assistant 键最近一次完整 message。
+  /// 键规则与 bridge 一致(assistant:{timestamp}),fork/压缩换键自动回退全量。
+  final Map<String, Map<String, dynamic>> _deltaBaseByKey = {};
+
+  /// 应用一条 message_delta:把增量追加到基线 message 的对应块上,
+  /// 然后复用完整更新路径刷新气泡。基线缺失/块结构不符一律走重同步对账,
+  /// 绝不把对不上的半截文本当成真内容显示。
+  void _onMessageDelta(Map<String, dynamic> event) {
+    final key = event['key'] as String?;
+    final blockIndex = event['blockIndex'] as int?;
+    final field = event['field'] as String?;
+    final appendText = event['appendText'] as String?;
+    if (key == null ||
+        blockIndex == null ||
+        field == null ||
+        appendText == null) {
+      return;
+    }
+    final base = _deltaBaseByKey[key];
+    final content = base?['content'];
+    if (base == null ||
+        content is! List ||
+        blockIndex < 0 ||
+        blockIndex >= content.length) {
+      _logP2p('msg-delta: 基线缺失 key=$key,走重同步对账');
+      _scheduleSourceResync(reason: 'delta-base-missing');
+      return;
+    }
+    final block = content[blockIndex];
+    if (block is! Map || block[field] is! String) {
+      _logP2p('msg-delta: 块结构不符 key=$key,走重同步对账');
+      _scheduleSourceResync(reason: 'delta-block-invalid');
+      return;
+    }
+    block[field] = (block[field] as String) + appendText;
+    _onMessageUpdate({'message': base});
+  }
+
   void _onMessageUpdate(Map<String, dynamic> event) {
     final message = event['message'];
     if (message is! Map<String, dynamic> || message['role'] != 'assistant') {
       return;
+    }
+    // msg-delta 基线:记录该流式键最近一次完整 message(FIFO 8 条)。
+    final deltaKey = 'assistant:${message['timestamp']}';
+    _deltaBaseByKey
+      ..remove(deltaKey)
+      ..[deltaKey] = message;
+    while (_deltaBaseByKey.length > 8) {
+      _deltaBaseByKey.remove(_deltaBaseByKey.keys.first);
     }
     var bubble = _streamingAssistant;
     if (bubble == null || bubble.complete) {

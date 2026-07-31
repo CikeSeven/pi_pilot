@@ -8,7 +8,7 @@ const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_CHUNKS = Math.ceil(MAX_MESSAGE_BYTES / CHUNK_BYTES);
 const MAX_PENDING_MESSAGES = 8;
 const MAX_PENDING_BYTES = 32 * 1024 * 1024;
-const CHUNK_TTL_MS = 30_000;
+const CHUNK_IDLE_MS = 30_000;
 
 export function encodeP2pFrames(data: string): string[] {
   const bytes = Buffer.from(data, "utf8");
@@ -30,12 +30,18 @@ interface PendingMessage {
   parts: Array<Buffer | undefined>;
   received: number;
   bytes: number;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
 }
 
 export class P2pChunkDecoder {
   private readonly pending = new Map<string, PendingMessage>();
   private pendingBytes = 0;
+
+  constructor(private readonly chunkIdleMs = CHUNK_IDLE_MS) {
+    if (!Number.isFinite(chunkIdleMs) || chunkIdleMs <= 0) {
+      throw new Error("chunkIdleMs must be positive");
+    }
+  }
 
   add(frame: string): string | undefined {
     if (!frame.startsWith(PREFIX)) return frame;
@@ -79,14 +85,11 @@ export class P2pChunkDecoder {
         const oldestId = this.pending.keys().next().value as string | undefined;
         if (oldestId) this.drop(oldestId);
       }
-      const timer = setTimeout(() => this.drop(id), CHUNK_TTL_MS);
-      timer.unref();
       message = {
         total,
         parts: new Array(total),
         received: 0,
         bytes: 0,
-        timer,
       };
       this.pending.set(id, message);
     }
@@ -95,6 +98,7 @@ export class P2pChunkDecoder {
       message.received++;
       message.bytes += part.length;
       this.pendingBytes += part.length;
+      this.refreshExpiry(id, message);
     }
     if (
       message.bytes > MAX_MESSAGE_BYTES ||
@@ -112,10 +116,16 @@ export class P2pChunkDecoder {
     for (const [id, message] of this.pending) this.drop(id, message);
   }
 
+  private refreshExpiry(id: string, message: PendingMessage): void {
+    if (message.timer) clearTimeout(message.timer);
+    message.timer = setTimeout(() => this.drop(id, message), this.chunkIdleMs);
+    message.timer.unref();
+  }
+
   private drop(id: string, expected?: PendingMessage): void {
     const message = this.pending.get(id);
     if (!message || (expected && message !== expected)) return;
-    clearTimeout(message.timer);
+    if (message.timer) clearTimeout(message.timer);
     this.pendingBytes = Math.max(0, this.pendingBytes - message.bytes);
     this.pending.delete(id);
   }

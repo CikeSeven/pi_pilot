@@ -43,6 +43,11 @@ dependencies:
   flutter_local_notifications: ^22.2.0
   flutter_webrtc: ^1.5.2
   crypto: ^3.0.7
+  sqflite: ^2.4.2+1
+  path_provider: ^2.1.6
+  # 切网即时重连需要一个即时网络变化信号。钉死精确版本:
+  # 这是原生插件,次要版本升级会换掉平台实现。
+  connectivity_plus: 7.3.1
 
 dev_dependencies:
   flutter_test:
@@ -54,6 +59,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  sqflite_common_ffi: ^2.4.0+3
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

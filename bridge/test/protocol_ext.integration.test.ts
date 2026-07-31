@@ -897,6 +897,129 @@ test("streaming flips broadcast refreshed sessions so keepalive counts stay fres
   }
 });
 
+test("msg-delta: 声明能力的客户端收增量帧,未声明的收全量", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:delta",
+          label: "Delta desktop",
+          cwd: "/tmp/pipilot-delta",
+          sessionId: "session-delta",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-delta",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-delta", isStreaming: false },
+          entries: [],
+          leafId: "leaf-1",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const deltaPhone = await open(
+      `ws://127.0.0.1:${port}?token=mobile-test-token&caps=msg-delta`,
+    );
+    const plainPhone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(deltaPhone, plainPhone);
+    await Promise.all([
+      deltaPhone.waitFor((frame) => frame.type === "bridge_hello"),
+      plainPhone.waitFor((frame) => frame.type === "bridge_hello"),
+    ]);
+    assert.equal(
+      (await deltaPhone.request("hub_select_source", { sourceId: "desktop:delta" })).success,
+      true,
+    );
+    assert.equal(
+      (await plainPhone.request("hub_select_source", { sourceId: "desktop:delta" })).success,
+      true,
+    );
+
+    const sendUpdate = (seq: number, text: string, ts = 1): void => {
+      desktop.ws.send(
+        JSON.stringify({
+          type: "desktop_event",
+          sourceId: "desktop:delta",
+          epoch: "epoch-delta",
+          seq,
+          event: {
+            type: "message_update",
+            message: {
+              role: "assistant",
+              timestamp: ts,
+              content: [{ type: "text", text }],
+            },
+          },
+        }),
+      );
+    };
+
+    // 首帧:两边都必须收到全量 message_update(建立基线)。
+    sendUpdate(1, "Hello");
+    const firstDelta = await deltaPhone.waitFor(
+      (frame) => frame.type === "message_update" && frame._hub?.seq === 1,
+    );
+    await plainPhone.waitFor(
+      (frame) => frame.type === "message_update" && frame._hub?.seq === 1,
+    );
+    assert.equal(firstDelta.message.content[0].text, "Hello");
+
+    // 前缀扩展:声明能力的收到 message_delta,未声明的仍收全量。
+    sendUpdate(2, "Hello world");
+    const deltaFrame = await deltaPhone.waitFor(
+      (frame) => frame.type === "message_delta" && frame._hub?.seq === 2,
+    );
+    assert.equal(deltaFrame.key, "assistant:1");
+    assert.equal(deltaFrame.blockIndex, 0);
+    assert.equal(deltaFrame.field, "text");
+    assert.equal(deltaFrame.appendText, " world");
+    assert.equal(
+      deltaPhone.frames.some(
+        (frame) => frame.type === "message_update" && frame._hub?.seq === 2,
+      ),
+      false,
+      "声明能力的客户端不该再收到同 seq 的全量帧",
+    );
+    const plainFull = await plainPhone.waitFor(
+      (frame) => frame.type === "message_update" && frame._hub?.seq === 2,
+    );
+    assert.equal(plainFull.message.content[0].text, "Hello world");
+
+    // 非前缀(内容改写):回退全量并重建基线。
+    sendUpdate(3, "Hi there");
+    const fallback = await deltaPhone.waitFor(
+      (frame) => frame.type === "message_update" && frame._hub?.seq === 3,
+    );
+    assert.equal(fallback.message.content[0].text, "Hi there");
+
+    // 再次前缀扩展:基线重建后又能出增量。
+    sendUpdate(4, "Hi there!");
+    const delta2 = await deltaPhone.waitFor(
+      (frame) => frame.type === "message_delta" && frame._hub?.seq === 4,
+    );
+    assert.equal(delta2.appendText, "!");
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("hub did not exit")), 5_000)),
+    ]);
+  }
+});
+
 test("hub bound to '::' serves both IPv4 and IPv6 clients (dual-stack)", async () => {
   const port = await freePort();
   const bridgeRoot = path.resolve(import.meta.dirname, "..");
@@ -918,6 +1041,357 @@ test("hub bound to '::' serves both IPv4 and IPv6 clients (dual-stack)", async (
       onceExit(child),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 3_000),
+      ),
+    ]);
+  }
+});
+
+test("get_entries since 正向翻页:增量从头给、页间零丢失、tipId 锁边界", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+
+    const entries = Array.from({ length: 300 }, (_, i) => ({
+      id: `e${i}`,
+      type: "message",
+      timestamp: i + 1,
+      message: { role: i % 2 === 0 ? "user" : "assistant", content: `消息 ${i}`, timestamp: i + 1 },
+    }));
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:fwd",
+          label: "Forward desktop",
+          cwd: "/tmp/pipilot-fwd",
+          sessionId: "session-fwd",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-fwd",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-fwd", isStreaming: false },
+          entries,
+          leafId: "e299",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:fwd" })).success,
+      true,
+    );
+
+    // 从 e49 之后开始正向翻,每页限 4KB 强制多页;收集的 id 必须恰好是
+    // e50..e299 按序无洞 —— 旧的尾部裁剪行为会把前面的增量静默吞掉。
+    let since: string | null = "e49";
+    let tipId: string | undefined;
+    const collected: string[] = [];
+    let guard = 0;
+    for (;;) {
+      if (guard++ > 100) throw new Error("翻页超过 100 次,疑似死循环");
+      const page = await phone.request("get_entries", {
+        since,
+        forward: true,
+        limitBytes: 4096,
+        ...(tipId ? { tipId } : {}),
+      });
+      assert.equal(page.success, true);
+      tipId = page.data.tipId;
+      assert.equal(tipId, "e299", "tip 应锁定在当前快照末尾");
+      for (const entry of page.data.entries) collected.push(entry.id);
+      if (page.data.hasMore !== true) break;
+      since = page.data.nextSinceId;
+      assert.ok(typeof since === "string" && since.length > 0, "hasMore 时必须给 nextSinceId");
+    }
+    assert.equal(collected.length, 250);
+    for (let i = 0; i < 250; i++) {
+      assert.equal(collected[i], `e${50 + i}`, `第 ${i} 条应是 e${50 + i}`);
+    }
+
+    // since 游标不存在仍然明确报错。
+    const bogus = await phone.request("get_entries", { since: "nope", forward: true });
+    assert.equal(bogus.success, false);
+    // tipId 不存在同样明确报错,不允许默默退化成无界翻页。
+    const badTip = await phone.request("get_entries", {
+      since: "e49",
+      forward: true,
+      tipId: "nope",
+    });
+    assert.equal(badTip.success, false);
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});
+
+test("首屏字节预算是硬的:巨型单条被降级为 preview+contentRef,不得突破预算", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+
+    // 关键构造:巨型单条由「很多个中等大小的块」堆成,每块都不触发字段级封顶
+    // (单块 8000 字符 < MOBILE_ENTRY_TEXT_CAP 的 16K 字符),但整条序列化后
+    // 约 240KB —— 远超单条硬上限。旧实现靠「至少给 N 条」兜底,这种条目会
+    // 直接把首屏顶到几百 KB;慢 TURN 上传不完,表现为连上就超时重连。
+    const fatBlocks = Array.from({ length: 30 }, (_, i) => ({
+      type: "text",
+      text: `块${i}:` + "z".repeat(8000),
+    }));
+    const entries = [
+      ...Array.from({ length: 40 }, (_, i) => ({
+        id: `t${i}`,
+        type: "message",
+        timestamp: i + 1,
+        message: { role: "user", content: `尾部消息 ${i}`, timestamp: i + 1 },
+      })),
+      {
+        id: "fat",
+        type: "message",
+        timestamp: 500,
+        message: {
+          role: "toolResult",
+          toolName: "bash",
+          content: fatBlocks,
+          timestamp: 500,
+        },
+      },
+    ];
+    const fatRawBytes = Buffer.byteLength(JSON.stringify(entries[entries.length - 1]));
+    assert.ok(
+      fatRawBytes > 200 * 1024,
+      `构造的巨型单条应远超硬上限,实际 ${fatRawBytes}B`,
+    );
+
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:hardcap",
+          label: "Hard cap desktop",
+          cwd: "/tmp/pipilot-hardcap",
+          sessionId: "session-hardcap",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-hardcap",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-hardcap", isStreaming: false },
+          entries,
+          leafId: "fat",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:hardcap" })).success,
+      true,
+    );
+
+    const sync = await phone.request("hub_sync");
+    assert.equal(sync.success, true);
+    const sent = sync.data.snapshot.entries as Record<string, unknown>[];
+
+    // 巨型单条必须被降级,而不是原样塞进首屏。
+    const fat = sent.find((e) => e.id === "fat");
+    assert.ok(fat, "尾部那条必须还在(它是最新的)");
+    assert.equal(fat!.contentTruncated, true, "超硬上限的单条必须被标记折叠");
+    assert.deepEqual(
+      fat!.contentRef,
+      { entryId: "fat", bytes: fatRawBytes },
+      "必须给出 contentRef 供按需取全文",
+    );
+    const fatSentBytes = Buffer.byteLength(JSON.stringify(fat));
+    assert.ok(
+      fatSentBytes < 8 * 1024,
+      `降级后的单条应很小,实际 ${fatSentBytes}B`,
+    );
+
+    // 首屏 entries 总字节必须落在 P2P 硬预算之内(WS 走 1MB 预算,这里用
+    // 更严的 P2P 数值断言:降级生效后即使按 P2P 预算也装得下)。
+    const entriesBytes = Buffer.byteLength(JSON.stringify(sent));
+    assert.ok(
+      entriesBytes <= 128 * 1024,
+      `首屏 entries 必须落在 128KiB 硬预算内,实际 ${entriesBytes}B`,
+    );
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
+      ),
+    ]);
+  }
+});
+
+test("单条硬上限与 entry 形状无关:compaction(无 message)也必须被降级", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawnHub(port, bridgeRoot);
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(`ws://127.0.0.1:${port}/desktop?token=desktop-test-token`);
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+
+    // 关键构造:compaction 类型**根本没有 message 字段**,体积全在顶层
+    // summary(字符串)与 details(对象)里。
+    //
+    // 这是真机上抓到的缺陷:字段级封顶(capEntryForMobile)与旧版硬上限
+    // (hardCapEntryForMobile)都只看 entry.message,所以这类 entry 从两道
+    // 「上限」下面完整穿过去。真机日志:
+    //   entries_before{entries:1/1728,bytes:212673}
+    // 单条 207KiB 把 96KiB 的页预算顶穿 2.2 倍。实测 50.40MB 的真实会话里
+    // 有 35 条这样的 entry,最大单条 576,630B。
+    const compaction = {
+      id: "cmp",
+      type: "compaction",
+      parentId: "t39",
+      timestamp: 500,
+      summary: "摘要".repeat(60_000),
+      firstKeptEntryId: "t10",
+      tokensBefore: 123_456,
+      details: {
+        observations: Array.from({ length: 20 }, (_, i) => `观察${i}:` + "o".repeat(5_000)),
+        reflections: Array.from({ length: 20 }, (_, i) => `反思${i}:` + "r".repeat(5_000)),
+      },
+      fromHook: false,
+    };
+    const compactionRawBytes = Buffer.byteLength(JSON.stringify(compaction));
+    assert.ok(
+      compactionRawBytes > 200 * 1024,
+      `构造的 compaction 应远超硬上限,实际 ${compactionRawBytes}B`,
+    );
+
+    const entries = [
+      ...Array.from({ length: 40 }, (_, i) => ({
+        id: `t${i}`,
+        type: "message",
+        timestamp: i + 1,
+        message: { role: "user", content: `尾部消息 ${i}`, timestamp: i + 1 },
+      })),
+      compaction,
+    ];
+
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:shape",
+          label: "Shape agnostic",
+          cwd: "/tmp/pipilot-shape",
+          sessionId: "session-shape",
+          capabilities: ["prompt"],
+        },
+        snapshot: {
+          epoch: "epoch-shape",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-shape", isStreaming: false },
+          entries,
+          leafId: "cmp",
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:shape" })).success,
+      true,
+    );
+
+    const sync = await phone.request("hub_sync");
+    assert.equal(sync.success, true);
+    const sent = sync.data.snapshot.entries as Record<string, unknown>[];
+
+    const cmp = sent.find((e) => e.id === "cmp");
+    assert.ok(cmp, "compaction 那条必须还在(它是最新的)");
+    assert.equal(cmp!.contentTruncated, true, "没有 message 的巨型单条同样必须被折叠");
+    assert.deepEqual(
+      cmp!.contentRef,
+      { entryId: "cmp", bytes: compactionRawBytes },
+      "必须给出 contentRef 供按需取全文",
+    );
+    const cmpSentBytes = Buffer.byteLength(JSON.stringify(cmp));
+    assert.ok(
+      cmpSentBytes <= 64 * 1024,
+      `降级后必须落在单条硬上限内,实际 ${cmpSentBytes}B`,
+    );
+
+    // 结构性字段必须留下:App 靠它们定位、建树、辨类型。
+    assert.equal(cmp!.type, "compaction", "type 不得丢(App 据此渲染折叠卡)");
+    assert.equal(cmp!.parentId, "t39", "parentId 不得丢(会话树要用)");
+    assert.equal(cmp!.timestamp, 500, "timestamp 不得丢(排序要用)");
+
+    // summary 是手机端唯一会显示的内容:必须留可读开头,不能整条丢掉。
+    assert.equal(typeof cmp!.summary, "string", "summary 必须仍是字符串");
+    assert.ok(
+      (cmp!.summary as string).startsWith("摘要"),
+      "summary 必须保留可读开头",
+    );
+    assert.ok(
+      Buffer.byteLength(cmp!.summary as string) < 32 * 1024,
+      "summary 必须被截断",
+    );
+
+    // details 手机端不渲染(只有 custom_message 用 details),整体省略即可。
+    assert.notDeepEqual(cmp!.details, compaction.details, "details 不得原样过线");
+
+    const entriesBytes = Buffer.byteLength(JSON.stringify(sent));
+    assert.ok(
+      entriesBytes <= 128 * 1024,
+      `首屏 entries 必须落在 128KiB 硬预算内,实际 ${entriesBytes}B`,
+    );
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 5_000),
       ),
     ]);
   }

@@ -72,6 +72,23 @@ P2P 的 SDP 包含 DTLS 指纹,因此公网信令必须经过认证的 TLS。App
 PIPILOT_P2P_RENDEZVOUS=signal.example.com/pipilot
 ```
 
+也可以把整组 P2P 配置写进 `bridge/config.json`（推荐：此文件已在
+`bridge/.gitignore` 中，密钥不会进仓库；落盘权限 0600），每次启动自动读取：
+
+```json
+{
+  "p2p": {
+    "rendezvousUrl": "signal.example.com/pipilot",
+    "deviceId": "my-desktop",
+    "secret": "配对密钥"
+  }
+}
+```
+
+优先级：CLI 参数 > 环境变量 > `config.json`。配齐 `rendezvousUrl` 与
+`secret` 即默认启用；`"enabled": false` 可显式关闭。`deviceId` 缺省取本机
+hostname。
+
 App 与 bridge 都会给裸域名自动补上 `wss://`；只有本机测试需要显式写
 `ws://127.0.0.1:9378`。
 

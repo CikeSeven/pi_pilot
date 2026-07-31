@@ -11,7 +11,7 @@ const _maxMessageBytes = 16 * 1024 * 1024;
 const _maxChunks = (_maxMessageBytes + _chunkBytes - 1) ~/ _chunkBytes;
 const _maxPendingMessages = 8;
 const _maxPendingBytes = 32 * 1024 * 1024;
-const _chunkTtl = Duration(seconds: 30);
+const _chunkIdleTimeout = Duration(seconds: 30);
 final _random = Random.secure();
 
 String _newMessageId() {
@@ -36,17 +36,21 @@ List<String> encodeP2pFrames(String data) {
 }
 
 class _PendingMessage {
-  _PendingMessage(this.total, this.timer)
-    : parts = List<Uint8List?>.filled(total, null);
+  _PendingMessage(this.total) : parts = List<Uint8List?>.filled(total, null);
 
   final int total;
-  final Timer timer;
   final List<Uint8List?> parts;
+  Timer? timer;
   int bytes = 0;
 }
 
 /// 把 P2P 传输分片还原成一条 Hub JSON 文本帧。普通帧直接透传。
 class P2pChunkDecoder {
+  P2pChunkDecoder({Duration idleTimeout = _chunkIdleTimeout})
+    : assert(idleTimeout > Duration.zero),
+      _idleTimeout = idleTimeout;
+
+  final Duration _idleTimeout;
   final Map<String, _PendingMessage> _pending = <String, _PendingMessage>{};
   int _pendingBytes = 0;
 
@@ -85,10 +89,7 @@ class P2pChunkDecoder {
       if (_pending.length >= _maxPendingMessages) {
         _drop(_pending.keys.first);
       }
-      late final _PendingMessage created;
-      final timer = Timer(_chunkTtl, () => _drop(id, created));
-      created = _PendingMessage(total, timer);
-      message = created;
+      message = _PendingMessage(total);
       _pending[id] = message;
     }
 
@@ -96,6 +97,7 @@ class P2pChunkDecoder {
       message.parts[index] = part;
       message.bytes += part.length;
       _pendingBytes += part.length;
+      _refreshExpiry(id, message);
     }
     if (message.bytes > _maxMessageBytes || _pendingBytes > _maxPendingBytes) {
       _drop(id, message);
@@ -121,13 +123,18 @@ class P2pChunkDecoder {
     }
   }
 
+  void _refreshExpiry(String id, _PendingMessage message) {
+    message.timer?.cancel();
+    message.timer = Timer(_idleTimeout, () => _drop(id, message));
+  }
+
   void _drop(String id, [_PendingMessage? expected]) {
     final message = _pending[id];
     if (message == null ||
         (expected != null && !identical(message, expected))) {
       return;
     }
-    message.timer.cancel();
+    message.timer?.cancel();
     _pendingBytes = max(0, _pendingBytes - message.bytes);
     _pending.remove(id);
   }

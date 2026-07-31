@@ -66,6 +66,15 @@ interface FileConfig {
   token?: string;
   desktopToken?: string;
   dirSessions?: Record<string, string>;
+  /// P2P 打洞配置也可写在 config.json(此文件在 bridge/.gitignore 中,
+  /// 密钥不会进仓库;writeFileConfig 以 0600 权限落盘)。
+  /// 优先级:CLI 参数 > 环境变量 > 本文件。
+  p2p?: {
+    enabled?: boolean;
+    rendezvousUrl?: string;
+    deviceId?: string;
+    secret?: string;
+  };
 }
 
 function readFileConfig(): FileConfig {
@@ -174,8 +183,16 @@ export function loadConfig(): BridgeConfig {
   };
 
   const p2pRendezvous = normalizeP2pSignalingUrl(
-    str("p2p-rendezvous") ?? process.env.PIPILOT_P2P_RENDEZVOUS ?? "",
+    str("p2p-rendezvous") ??
+      process.env.PIPILOT_P2P_RENDEZVOUS ??
+      file.p2p?.rendezvousUrl ??
+      "",
   );
+  const p2pSecret =
+    str("p2p-secret") ??
+    process.env.PIPILOT_P2P_SECRET ??
+    file.p2p?.secret ??
+    "";
 
   const dirSessions: Record<string, string> = { ...(file.dirSessions ?? {}) };
   const sessionId =
@@ -219,17 +236,19 @@ export function loadConfig(): BridgeConfig {
     leaseMinTtlMs: positiveInt(process.env.PIPILOT_LEASE_MIN_TTL_MS, 3_000),
     leaseMaxTtlMs: positiveInt(process.env.PIPILOT_LEASE_MAX_TTL_MS, 8_000),
     p2p: {
-      // 默认:配了信令服地址和配对密钥就开;显式 PIPILOT_P2P_ENABLED=false 可关。
+      // 默认:配了信令服地址和配对密钥就开;显式 PIPILOT_P2P_ENABLED=false
+      // 或 config.json 里 p2p.enabled=false 可关。
       enabled:
         process.env.PIPILOT_P2P_ENABLED !== undefined
           ? process.env.PIPILOT_P2P_ENABLED === "true"
-          : Boolean(
-              p2pRendezvous &&
-                (str("p2p-secret") ?? process.env.PIPILOT_P2P_SECRET),
-            ),
+          : (file.p2p?.enabled ?? Boolean(p2pRendezvous && p2pSecret)),
       rendezvousUrl: p2pRendezvous,
-      deviceId: str("p2p-device-id") ?? process.env.PIPILOT_P2P_DEVICE_ID ?? os.hostname(),
-      secret: str("p2p-secret") ?? process.env.PIPILOT_P2P_SECRET ?? "",
+      deviceId:
+        str("p2p-device-id") ??
+        process.env.PIPILOT_P2P_DEVICE_ID ??
+        file.p2p?.deviceId ??
+        os.hostname(),
+      secret: p2pSecret,
     },
   };
 }

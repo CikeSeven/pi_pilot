@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:math' show Random;
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 读取结果(用 record 避免与 state 层互相 import)。
@@ -5,6 +8,7 @@ typedef SettingsData = ({
   String host,
   int port,
   String token,
+  String? clientId,
   String themeMode,
   String? modelProvider,
   String? modelId,
@@ -49,11 +53,84 @@ class SettingsRepository {
   static const _kP2pRendezvous = 'p2p.rendezvous';
   static const _kP2pDeviceId = 'p2p.deviceId';
   static const _kP2pSecret = 'p2p.secret';
+  /// 稳定客户端身份:重连后 bridge 据此即时接管租约/去重请求,
+  /// 不必等旧租约 TTL 过期。首次启动生成并持久化。
+  static const _kClientId = 'conn.clientId';
+  /// 上次成功的 ICE 模式缓存前缀(p2p.icemode.{deviceId}):
+  /// relay 网络的每次重连可省 7s direct 空等。
+  static const _kP2pIceModePrefix = 'p2p.icemode.';
+
+  /// 读取缓存的成功模式('direct'/'relay');7 天过期,连败 2 次作废。
+  Future<String?> loadP2pIceMode(String deviceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$_kP2pIceModePrefix$deviceId');
+    if (raw == null) return null;
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      final savedAt = map['savedAt'] as int? ?? 0;
+      final failCount = map['failCount'] as int? ?? 0;
+      final ageMs = DateTime.now().millisecondsSinceEpoch - savedAt;
+      if (ageMs > 7 * 24 * 3600 * 1000 || failCount >= 2) return null;
+      final mode = map['mode'];
+      return mode is String ? mode : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveP2pIceMode(String deviceId, String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      '$_kP2pIceModePrefix$deviceId',
+      jsonEncode(<String, dynamic>{
+        'mode': mode,
+        'savedAt': DateTime.now().millisecondsSinceEpoch,
+        'failCount': 0,
+      }),
+    );
+  }
+
+  Future<void> markP2pIceModeFailed(String deviceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$_kP2pIceModePrefix$deviceId');
+    var failCount = 1;
+    String mode = 'unknown';
+    if (raw != null) {
+      try {
+        final map = jsonDecode(raw) as Map<String, dynamic>;
+        failCount = (map['failCount'] as int? ?? 0) + 1;
+        mode = map['mode'] as String? ?? mode;
+      } catch (_) {}
+    }
+    await prefs.setString(
+      '$_kP2pIceModePrefix$deviceId',
+      jsonEncode(<String, dynamic>{
+        'mode': mode,
+        'savedAt': DateTime.now().millisecondsSinceEpoch,
+        'failCount': failCount,
+      }),
+    );
+  }
+
+  static String _generateClientId() {
+    final random = Random.secure();
+    final hex = List<int>
+        .generate(8, (_) => random.nextInt(256))
+        .map((value) => value.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return 'app-$hex';
+  }
 
   Future<SettingsData> load() async {
     final prefs = await SharedPreferences.getInstance();
+    var clientId = prefs.getString(_kClientId);
+    if (clientId == null || clientId.isEmpty) {
+      clientId = _generateClientId();
+      await prefs.setString(_kClientId, clientId);
+    }
     return (
       host: prefs.getString(_kHost) ?? '',
+      clientId: clientId,
       port: prefs.getInt(_kPort) ?? 9377,
       token: prefs.getString(_kToken) ?? '',
       themeMode: prefs.getString(_kThemeMode) ?? 'light',

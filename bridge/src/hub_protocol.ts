@@ -15,22 +15,48 @@ export const MAX_BUFFERED_SOCKET_BYTES = 2 * 1024 * 1024;
 export const MAX_MOBILE_ENTRIES_BYTES = 1024 * 1024;
 
 /**
- * 即使字节预算已经用完,也至少给这么多条尾部 entries。
+ * P2P(DataChannel)通道的首载字节预算(硬上限)。
  *
- * 单条 entry 实测最大能到 1.16MB(大段工具输出),只按字节封顶会在这种条目面前
- * 退化成只发 1 条,聊天页就只剩一句话。所以条数下限优先于字节预算 ——
- * 超出部分宁可让它大于预算,也不能把会话截成空卡。
+ * 慢速 TURN(50KB/s)下线体积 ≈ 字节数,128KiB ≈ 2.6s 线耗。更早的历史一律
+ * 靠 get_entries 分页补,首屏永远不承载完整历史。
  */
-export const MIN_MOBILE_ENTRIES = 80;
+export const MAX_MOBILE_ENTRIES_BYTES_P2P = 128 * 1024;
 
 /**
- * 手机端单条文本字段(text/thinking/content 字符串)的字符上限。
+ * get_entries 单页字节预算(硬上限,P2P 与 WS 共用)。
  *
- * 条数下限优先于字节预算,所以巨型单条必须先自己瘦身:实测 read 工具返回的
- * 截图 image 块单条 1.7MB、compaction 摘要 0.5MB,80 条下限会把它们硬塞进快照,
- * 4MB JSON 经 base64 分片变 5.6MB,慢速链路上直接把 P2P 缓冲顶爆(1013)。
+ * 原值 256KiB 在 50KB/s 上单页要 5s 以上;96KiB ≈ 2s,配合 tipId 游标可以
+ * 稳定连续翻页而不触发请求超时。
  */
-export const MOBILE_ENTRY_TEXT_CAP = 64 * 1024;
+export const MAX_ENTRIES_PAGE_BYTES = 96 * 1024;
+
+/** 事件重放页字节预算(硬上限)。事件比 entries 小,但也必须有界。 */
+export const MAX_EVENT_PAGE_BYTES = 64 * 1024;
+
+/**
+ * 手机端单条文本字段(text/thinking/content 字符串)的**字符**上限。
+ *
+ * 实测 read 工具返回的截图 image 块单条 1.7MB、compaction 摘要 0.5MB。单条
+ * 必须先自己瘦身,否则一条就能顶穿整页预算。
+ *
+ * 取 16K 字符而不是 64K:这是字符数,不是字节数。CJK 一字 3 字节,64K 字符
+ * 最坏情况是 192KB —— 比整个首屏预算(128KiB)还大,字段级封顶等于没有上限。
+ * 16K 字符最坏 48KB,稳定落在 [MOBILE_ENTRY_HARD_BYTES] 之内,字段级截断
+ * (保留可读开头 + 截断标记)才真正生效,而不是被硬上限降级覆盖掉。
+ */
+export const MOBILE_ENTRY_TEXT_CAP = 16 * 1024;
+
+/**
+ * 单条 entry 的硬上限(序列化后字节)。
+ *
+ * 超过就换成 preview + contentRef:保留可读开头,完整内容按需用
+ * `get_entry_content{entryId, field, offset, length}` 取。
+ *
+ * 没有这个上限时,「至少给 N 条」的规则会让巨型单条突破页预算 —— 这正是
+ * 慢链路上首屏迟迟不来的原因之一。现在预算是硬的,单条超限只能被降级,
+ * 不允许突破。
+ */
+export const MOBILE_ENTRY_HARD_BYTES = 64 * 1024;
 
 /** 向桌面 relay 索要新快照的等待上限(远小于 App 的 20s 请求超时)。 */
 export const SNAPSHOT_REQUEST_TIMEOUT_MS = 4_000;

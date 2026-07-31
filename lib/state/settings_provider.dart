@@ -28,6 +28,7 @@ class AppSettings {
     this.p2pRendezvous = '',
     this.p2pDeviceId = '',
     this.p2pSecret = '',
+    this.clientId = '',
     this.loaded = false,
   });
 
@@ -73,6 +74,10 @@ class AppSettings {
   /// 配对密钥:与信令服 devices 表一致。挑战-应答校验,明文永不上行。
   final String p2pSecret;
 
+  /// 稳定客户端身份(app-{16hex}):重连后 bridge 据此即时接管租约、
+  /// 去重请求,不必等旧租约 TTL。首次启动生成并持久化。
+  final String clientId;
+
   /// 是否已完成首次从磁盘的加载(用于触发自动连接)。
   final bool loaded;
 
@@ -105,6 +110,7 @@ class AppSettings {
     String? p2pRendezvous,
     String? p2pDeviceId,
     String? p2pSecret,
+    String? clientId,
     bool? loaded,
   }) {
     return AppSettings(
@@ -128,6 +134,7 @@ class AppSettings {
       p2pRendezvous: p2pRendezvous ?? this.p2pRendezvous,
       p2pDeviceId: p2pDeviceId ?? this.p2pDeviceId,
       p2pSecret: p2pSecret ?? this.p2pSecret,
+      clientId: clientId ?? this.clientId,
       loaded: loaded ?? this.loaded,
     );
   }
@@ -172,6 +179,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
       p2pRendezvous: data.p2pRendezvous,
       p2pDeviceId: data.p2pDeviceId,
       p2pSecret: data.p2pSecret,
+      clientId: data.clientId ?? '',
       loaded: true,
     );
   }
@@ -249,6 +257,15 @@ class SettingsNotifier extends Notifier<AppSettings> {
     state = state.copyWith(accent: accent);
     await _repo.saveAccent(accent.name);
   }
+
+  /// ICE 模式缓存:上次打洞成功用 direct 还是 relay(按 deviceId)。
+  Future<String?> p2pIceMode(String deviceId) => _repo.loadP2pIceMode(deviceId);
+
+  Future<void> setP2pIceMode(String deviceId, String mode) =>
+      _repo.saveP2pIceMode(deviceId, mode);
+
+  Future<void> failP2pIceMode(String deviceId) =>
+      _repo.markP2pIceModeFailed(deviceId);
 
   Future<void> setP2pConfig({
     required bool enabled,

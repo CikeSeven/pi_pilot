@@ -275,6 +275,114 @@ void main() {
       expect(attempts, <String>['direct']);
     });
 
+    test('direct 慢于头启时 relay 并行起跑,先到者胜出', () async {
+      // 原来是严格串行:direct 失败要先吃满整个 directTimeout(7s)才开始 relay。
+      // relay 网络上每次重连都白等这 7s —— 用户看到的就是"连上很慢"。
+      final attempts = <String>[];
+      final sw = Stopwatch()..start();
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: true,
+        headStart: const Duration(milliseconds: 50),
+        direct: () async {
+          attempts.add('direct');
+          // 直连很慢(模拟困难 NAT 下的空等)。
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+          return null;
+        },
+        relay: () async {
+          attempts.add('relay');
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          return 'relay-channel';
+        },
+      );
+      sw.stop();
+
+      expect(channel, 'relay-channel');
+      expect(attempts, <String>['direct', 'relay'], reason: '两路都应起跑');
+      // 关键:不必等 direct 的 600ms 走完。串行实现下这里至少要 600ms。
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(400),
+        reason: 'relay 胜出后应立刻返回,不等 direct 空等结束(实测 ${sw.elapsedMilliseconds}ms)',
+      );
+    });
+
+    test('败者的迟到通道会被回收,不泄漏', () async {
+      // 竞速的代价:败者可能是一条**已经打开**的通道(PeerConnection +
+      // DataChannel + 信令都还挂着)。不回收就是资源泄漏。
+      final disposed = <String>[];
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: true,
+        headStart: const Duration(milliseconds: 20),
+        dispose: (loser) async => disposed.add(loser),
+        direct: () async {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          return 'direct-late';
+        },
+        relay: () async {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          return 'relay-wins';
+        },
+      );
+
+      expect(channel, 'relay-wins');
+      // 等 direct 那条迟到结果落地。
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(
+        disposed,
+        <String>['direct-late'],
+        reason: '迟到的赢家必须被 dispose 回收',
+      );
+    });
+
+    test('两路都失败才算整体失败', () async {
+      final attempts = <String>[];
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: true,
+        headStart: const Duration(milliseconds: 20),
+        direct: () async {
+          attempts.add('direct');
+          return null;
+        },
+        relay: () async {
+          attempts.add('relay');
+          return null;
+        },
+      );
+
+      expect(channel, isNull);
+      expect(attempts, <String>['direct', 'relay']);
+    });
+
+    test('任一路抛异常不会吞掉另一路的成功', () async {
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: true,
+        headStart: const Duration(milliseconds: 20),
+        direct: () async => throw StateError('direct blew up'),
+        relay: () async => 'relay-channel',
+      );
+
+      expect(channel, 'relay-channel');
+    });
+
+    test('canRelay 为假时只走直连,不起竞速', () async {
+      final attempts = <String>[];
+      final channel = await p2pConnectWithFallback<String>(
+        canRelay: false,
+        direct: () async {
+          attempts.add('direct');
+          return null;
+        },
+        relay: () async {
+          attempts.add('relay');
+          return 'relay-channel';
+        },
+      );
+
+      expect(channel, isNull, reason: '没有 TURN 时不得回退到 relay');
+      expect(attempts, <String>['direct']);
+    });
+
     test('回传的 WebRTC 错误去换行且限制长度', () {
       final message = p2pErrorForWire('first\nsecond${'x' * 600}');
       expect(message, isNot(contains('\n')));

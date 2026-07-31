@@ -15,6 +15,16 @@ class _HandshakeChannel implements HubChannel {
   Stream<dynamic> get stream => controller.stream;
 
   @override
+  void Function()? onActivity;
+
+  @override
+  void Function()? onDataProgress;
+
+  /// implements HubChannel 要求实现全部成员(即便基类给了默认体)。
+  @override
+  Future<String?> telemetry() async => null;
+
+  @override
   List<String> get transportCapabilities => const <String>[p2pChunkCapability];
 
   @override
@@ -60,6 +70,43 @@ void main() {
       () => encodeP2pFrames('x' * (16 * 1024 * 1024 + 1)),
       throwsStateError,
     );
+    decoder.close();
+  });
+
+  test('慢链路持续收到新分片时,总耗时超过空闲窗口仍能重组', () async {
+    final original = '慢链路快照' * 7000;
+    final frames = encodeP2pFrames(original);
+    expect(frames.length, greaterThan(2));
+
+    final decoder = P2pChunkDecoder(idleTimeout: const Duration(seconds: 1));
+    String? decoded;
+    for (var i = 0; i < frames.length; i++) {
+      decoded = decoder.add(frames[i]) ?? decoded;
+      if (i < frames.length - 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+      }
+    }
+
+    expect(decoded, original);
+    decoder.close();
+  });
+
+  test('分片真正停滞超过空闲窗口后会被回收', () async {
+    final original = '停滞快照' * 7000;
+    final frames = encodeP2pFrames(original);
+    expect(frames.length, greaterThan(2));
+
+    final decoder = P2pChunkDecoder(
+      idleTimeout: const Duration(milliseconds: 100),
+    );
+    expect(decoder.add(frames.first), isNull);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    String? decoded;
+    for (final frame in frames.skip(1)) {
+      decoded = decoder.add(frame) ?? decoded;
+    }
+    expect(decoded, isNull);
     decoder.close();
   });
 

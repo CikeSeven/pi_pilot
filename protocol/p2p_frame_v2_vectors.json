@@ -1,0 +1,98 @@
+{
+  "comment": "chunk-v2 二进制帧跨端测试向量。lib/core/p2p_frame_v2.dart 与 bridge/src/p2p_frame_v2.ts 必须产生/接受完全相同的字节。hex 为完整线帧。",
+  "vectors": [
+    {
+      "name": "BEGIN with meta",
+      "frame": {
+        "type": 1,
+        "transferIdUuid": "3f786850-e387-4b2f-9d4a-1c6f2a9e0b51",
+        "pageIndex": 0,
+        "pageCount": 5,
+        "meta": {
+          "pageBytes": 36864,
+          "encoding": "identity",
+          "payloadType": "json"
+        },
+        "payloadHex": ""
+      },
+      "hex": "503202013f786850e3874b2f9d4a1c6f2a9e0b510000000000000005003e7b22706167654279746573223a33363836342c22656e636f64696e67223a226964656e74697479222c227061796c6f616454797065223a226a736f6e227d"
+    },
+    {
+      "name": "DATA with raw payload",
+      "frame": {
+        "type": 2,
+        "transferIdUuid": "3f786850-e387-4b2f-9d4a-1c6f2a9e0b51",
+        "pageIndex": 3,
+        "pageCount": 5,
+        "meta": null,
+        "payloadHex": "48656c6c6f2c20776f726c642100ff00"
+      },
+      "hex": "503202023f786850e3874b2f9d4a1c6f2a9e0b510000000300000005000048656c6c6f2c20776f726c642100ff00"
+    },
+    {
+      "name": "DONE empty",
+      "frame": {
+        "type": 3,
+        "transferIdUuid": "00000000-0000-0000-0000-000000000000",
+        "pageIndex": 0,
+        "pageCount": 1,
+        "meta": null,
+        "payloadHex": ""
+      },
+      "hex": "503202030000000000000000000000000000000000000000000000010000"
+    },
+    {
+      "name": "ACK ranges",
+      "frame": {
+        "type": 4,
+        "transferIdUuid": "3f786850-e387-4b2f-9d4a-1c6f2a9e0b51",
+        "pageIndex": 0,
+        "pageCount": 5,
+        "meta": {
+          "ranges": [
+            [
+              0,
+              2
+            ],
+            [
+              4,
+              4
+            ]
+          ]
+        },
+        "payloadHex": ""
+      },
+      "hex": "503202043f786850e3874b2f9d4a1c6f2a9e0b51000000000000000500187b2272616e676573223a5b5b302c325d2c5b342c345d5d7d"
+    },
+    {
+      "name": "NACK missing",
+      "frame": {
+        "type": 5,
+        "transferIdUuid": "3f786850-e387-4b2f-9d4a-1c6f2a9e0b51",
+        "pageIndex": 0,
+        "pageCount": 5,
+        "meta": {
+          "missing": [
+            3
+          ]
+        },
+        "payloadHex": ""
+      },
+      "hex": "503202053f786850e3874b2f9d4a1c6f2a9e0b510000000000000005000f7b226d697373696e67223a5b335d7d"
+    },
+    {
+      "name": "ABORT reason",
+      "frame": {
+        "type": 6,
+        "transferIdUuid": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "pageIndex": 0,
+        "pageCount": 0,
+        "meta": {
+          "reason": "receiver overflow"
+        },
+        "payloadHex": ""
+      },
+      "hex": "50320206ffffffffffffffffffffffffffffffff0000000000000000001e7b22726561736f6e223a227265636569766572206f766572666c6f77227d"
+    }
+  ]
+}

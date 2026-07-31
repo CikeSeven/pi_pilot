@@ -78,11 +78,43 @@ class PiConnection {
 
   bool get isOpen => _channel != null;
 
+  DateTime _lastActivityAt = DateTime.now();
+
+  /// 最近一次入站字节活动(分片级)。进度型超时据此给慢速传输续命。
+  DateTime get lastActivityAt => _lastActivityAt;
+
+  int _dataProgressTicks = 0;
+
+  /// 入站**数据**进度计数(单调递增,排除 bridge_ping/pong 心跳与握手前帧)。
+  ///
+  /// [lastActivityAt] 会被周期心跳刷新,所以它只能证明"链路活着",不能证明
+  /// "这个请求还在推进"——一个卡死的大 RPC 在心跳正常时会被无限续命。
+  /// 请求级超时必须只看这个计数是否变化。
+  int get dataProgressTicks => _dataProgressTicks;
+
+  void _noteDataProgress() {
+    _dataProgressTicks++;
+  }
+
+  /// 传输层遥测转发。不暴露 channel 本体:上层只需要这一行诊断文本,
+  /// 拿到 channel 反而会绕过 PiConnection 的生命周期管理。
+  Future<String?> transportTelemetry() async {
+    final channel = _channel;
+    if (channel == null) return null;
+    try {
+      return await channel.telemetry();
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Returns the decoded `bridge_hello` map on success, null on failure.
   Future<Map<String, dynamic>?> connect({
     required String host,
     required int port,
     required String token,
+    String? clientId,
+    List<String> capabilities = const [],
     Duration timeout = const Duration(seconds: 12),
   }) async {
     disconnect(notify: false);
@@ -100,7 +132,11 @@ class PiConnection {
         scheme: 'ws',
         host: parsed.host,
         port: parsed.port ?? port,
-        queryParameters: <String, String>{'token': token},
+        queryParameters: <String, String>{
+          'token': token,
+          'clientId': ?clientId,
+          if (capabilities.isNotEmpty) 'caps': capabilities.join(','),
+        },
       );
       channel = WebSocketChannel.connect(uri);
     } catch (_) {
@@ -143,6 +179,7 @@ class PiConnection {
 
     _sub = channel.stream.listen(
       (dynamic data) {
+        _lastActivityAt = DateTime.now();
         Object? decoded;
         try {
           decoded = jsonDecode(data as String);
@@ -159,6 +196,12 @@ class PiConnection {
             if (!ready.isCompleted) ready.complete(decoded);
           }
           return; // drop anything before the hello
+        }
+        // 完整帧到达:心跳不算数据进度(bridge_ping 由上层应答,pong 在
+        // P2P 传输层就被拦掉了,WS 直连下才会走到这里)。
+        final type = decoded['type'];
+        if (type != 'bridge_ping' && type != 'bridge_pong') {
+          _noteDataProgress();
         }
         _messages.add(decoded);
       },
@@ -179,6 +222,9 @@ class PiConnection {
     );
 
     // 监听就位后再发首帧(P2P 的 auth):bridge 见到 auth 才回 bridge_hello。
+    channel.onActivity = () => _lastActivityAt = DateTime.now();
+    // 分片级数据进度:大消息重组期间没有完整帧,只有这个能证明请求在推进。
+    channel.onDataProgress = _noteDataProgress;
     onAttached?.call();
 
     return ready.future.timeout(
