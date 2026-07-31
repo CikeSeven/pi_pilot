@@ -1,22 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/core/device_models.dart';
 import 'package:pi_pilot/core/settings_repository.dart';
-import 'package:pi_pilot/state/pi_session.dart';
+import 'package:pi_pilot/state/device_manager.dart';
 import 'package:pi_pilot/ui/settings/settings_screen.dart';
 import 'package:pi_pilot/ui/settings/settings_sections.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-class _FakeSessionNotifier extends PiSessionNotifier {
-  int connectCalls = 0;
+/// 多设备改造后「保存并连接」走 roster:upsertDevice 即触发连接编排
+/// (详见 device_manager.dart)。假 manager 只记录 upsert,不真打网络。
+class _FakeDeviceManager extends DeviceManagerNotifier {
+  final List<DeviceProfile> upserts = [];
 
   @override
-  PiState build() => PiState.initial();
+  DeviceManagerState build() => const DeviceManagerState(loaded: true);
 
   @override
-  Future<void> connect() async {
-    connectCalls++;
+  Future<void> upsertDevice(
+    DeviceProfile device, {
+    bool connect = true,
+  }) async {
+    upserts.add(device);
   }
 }
 
@@ -77,11 +83,10 @@ void main() {
 
   testWidgets('保存并连接会同时保存 P2P 卡内容', (tester) async {
     SharedPreferences.setMockInitialValues({});
+    final fakeManager = _FakeDeviceManager();
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [
-          piSessionProvider.overrideWith(() => _FakeSessionNotifier()),
-        ],
+        overrides: [deviceManagerProvider.overrideWith(() => fakeManager)],
         child: MaterialApp(
           theme: buildLightTheme(),
           home: const ConnectionPage(),
@@ -122,20 +127,20 @@ void main() {
     expect(saved.p2pDeviceId, 'home-pc');
     expect(saved.p2pSecret, 'pairing-secret');
 
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(ConnectionPage)),
-    );
-    final session = container.read(piSessionProvider.notifier);
-    expect((session as _FakeSessionNotifier).connectCalls, 1);
+    // 「保存并连接」= 写入 roster(upsert 内部触发连接编排)。
+    expect(fakeManager.upserts, hasLength(1));
+    final upserted = fakeManager.upserts.single;
+    expect(upserted.host, '192.168.1.10');
+    expect(upserted.p2pDeviceId, 'home-pc');
+    expect(upserted.transport, DeviceTransport.auto);
   });
 
   testWidgets('公网明文信令会阻止保存与连接', (tester) async {
     SharedPreferences.setMockInitialValues({});
+    final fakeManager = _FakeDeviceManager();
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [
-          piSessionProvider.overrideWith(() => _FakeSessionNotifier()),
-        ],
+        overrides: [deviceManagerProvider.overrideWith(() => fakeManager)],
         child: MaterialApp(
           theme: buildLightTheme(),
           home: const ConnectionPage(),
@@ -170,14 +175,8 @@ void main() {
     expect(find.text('公网信令必须使用 wss://,ws:// 仅限本机测试'), findsOneWidget);
     final saved = await SettingsRepository().load();
     expect(saved.p2pEnabled, isFalse);
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(ConnectionPage)),
-    );
-    expect(
-      (container.read(piSessionProvider.notifier) as _FakeSessionNotifier)
-          .connectCalls,
-      0,
-    );
+    // 校验失败 → 不落 roster、不发起连接。
+    expect(fakeManager.upserts, isEmpty);
   });
 
   testWidgets('入口带当前值摘要,不用点进去才知道配了什么', (tester) async {

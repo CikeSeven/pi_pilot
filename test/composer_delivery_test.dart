@@ -7,11 +7,8 @@ import 'package:pi_pilot/ui/theme/app_theme.dart';
 
 /// 新版输入框内嵌 ModelPicker / _ContextRing(Riverpod consumer),
 /// 测试必须给 ProviderScope;会话态用假的就行,不用真连接。
-class _FakeNotifier extends PiSessionNotifier {
-  @override
-  PiState build() => PiState.initial();
-}
-
+/// piSessionProvider 现在是「当前设备状态」代理(`Provider<PiState>`),
+/// override 一个状态值即可。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -24,7 +21,7 @@ void main() {
     VoidCallback? onInterruptAndSend,
     VoidCallback? onAbort,
   }) => ProviderScope(
-    overrides: [piSessionProvider.overrideWith(() => _FakeNotifier())],
+    overrides: [piSessionProvider.overrideWith((ref) => PiState.initial())],
     child: MaterialApp(
       theme: buildLightTheme(),
       home: Scaffold(

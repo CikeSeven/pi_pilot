@@ -304,7 +304,11 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
     });
     if (_models == null && !_loading) {
       _loading = true;
-      final notifier = ref.read(piSessionProvider.notifier);
+      final notifier = ref.read(piSessionNotifierProvider);
+      if (notifier == null) {
+        _loading = false;
+        return;
+      }
       // 模型和深度并行加载:同一次展开都要用。
       final results = await Future.wait([
         notifier.getAvailableModels(),
@@ -323,10 +327,10 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
   /// 选中模型:不切走就收起来不及选深度 —— 自动进二级。
   Future<void> _selectModel(ModelInfo m) async {
     final ok = await ref
-        .read(piSessionProvider.notifier)
-        .setModel(m.provider, m.id);
+        .read(piSessionNotifierProvider)
+        ?.setModel(m.provider, m.id);
     if (!mounted) return;
-    if (!ok) {
+    if (ok != true) {
       setState(() => _expanded = false);
       ScaffoldMessenger.of(
         context,
@@ -339,9 +343,9 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
   Future<void> _selectLevel(String level) async {
     setState(() => _expanded = false);
     final ok = await ref
-        .read(piSessionProvider.notifier)
-        .setThinkingLevel(level);
-    if (mounted && !ok) {
+        .read(piSessionNotifierProvider)
+        ?.setThinkingLevel(level);
+    if (mounted && ok != true) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('切换思考深度失败')));

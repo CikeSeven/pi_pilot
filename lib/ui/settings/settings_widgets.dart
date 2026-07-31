@@ -44,8 +44,8 @@ class HubSourceCard extends ConsumerWidget {
               if (source != null && !source.connected)
                 TextButton.icon(
                   onPressed: () => ref
-                      .read(piSessionProvider.notifier)
-                      .openSession(
+                      .read(piSessionNotifierProvider)
+                      ?.openSession(
                         sessionId: source.sessionId,
                         cwd: source.cwd,
                       ),
@@ -288,8 +288,9 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
       }
       return;
     }
+    final notifier = ref.read(piSessionNotifierProvider);
+    if (notifier == null) return;
     setState(() => _loading = true);
-    final notifier = ref.read(piSessionProvider.notifier);
     final models = await notifier.getAvailableModels();
     final levels = await notifier.getThinkingLevels();
     if (!mounted) return;
@@ -308,7 +309,7 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
     final piState = ref.watch(piSessionProvider);
     final autoRetry = ref.watch(settingsProvider.select((s) => s.autoRetry));
     final colors = Theme.of(context).colorScheme;
-    final notifier = ref.read(piSessionProvider.notifier);
+    final notifier = ref.read(piSessionNotifierProvider);
     final source = piState.selectedSource;
     final connected =
         piState.status == PiConnStatus.connected && source?.connected == true;
@@ -363,11 +364,11 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
                   ? null
                   : (key) async {
                       final m = models.firstWhere((x) => x.key == key);
-                      final ok = await notifier.setModel(m.provider, m.id);
+                      final ok = await notifier?.setModel(m.provider, m.id);
                       // setModel 是网络往返,期间用户可能已退出本页,
                       // 那时 widget.onChanged 会调到已 dispose 的 setState
                       if (!mounted) return;
-                      if (ok) widget.onChanged();
+                      if (ok == true) widget.onChanged();
                     },
             ),
             const SizedBox(height: 12),
@@ -387,7 +388,7 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
                   ? null
                   : (level) async {
                       if (level != null) {
-                        await notifier.setThinkingLevel(level);
+                        await notifier?.setThinkingLevel(level);
                       }
                     },
             ),
@@ -397,7 +398,7 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
               subtitle: const Text('上下文快满时自动压缩'),
               value: piState.autoCompactionEnabled,
               onChanged: source?.isHeadless == true
-                  ? (v) => notifier.setAutoCompaction(v)
+                  ? (v) => notifier?.setAutoCompaction(v)
                   : null,
             ),
             SwitchListTile(
@@ -406,7 +407,7 @@ class ModelBehaviorCardState extends ConsumerState<ModelBehaviorCard> {
               subtitle: const Text('限流 / 5xx 等瞬时错误自动重试'),
               value: autoRetry,
               onChanged: source?.isHeadless == true
-                  ? (v) => notifier.setAutoRetry(v)
+                  ? (v) => notifier?.setAutoRetry(v)
                   : null,
             ),
           ],
@@ -507,8 +508,8 @@ class SessionInfoCard extends ConsumerWidget {
                 onPressed: canExport
                     ? () async {
                         final path = await ref
-                            .read(piSessionProvider.notifier)
-                            .exportHtml();
+                            .read(piSessionNotifierProvider)
+                            ?.exportHtml();
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(

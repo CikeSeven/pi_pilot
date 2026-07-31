@@ -42,7 +42,7 @@ Future<void> showMessageActions(
   final hintColor = Theme.of(context).hintColor;
   final timeStyle = Theme.of(context).textTheme.bodySmall;
   final messenger = ScaffoldMessenger.of(context);
-  final notifier = ref.read(piSessionProvider.notifier);
+  final notifier = ref.read(piSessionNotifierProvider);
 
   void copy(BuildContext sheetContext, String text, String toast) {
     Clipboard.setData(ClipboardData(text: text));
@@ -127,16 +127,18 @@ Future<void> showMessageActions(
                       subtitle: const Text('这之后的内容会移出当前分支,两端同步;随时可以再切回来'),
                       onTap: () async {
                         Navigator.pop(sheetContext);
-                        final ok = await notifier.navigateTo(item.entryId!);
+                        final ok = await notifier?.navigateTo(item.entryId!);
                         messenger.showSnackBar(
                           SnackBar(
-                            content: Text(ok ? '已回到这条消息' : '回退失败'),
-                            action: ok
+                            content: Text(
+                              ok == true ? '已回到这条消息' : '回退失败',
+                            ),
+                            action: ok == true
                                 ? null
                                 : SnackBarAction(
                                     label: '重试',
                                     onPressed: () => unawaited(
-                                      notifier.navigateTo(item.entryId!),
+                                      notifier?.navigateTo(item.entryId!),
                                     ),
                                   ),
                           ),
@@ -149,9 +151,13 @@ Future<void> showMessageActions(
                       subtitle: const Text('新建一个会话文件,当前会话保持原样'),
                       onTap: () async {
                         Navigator.pop(sheetContext);
-                        final ok = await notifier.forkFrom(item.entryId!);
+                        final ok = await notifier?.forkFrom(item.entryId!);
                         messenger.showSnackBar(
-                          SnackBar(content: Text(ok ? '已另开一个会话' : '操作失败或被取消')),
+                          SnackBar(
+                            content: Text(
+                              ok == true ? '已另开一个会话' : '操作失败或被取消',
+                            ),
+                          ),
                         );
                       },
                     ),

@@ -428,10 +428,10 @@ class _AnswerableQuestionnaireState
         if (text.isNotEmpty) 'text': text,
       });
     }
-    final ok = await ref.read(piSessionProvider.notifier).respondAsk(answers);
+    final ok = await ref.read(piSessionNotifierProvider)?.respondAsk(answers);
     if (!mounted) return;
     setState(() => _sending = false);
-    if (!ok) {
+    if (ok != true) {
       ScaffoldMessenger.maybeOf(
         context,
       )?.showSnackBar(const SnackBar(content: Text('提交失败,这份问卷可能已由电脑接手')));
@@ -441,7 +441,7 @@ class _AnswerableQuestionnaireState
   Future<void> _decline() async {
     if (_sending) return;
     setState(() => _sending = true);
-    await ref.read(piSessionProvider.notifier).declineAsk();
+    await ref.read(piSessionNotifierProvider)?.declineAsk();
     if (!mounted) return;
     setState(() => _sending = false);
   }

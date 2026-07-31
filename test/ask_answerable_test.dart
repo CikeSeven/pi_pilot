@@ -10,17 +10,15 @@ import 'package:pi_pilot/ui/theme/app_theme.dart';
 ///
 /// 认账靠 toolCallId:接错卡等于把问卷画到别的工具上,所以不匹配时必须
 /// 老老实实退回只读渲染。
-class _FakeNotifier extends PiSessionNotifier {
-  _FakeNotifier(this.ask);
-
-  final AskRequest? ask;
-
-  @override
-  PiState build() => PiState.initial().copyWith(pendingAsk: ask);
-}
-
+///
+/// 多设备改造后 piSessionProvider 是「当前设备状态」代理(`Provider<PiState>`),
+/// 渲染类测试直接给它一个假状态即可,不需要假 notifier。
 Widget _wrap(ChatItem item, {AskRequest? ask}) => ProviderScope(
-  overrides: [piSessionProvider.overrideWith(() => _FakeNotifier(ask))],
+  overrides: [
+    piSessionProvider.overrideWith(
+      (ref) => PiState.initial().copyWith(pendingAsk: ask),
+    ),
+  ],
   child: MaterialApp(
     theme: buildLightTheme(),
     home: Scaffold(

@@ -27,12 +27,13 @@ class _ModelPickerPageState extends ConsumerState<ModelPickerPage> {
   // 流式消息)都会触发 rebuild,在 build 里新建 future 会让 FutureBuilder
   // 退回 loading 并反复打 RPC,sheet 关闭动画期间尤其吵。
   late final Future<List<ModelInfo>> _future = ref
-      .read(piSessionProvider.notifier)
-      .getAvailableModels();
+          .read(piSessionNotifierProvider)
+          ?.getAvailableModels() ??
+      Future.value(const <ModelInfo>[]);
 
   @override
   Widget build(BuildContext context) {
-    final notifier = ref.read(piSessionProvider.notifier);
+    final notifier = ref.read(piSessionNotifierProvider);
     final current = ref.watch(piSessionProvider.select((s) => s.modelName));
     return FutureBuilder<List<ModelInfo>>(
       future: _future,
@@ -66,18 +67,21 @@ class _ModelPickerPageState extends ConsumerState<ModelPickerPage> {
                           final messenger = ScaffoldMessenger.of(context);
                           // 回到会话面板,而不是关掉整个弹窗
                           SheetNavigator.of(context).pop();
-                          final ok = await notifier.setModel(
+                          final ok = await notifier?.setModel(
                             model.provider,
                             model.id,
                           );
-                          if (!ok) {
+                          if (ok != true) {
                             messenger.showSnackBar(
                               SnackBar(
                                 content: const Text('切换模型失败'),
                                 action: SnackBarAction(
                                   label: '重试',
                                   onPressed: () => unawaited(
-                                    notifier.setModel(model.provider, model.id),
+                                    notifier?.setModel(
+                                      model.provider,
+                                      model.id,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -105,12 +109,13 @@ class ThinkingPickerPage extends ConsumerStatefulWidget {
 
 class _ThinkingPickerPageState extends ConsumerState<ThinkingPickerPage> {
   late final Future<List<String>> _future = ref
-      .read(piSessionProvider.notifier)
-      .getThinkingLevels();
+          .read(piSessionNotifierProvider)
+          ?.getThinkingLevels() ??
+      Future.value(const <String>[]);
 
   @override
   Widget build(BuildContext context) {
-    final notifier = ref.read(piSessionProvider.notifier);
+    final notifier = ref.read(piSessionNotifierProvider);
     final current = ref.watch(piSessionProvider.select((s) => s.thinkingLevel));
     return FutureBuilder<List<String>>(
       future: _future,
@@ -136,15 +141,16 @@ class _ThinkingPickerPageState extends ConsumerState<ThinkingPickerPage> {
                       onTap: () async {
                         final messenger = ScaffoldMessenger.of(context);
                         SheetNavigator.of(context).pop();
-                        final ok = await notifier.setThinkingLevel(level);
-                        if (!ok) {
+                        final ok = await notifier?.setThinkingLevel(level);
+                        if (ok != true) {
                           messenger.showSnackBar(
                             SnackBar(
                               content: const Text('切换思考强度失败'),
                               action: SnackBarAction(
                                 label: '重试',
-                                onPressed: () =>
-                                    unawaited(notifier.setThinkingLevel(level)),
+                                onPressed: () => unawaited(
+                                  notifier?.setThinkingLevel(level),
+                                ),
                               ),
                             ),
                           );

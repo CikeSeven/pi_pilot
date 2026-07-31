@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/device_models.dart';
 import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
-import '../../state/settings_provider.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/squircle.dart';
@@ -24,11 +23,9 @@ import 'device_sessions_page.dart';
 /// - [DevicesDrawer] 会话页左滑出来的抽屉。
 /// 两者共用 [_DevicesBody],避免两处各写一遍列表。
 ///
-/// **迭代 1 的数据来源**:多连接状态层(pi_session family 化)落地前,
-/// 在线状态仍从旧版单连接 `piSessionProvider` 旁路推导——host/port/token
-/// 与设置匹配的那台设备 = 当前连接,其余设备显示传输偏好与「未连接」。
-/// DeviceManager 占位骨架(device_manager.dart)已把 roster/激活设备/发现
-/// 容器就位,迭代 2 只需替换状态来源,UI 不动。
+/// 数据源:roster/激活设备来自 [deviceManagerProvider];每台设备的在线
+/// 状态/窗口数/流式标记来自它自己的 `piSessionFamilyProvider(device.id)`
+/// ——多连接保活(迭代 2)后,这里看到的每台设备都是真实连接。
 class DevicesPage extends StatelessWidget {
   const DevicesPage({super.key});
 
@@ -112,41 +109,25 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
   @override
   Widget build(BuildContext context) {
     final manager = ref.watch(deviceManagerProvider);
-    final settings = ref.watch(settingsProvider);
-    final conn = ref.watch(piSessionProvider);
-
-    // 迭代 1 的旁路:与当前连接匹配的设备才能显示真实在线状态。
-    DeviceProfile? liveDevice;
-    for (final device in manager.devices) {
-      if (DeviceSessionsPage.isLiveDevice(device, settings)) {
-        liveDevice = device;
-        break;
-      }
-    }
-    final connected = liveDevice != null &&
-        conn.status == PiConnStatus.connected;
+    final onlineCount = ref.watch(onlineDeviceCountProvider);
 
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _Header(
-            onlineCount: connected ? 1 : 0,
+            onlineCount: onlineCount,
             total: manager.devices.length,
           ),
           Expanded(
-            child: _body(manager, liveDevice, conn),
+            child: _body(manager),
           ),
         ],
       ),
     );
   }
 
-  Widget _body(
-    DeviceManagerState manager,
-    DeviceProfile? liveDevice,
-    PiState conn,
-  ) {
+  Widget _body(DeviceManagerState manager) {
     final colors = Theme.of(context).colorScheme;
 
     if (manager.loaded && manager.devices.isEmpty) {
@@ -171,8 +152,6 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
           _RosterDeviceCard(
             device: device,
             isActive: device.id == manager.activeDeviceId,
-            live: device.id == liveDevice?.id,
-            conn: device.id == liveDevice?.id ? conn : null,
             onTap: () => _openSessions(device),
             onLongPress: () => _editDevice(existing: device),
           ),
@@ -259,12 +238,11 @@ class _Header extends StatelessWidget {
 /// 与旧 _DeviceCard(现 _WindowCard)同一套视觉语言:
 /// 方正印章图标、monoLabel 副标、流式 spinner、「当前」chip。
 /// 长按进编辑;短按进这台设备的会话页。
-class _RosterDeviceCard extends StatelessWidget {
+/// 状态来自这台设备自己的 family 实例。
+class _RosterDeviceCard extends ConsumerWidget {
   const _RosterDeviceCard({
     required this.device,
     required this.isActive,
-    required this.live,
-    required this.conn,
     required this.onTap,
     required this.onLongPress,
   });
@@ -275,26 +253,20 @@ class _RosterDeviceCard extends StatelessWidget {
   /// 在线 ≠ 当前,当前设备掉线时也保持当前标。
   final bool isActive;
 
-  /// 迭代 1 旁路:这台设备就是设置里那条连接,有实时状态可看。
-  final bool live;
-
-  /// live 时的连接状态快照;非 live 为 null。
-  final PiState? conn;
-
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final conn = ref.watch(piSessionFamilyProvider(device.id));
 
-    final online = live && conn?.status == PiConnStatus.connected;
-    final connecting = live && conn?.status == PiConnStatus.connecting;
-    final streaming = online &&
-        (conn?.sessions.any((item) => item.streaming) ?? false);
+    final online = conn.status == PiConnStatus.connected;
+    final connecting = conn.status == PiConnStatus.connecting;
+    final streaming = online && conn.sessions.any((item) => item.streaming);
     final windowCount = online
-        ? conn!.sources.where((s) => s.isDesktop && s.connected).length
+        ? conn.sources.where((s) => s.isDesktop && s.connected).length
         : 0;
 
     // 当前设备 = 陶土橙实心卡,是这一页的视觉主角(沿用旧版约定)。

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/device_models.dart';
 import '../core/pi_connection.dart';
 import '../core/hub_channel.dart';
 import '../core/p2p_connector.dart';
@@ -17,6 +18,10 @@ import 'stream_derivation.dart';
 
 export '../core/pi_connection.dart' show PiConnStatus;
 export 'hub_models.dart';
+// 当前设备代理:让旧调用点(import 本文件)继续用 piSessionProvider 这个名字,
+// 语义从「唯一连接」变为「激活设备的连接」。
+export 'device_manager.dart'
+    show piSessionProvider, piSessionNotifierProvider;
 
 // ---------------------------------------------------------------------------
 // Chat items (mutable: the notifier mutates fields then bumps `revision`)
@@ -713,9 +718,16 @@ class PiState {
   }
 }
 
-final piSessionProvider = NotifierProvider<PiSessionNotifier, PiState>(
-  PiSessionNotifier.new,
-);
+/// 每台设备一个实例:family 参数 = roster 设备的 [DeviceProfile.id],
+/// 经构造函数注入(riverpod 3 的 family 传参方式)。
+///
+/// UI 一般**不直接用它**:聊天/会话页读「当前设备代理」`piSessionProvider`
+/// (见 device_manager.dart,命名保留所以旧调用点零改动);
+/// 设备列表页按设备 id 读对应实例。
+final piSessionFamilyProvider =
+    NotifierProvider.family<PiSessionNotifier, PiState, String>(
+      PiSessionNotifier.new,
+    );
 
 // ---------------------------------------------------------------------------
 // Notifier: owns the connection, applies the RPC event stream to state
@@ -726,6 +738,15 @@ final piSessionProvider = NotifierProvider<PiSessionNotifier, PiState>(
 const int _leaseTtlMs = 8000;
 
 class PiSessionNotifier extends Notifier<PiState> {
+  /// family 注入:这台 notifier 负责的 roster 设备 id。
+  /// 连接/重连/通知都按这个 id 各管各的,多设备互不干扰。
+  PiSessionNotifier(this._deviceId);
+
+  final String _deviceId;
+
+  /// 本实例负责的 roster 设备 id(保活/账本对账用)。
+  String get deviceId => _deviceId;
+
   PiConnection? _conn;
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<PiConnStatus>? _statusSub;
@@ -762,9 +783,14 @@ class PiSessionNotifier extends Notifier<PiState> {
   int? _prependAt;
   ({String host, int port, String token, String? clientId})? _creds;
 
-  /// 打洞配置快照(与 _creds 同生命周期):connect() 时从设置取,
-  /// 四要素不齐为 null——_open() 据此决定直连失败后是否落 P2P。
+  /// 打洞配置快照(与 _creds 同生命周期):connect(DeviceProfile) 时按设备
+  /// 快照;设备没配 P2P 或选了仅直连时为 null——_open() 据此决定直连
+  /// 失败后是否落 P2P。
   ({String rendezvous, String deviceId, String secret})? _p2p;
+
+  /// 传输偏好快照(与 _creds 同生命周期):auto=直连优先失败落 P2P;
+  /// lan=仅直连;p2p=仅打洞。
+  DeviceTransport _transport = DeviceTransport.auto;
   bool _intentionalDisconnect = false;
   bool _hubV2 = false;
 
@@ -805,7 +831,6 @@ class PiSessionNotifier extends Notifier<PiState> {
   bool _gapNoticeShown = false;
   final List<Map<String, dynamic>> _bufferedSourceEvents = [];
 
-  bool _autoConnectAttempted = false;
   bool _disposed = false;
 
   /// `await` 之后写 state 必须走这里:provider 已释放时再写会抛异常。
@@ -820,17 +845,9 @@ class PiSessionNotifier extends Notifier<PiState> {
       _disposed = true;
       _tearDown();
     });
-    // 设置从磁盘加载完成后,若已有连接配置则自动连接(每次启动仅一次)。
-    ref.listen(settingsProvider, (prev, next) {
-      if (_autoConnectAttempted ||
-          !next.loaded ||
-          !next.hasConnection ||
-          state.hasSession) {
-        return;
-      }
-      _autoConnectAttempted = true;
-      connect();
-    });
+    // 连接生命周期由 DeviceManager 显式驱动(roster 加载/新增/编辑设备时
+    // 调 connect)。不要在这里 listen settings 自动连接——N 个 family 实例
+    // 都去听同一份设置会竞赛。
     unawaited(
       SyncStore.open().then((store) {
         if (!_disposed) _syncStore = store;
@@ -841,28 +858,38 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   // -- public API ------------------------------------------------------------
 
-  /// 使用设置页保存的连接配置建立连接。
-  Future<void> connect() async {
-    final settings = ref.read(settingsProvider);
-    if (!settings.hasConnection) {
+  /// 使用 roster 里一台设备的配置建立连接。
+  ///
+  /// 配置在调用时快照(_creds/_p2p/_transport),之后的断线重连都用这份
+  /// 快照——用户在设备页改了配置,要显式再调 connect 才生效,重连不会
+  /// 悄悄换参数。
+  Future<void> connect(DeviceProfile device) async {
+    // clientId 是「这台手机」的全局身份(与设备无关),仍从设置读。
+    final clientId = ref.read(settingsProvider).clientId;
+    // token 两条路都要:直连经 ?token= 鉴权,打洞经首帧 auth 鉴权。
+    final canLan =
+        device.host.isNotEmpty && device.transport != DeviceTransport.p2p;
+    final canP2p = device.hasP2p && device.transport != DeviceTransport.lan;
+    if (device.token.isEmpty || (!canLan && !canP2p)) {
       state = state.copyWith(
         status: PiConnStatus.failed,
-        error: '请先在设置页填写主机与 token',
+        error: '这台设备还没有可用的连接配置,请在设备页补全',
       );
       return;
     }
     _intentionalDisconnect = false;
+    _transport = device.transport;
     _creds = (
-      host: settings.host,
-      port: settings.port,
-      token: settings.token,
-      clientId: settings.clientId.isNotEmpty ? settings.clientId : null,
+      host: device.host,
+      port: device.port,
+      token: device.token,
+      clientId: clientId.isNotEmpty ? clientId : null,
     );
-    _p2p = settings.hasP2p
+    _p2p = canP2p
         ? (
-            rendezvous: settings.p2pRendezvous,
-            deviceId: settings.p2pDeviceId,
-            secret: settings.p2pSecret,
+            rendezvous: device.p2pRendezvous!,
+            deviceId: device.p2pDeviceId!,
+            secret: device.p2pSecret!,
           )
         : null;
     state = state.copyWith(
@@ -897,6 +924,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     _leafId = null;
     _creds = null;
     _p2p = null;
+    _transport = DeviceTransport.auto;
     _hubV2 = false;
     state = PiState.initial();
   }
@@ -2015,15 +2043,23 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 保留完整握手窗口；否则 bridge 冷启动或设备刚恢复网络时会在 5 秒被
     // 误判失败，并提前落到 P2P。
     final p2p = _p2p;
-    var hello = await conn.connect(
-      host: creds.host,
-      port: creds.port,
-      token: creds.token,
-      clientId: creds.clientId,
-      capabilities: const [msgDeltaCapability],
-      timeout: const Duration(seconds: 12),
-    );
-    if (hello == null && p2p != null && identical(_conn, conn)) {
+    // 传输偏好门控(DeviceTransport):仅 P2P 时直连整段跳过——
+    // 既省 12s 空等,也避免「局域网里恰好有服务占了同端口」时误连。
+    var hello = _transport == DeviceTransport.p2p
+        ? null
+        : await conn.connect(
+            host: creds.host,
+            port: creds.port,
+            token: creds.token,
+            clientId: creds.clientId,
+            capabilities: const [msgDeltaCapability],
+            timeout: const Duration(seconds: 12),
+          );
+    // 仅直连(lan)不回落:用户明确不要公网通道时,失败就如实失败。
+    if (hello == null &&
+        p2p != null &&
+        _transport != DeviceTransport.lan &&
+        identical(_conn, conn)) {
       final settings = ref.read(settingsProvider.notifier);
       final channel = await P2pConnector(onLog: _logP2p).connect(
         rendezvousUrl: p2p.rendezvous,

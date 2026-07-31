@@ -113,7 +113,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     final state = ref.watch(piSessionProvider);
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final notifier = ref.read(piSessionProvider.notifier);
+    final notifier = ref.read(piSessionNotifierProvider);
     final isDark = theme.brightness == Brightness.dark;
 
     final screenW = MediaQuery.sizeOf(context).width;

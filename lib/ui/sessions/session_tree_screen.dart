@@ -44,7 +44,8 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
   @override
   void initState() {
     super.initState();
-    _future = ref.read(piSessionProvider.notifier).getTree();
+    _future = ref.read(piSessionNotifierProvider)?.getTree() ??
+        Future<SessionTree?>.value(null);
   }
 
   @override
@@ -59,7 +60,8 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
     _rows = null;
     _leafIndex = null;
     setState(() {
-      _future = ref.read(piSessionProvider.notifier).getTree();
+      _future = ref.read(piSessionNotifierProvider)?.getTree() ??
+          Future<SessionTree?>.value(null);
     });
   }
 
@@ -565,7 +567,8 @@ class _TreeNodeTile extends ConsumerWidget {
     // pop 之前抓齐:messenger 是 app 级永生,notifier 同理。
     // pop 之后再对路由里的 context 做任何 ancestor 查找都是踩框架时序。
     final messenger = ScaffoldMessenger.of(context);
-    final notifier = ref.read(piSessionProvider.notifier);
+    final notifier = ref.read(piSessionNotifierProvider);
+    if (notifier == null) return;
     final ok = await notifier.navigateTo(node.id);
     if (!context.mounted) return;
     // 回退成功就退回对话页看结果;失败留在树上让用户重试
@@ -621,11 +624,13 @@ class _TreeNodeTile extends ConsumerWidget {
     if (confirmed != true) return;
     if (!context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-    final ok = await ref.read(piSessionProvider.notifier).forkFrom(node.id);
+    final ok = await ref.read(piSessionNotifierProvider)?.forkFrom(node.id);
     if (!context.mounted) return;
-    if (ok) Navigator.of(context).pop();
+    if (ok == true) Navigator.of(context).pop();
     messenger.showSnackBar(
-      SnackBar(content: Text(ok ? '已另开一个会话' : '操作失败或被取消')),
+      SnackBar(
+        content: Text(ok == true ? '已另开一个会话' : '操作失败或被取消'),
+      ),
     );
   }
 }

@@ -41,7 +41,7 @@ class _QuickPanelState extends ConsumerState<QuickPanel> {
     super.didUpdateWidget(oldWidget);
     if (widget.inputText.startsWith('/') && !_loaded) {
       _loaded = true;
-      ref.read(piSessionProvider.notifier).getCommands().then((commands) {
+      ref.read(piSessionNotifierProvider)?.getCommands().then((commands) {
         if (mounted) setState(() => _commands = commands);
       });
     }

@@ -44,8 +44,8 @@ class _AppLifecycleHandlerState extends ConsumerState<AppLifecycleHandler>
         return;
       }
       ref
-          .read(piSessionProvider.notifier)
-          .onNetworkChanged(results.map((r) => r.name).join('+'));
+          .read(piSessionNotifierProvider)
+          ?.onNetworkChanged(results.map((r) => r.name).join('+'));
     });
   }
 
@@ -73,10 +73,10 @@ class _AppLifecycleHandlerState extends ConsumerState<AppLifecycleHandler>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 前台标志给问卷认领做门控:手机在口袋里时不能认领,否则电脑会白等
     // 几分钟才回落到插件自己的桌面问卷。
-    final notifier = ref.read(piSessionProvider.notifier);
-    notifier.setForeground(state == AppLifecycleState.resumed);
+    final notifier = ref.read(piSessionNotifierProvider);
+    notifier?.setForeground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.resumed) {
-      notifier.onAppResumed();
+      notifier?.onAppResumed();
     }
   }
 

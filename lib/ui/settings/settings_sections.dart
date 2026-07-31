@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/device_models.dart';
 import '../../core/notification_service.dart';
 import '../../core/p2p_signaling.dart';
 import '../../core/pi_connection.dart';
+import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
 import 'settings_widgets.dart';
@@ -73,7 +75,34 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
           port: port,
           token: _token.text.trim(),
         );
-    await ref.read(piSessionProvider.notifier).connect();
+    // 连接配置升级为 roster 设备:地址命中的复用原 id(保留 lastHubId 等
+    // 元数据),否则新建。upsertDevice 会让它成为激活设备并按新配置重连。
+    final settings = ref.read(settingsProvider);
+    final manager = ref.read(deviceManagerProvider);
+    final hit = manager.devices
+        .where((d) => d.host == parsed.host && d.port == port)
+        .firstOrNull;
+    await ref
+        .read(deviceManagerProvider.notifier)
+        .upsertDevice(
+          DeviceProfile(
+            id: hit?.id ?? generateDeviceId(),
+            name: hit?.name ?? parsed.host,
+            host: parsed.host,
+            port: port,
+            token: _token.text.trim(),
+            transport: settings.hasP2p
+                ? DeviceTransport.auto
+                : DeviceTransport.lan,
+            p2pRendezvous: settings.p2pRendezvous.isEmpty
+                ? null
+                : settings.p2pRendezvous,
+            p2pDeviceId: settings.p2pDeviceId.isEmpty
+                ? null
+                : settings.p2pDeviceId,
+            p2pSecret: settings.p2pSecret.isEmpty ? null : settings.p2pSecret,
+          ),
+        );
   }
 
   @override
@@ -140,7 +169,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
                     const SizedBox(height: 8),
                     OutlinedButton.icon(
                       onPressed: () =>
-                          ref.read(piSessionProvider.notifier).disconnect(),
+                          ref.read(piSessionNotifierProvider)?.disconnect(),
                       icon: const Icon(Icons.link_off),
                       label: const Text('断开'),
                     ),
@@ -195,10 +224,41 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
 
   Future<bool> save({bool showNotice = true}) async {
     final rendezvous = normalizeP2pSignalingUrl(_rendezvous.text);
+    final deviceId = _deviceId.text.trim();
+    final secret = _secret.text;
     if (_enabled && !isAllowedP2pSignalingUrl(rendezvous)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('公网信令必须使用 wss://,ws:// 仅限本机测试')),
+        );
+      }
+      return false;
+    }
+    if (_enabled && !RegExp(r'^[A-Za-z0-9._-]{3,64}$').hasMatch(deviceId)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('设备名需为 3–64 位字母、数字、点、下划线或连字符')),
+        );
+      }
+      return false;
+    }
+    final keyClasses = <bool>[
+      RegExp(r'[a-z]').hasMatch(secret),
+      RegExp(r'[A-Z]').hasMatch(secret),
+      RegExp(r'[0-9]').hasMatch(secret),
+      RegExp(r'[^A-Za-z0-9]').hasMatch(secret),
+    ].where((matched) => matched).length;
+    final validKey =
+        secret.length >= 16 &&
+        secret.length <= 128 &&
+        RegExp(r'^[\x21-\x7e]+$').hasMatch(secret) &&
+        keyClasses >= 3;
+    if (_enabled && !validKey) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('配对 Key 需为 16–128 位，且至少包含大小写、数字、符号中的三类'),
+          ),
         );
       }
       return false;
@@ -208,8 +268,8 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
         .setP2pConfig(
           enabled: _enabled,
           rendezvous: rendezvous,
-          deviceId: _deviceId.text.trim(),
-          secret: _secret.text.trim(),
+          deviceId: deviceId,
+          secret: secret,
         );
     if (showNotice && mounted) {
       ScaffoldMessenger.of(
@@ -246,7 +306,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
             ),
             const SizedBox(height: 8),
             Text(
-              '只需填写信令域名,会自动使用 WSS;直连失败时优先尝试打洞,困难网络自动使用 TURN 中继。'
+              '只需填写信令域名,会自动使用 WSS;手机与电脑填写相同设备名和配对 Key 即可连接。'
               'DataChannel 内容由 DTLS 加密,后台通知暂不支持 P2P。',
               style: theme.textTheme.bodySmall,
             ),
@@ -264,7 +324,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               controller: _deviceId,
               decoration: const InputDecoration(
                 labelText: '设备名',
-                hintText: '与 bridge 的 PIPILOT_P2P_DEVICE_ID 一致',
+                hintText: '与 bridge 的设备名一致',
                 prefixIcon: Icon(Icons.computer_outlined),
               ),
             ),
@@ -273,8 +333,8 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               controller: _secret,
               obscureText: _obscure,
               decoration: InputDecoration(
-                labelText: '配对密钥',
-                hintText: '与信令服 devices 表一致',
+                labelText: '配对 Key',
+                hintText: '16–128 位，至少包含三类字符',
                 prefixIcon: const Icon(Icons.vpn_key_outlined),
                 suffixIcon: IconButton(
                   tooltip: _obscure ? '显示' : '隐藏',
@@ -466,7 +526,7 @@ class _SessionInfoPageState extends ConsumerState<SessionInfoPage> {
       if (mounted) setState(() => _stats = null);
       return;
     }
-    final stats = await ref.read(piSessionProvider.notifier).getSessionStats();
+    final stats = await ref.read(piSessionNotifierProvider)?.getSessionStats();
     if (!mounted) return;
     setState(() => _stats = stats);
   }

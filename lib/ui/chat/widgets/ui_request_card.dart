@@ -35,11 +35,11 @@ class _UiRequestCardState extends ConsumerState<UiRequestCard> {
   }) async {
     setState(() => _busy = true);
     final ok = await ref
-        .read(piSessionProvider.notifier)
-        .respondUi(value: value, confirmed: confirmed, cancelled: cancelled);
+        .read(piSessionNotifierProvider)
+        ?.respondUi(value: value, confirmed: confirmed, cancelled: cancelled);
     if (!mounted) return;
     setState(() => _busy = false);
-    if (!ok) {
+    if (ok != true) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('应答失败,这个对话框可能已经超时')));

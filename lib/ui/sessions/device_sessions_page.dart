@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/device_models.dart';
 import '../../state/pi_session.dart';
-import '../../state/settings_provider.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/squircle.dart';
@@ -15,84 +14,17 @@ import '../theme/typography.dart';
 /// devices_page.dart 搬来——多设备改造后第一级让位给「设备列表」,
 /// 会话列表下沉到这里,样式与唤醒/连接逻辑零改动。
 ///
-/// **迭代 1 的数据来源说明**:多连接状态层(pi_session family 化)落地前,
-/// 只有「与当前设置里那条连接匹配」的设备有实时数据;其余设备显示离线占位。
-/// 匹配判断见 [DeviceSessionsPage.isLiveDevice]。
+/// 数据源是这台设备自己的 family 实例 `piSessionFamilyProvider(device.id)`:
+/// 多连接保活后,每台设备的状态、会话、唤醒互不影响。
 class DeviceSessionsPage extends ConsumerWidget {
   const DeviceSessionsPage({super.key, required this.device});
 
   final DeviceProfile device;
 
-  /// 这台设备是否就是设置页那条(旧版单设备)连接。
-  /// 迭代 2 后此判断废弃,每台设备都有自己的 family 实例。
-  static bool isLiveDevice(DeviceProfile device, AppSettings settings) {
-    return device.host == settings.host &&
-        device.port == settings.port &&
-        device.token == settings.token &&
-        settings.hasConnection;
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settings = ref.watch(settingsProvider);
-    final live = isLiveDevice(device, settings);
     return Scaffold(
-      body: BackdropPaper(
-        child: live
-            ? _SessionsBody(device: device)
-            : _OfflineBody(device: device),
-      ),
-    );
-  }
-}
-
-/// 离线占位:状态层未接入(或非当前连接的设备)时的空态。
-class _OfflineBody extends StatelessWidget {
-  const _OfflineBody({required this.device});
-
-  final DeviceProfile device;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _PageHeader(title: device.name, subtitle: device.transportLabel),
-          Expanded(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(32, 8, 32, 32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const EditorialOrnament(size: 132),
-                    const SizedBox(height: 22),
-                    Text(
-                      '尚未连接这台设备',
-                      textAlign: TextAlign.center,
-                      style: AppType.displayTitle(
-                        size: 22,
-                        color: colors.onSurface,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      '多连接状态层将在下一迭代接入,\n届时每台设备各自保活、这里实时显示它的会话。',
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: colors.onSurfaceVariant,
-                        height: 1.6,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
+      body: BackdropPaper(child: _SessionsBody(device: device)),
     );
   }
 }
@@ -108,6 +40,10 @@ class _SessionsBody extends ConsumerStatefulWidget {
 }
 
 class _SessionsBodyState extends ConsumerState<_SessionsBody> {
+  /// 本页所有读写都钉在这台设备自己的 family 实例上。
+  NotifierProvider<PiSessionNotifier, PiState> get _session =>
+      piSessionFamilyProvider(widget.device.id);
+
   @override
   void initState() {
     super.initState();
@@ -116,8 +52,8 @@ class _SessionsBodyState extends ConsumerState<_SessionsBody> {
 
   Future<void> _refresh() async {
     if (!mounted) return;
-    if (ref.read(piSessionProvider).status != PiConnStatus.connected) return;
-    final notifier = ref.read(piSessionProvider.notifier);
+    if (ref.read(_session).status != PiConnStatus.connected) return;
+    final notifier = ref.read(_session.notifier);
     // 两个都要拉:refreshSources 只给「开着的窗口」,磁盘上的历史会话
     // 只有 hub_list_sessions 才带回来(它连 sizeBytes/path 一起给)。
     await notifier.refreshSources();
@@ -133,7 +69,7 @@ class _SessionsBodyState extends ConsumerState<_SessionsBody> {
     var ok = false;
     try {
       ok = await ref
-          .read(piSessionProvider.notifier)
+          .read(_session.notifier)
           .openSession(
             sessionId: session.sessionId,
             cwd: session.cwd,
@@ -145,7 +81,7 @@ class _SessionsBodyState extends ConsumerState<_SessionsBody> {
       error = failure.toString();
     }
     if (ok) return;
-    final reason = error ?? ref.read(piSessionProvider).error ?? '唤醒这个会话失败';
+    final reason = error ?? ref.read(_session).error ?? '唤醒这个会话失败';
     if (!mounted) return;
     messenger.showSnackBar(SnackBar(content: Text(reason)));
   }
@@ -155,18 +91,18 @@ class _SessionsBodyState extends ConsumerState<_SessionsBody> {
     String? error;
     var ok = false;
     try {
-      ok = await ref.read(piSessionProvider.notifier).selectSource(source.id);
+      ok = await ref.read(_session.notifier).selectSource(source.id);
     } catch (failure) {
       error = failure.toString();
     }
     if (ok) return;
-    final reason = error ?? ref.read(piSessionProvider).error ?? '连接这个窗口失败';
+    final reason = error ?? ref.read(_session).error ?? '连接这个窗口失败';
     messenger.showSnackBar(SnackBar(content: Text(reason)));
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(piSessionProvider);
+    final state = ref.watch(_session);
     final connected = state.status == PiConnStatus.connected;
 
     // 第一段:电脑上开着的窗口。headless / 已断开的都不列。
@@ -218,9 +154,20 @@ class _SessionsBodyState extends ConsumerState<_SessionsBody> {
     List<HubSession> history,
   ) {
     if (!connected) {
-      return const _Placeholder(
-        title: '尚未连接',
-        body: '这台设备暂时不在线,\n回到设备页检查地址与 token。',
+      return _Placeholder(
+        title: state.status == PiConnStatus.connecting ? '正在连接…' : '尚未连接',
+        body: state.status == PiConnStatus.connecting
+            ? '直连优先,失败会自动转 P2P。'
+            : '这台设备暂时不在线,\n可以重试,或回设备页检查地址与 token。',
+        action: state.status == PiConnStatus.connecting
+            ? null
+            : FilledButton.icon(
+                onPressed: () => ref
+                    .read(_session.notifier)
+                    .connect(widget.device),
+                icon: const Icon(Icons.link),
+                label: const Text('重新连接'),
+              ),
       );
     }
     if (windows.isEmpty && history.isEmpty) {
@@ -594,12 +541,13 @@ String windowTitleFor({required String? cwd, required String? sessionName}) {
   return 'pi 窗口';
 }
 
-/// 空态:插画 + 衬线标题 + 说明。
+/// 空态:插画 + 衬线标题 + 说明(+ 可选主行动)。
 class _Placeholder extends StatelessWidget {
-  const _Placeholder({required this.title, required this.body});
+  const _Placeholder({required this.title, required this.body, this.action});
 
   final String title;
   final String body;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -628,6 +576,10 @@ class _Placeholder extends StatelessWidget {
                   height: 1.6,
                 ),
               ),
+              if (action != null) ...[
+                const SizedBox(height: 20),
+                action!,
+              ],
             ],
           ),
         ),

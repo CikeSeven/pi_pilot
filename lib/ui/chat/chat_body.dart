@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
 import '../settings/settings_screen.dart';
@@ -169,8 +170,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
         : null;
     final pixels = _scroll.hasClients ? _scroll.position.pixels : 0.0;
     final countBefore = ref.read(piSessionProvider).items.length;
-    final ok = await ref.read(piSessionProvider.notifier).loadEarlierHistory();
-    if (!mounted || !ok) return;
+    final ok = await ref.read(piSessionNotifierProvider)?.loadEarlierHistory();
+    if (!mounted || ok != true) return;
     final added = ref.read(piSessionProvider).items.length - countBefore;
     if (added <= 0) return;
     // 必须同时把窗口放大 —— 窗口是锚在**尾部**的,光把历史插进列表的话
@@ -268,7 +269,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     final text = _input.text;
     if (text.trim().isEmpty) return;
     unawaited(
-      ref.read(piSessionProvider.notifier).sendPrompt(text, delivery: delivery),
+      ref.read(piSessionNotifierProvider)?.sendPrompt(text, delivery: delivery),
     );
     _input.clear();
     setState(() => _inputText = '');
@@ -505,7 +506,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                         onFollowUp: () => _send(delivery: PiDelivery.followUp),
                         onInterruptAndSend: _interruptAndSend,
                         onAbort: () => unawaited(
-                          ref.read(piSessionProvider.notifier).abort(),
+                          ref.read(piSessionNotifierProvider)?.abort(),
                         ),
                         onChanged: (text) => setState(() => _inputText = text),
                         quickPanel: QuickPanel(
@@ -523,8 +524,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                             setState(() => _sending = true);
                             unawaited(
                               ref
-                                  .read(piSessionProvider.notifier)
-                                  .sendPrompt(text)
+                                  .read(piSessionNotifierProvider)
+                                  ?.sendPrompt(text)
                                   .whenComplete(() {
                                     if (mounted) {
                                       setState(() => _sending = false);
@@ -606,8 +607,11 @@ class _NotConnectedView extends ConsumerWidget {
                 children: [
                   if (status != PiConnStatus.connecting && hasConn)
                     FilledButton.icon(
-                      onPressed: () =>
-                          ref.read(piSessionProvider.notifier).connect(),
+                      onPressed: () => unawaited(
+                        ref
+                            .read(deviceManagerProvider.notifier)
+                            .connectActiveDevice(),
+                      ),
                       icon: const Icon(Icons.link),
                       label: const Text('连接'),
                     ),
