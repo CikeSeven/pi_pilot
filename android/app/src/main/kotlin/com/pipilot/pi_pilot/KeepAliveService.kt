@@ -48,6 +48,17 @@ class KeepAliveService : Service() {
             hubConnected = connected
             sessionCount = sessions
             workingCount = working
+            refreshNotification(context)
+        }
+
+        /// Native watcher updates connectivity while the Dart isolate is paused,
+        /// without overwriting the last known session counts.
+        fun updateConnection(context: Context, connected: Boolean) {
+            hubConnected = connected
+            refreshNotification(context)
+        }
+
+        private fun refreshNotification(context: Context) {
             if (!running) return
             val manager = context.getSystemService(NotificationManager::class.java)
             manager.notify(notificationId, buildNotification(context))

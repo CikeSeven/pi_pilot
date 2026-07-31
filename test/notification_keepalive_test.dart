@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pi_pilot/state/hub_models.dart';
+import 'package:pi_pilot/core/device_models.dart';
+import 'package:pi_pilot/state/device_manager.dart';
 import 'package:pi_pilot/state/notification_controller.dart';
+import 'package:pi_pilot/state/pi_session.dart';
 
 HubSession _session({
   required String sessionId,
@@ -18,6 +20,74 @@ HubSession _session({
 );
 
 void main() {
+  group('native watcher target', () {
+    const first = DeviceProfile(
+      id: 'dev-old',
+      name: '旧设备',
+      host: '192.168.1.2',
+      port: 9377,
+      token: 'old-token',
+    );
+    const active = DeviceProfile(
+      id: 'dev-active',
+      name: '当前设备',
+      host: '192.168.1.9',
+      port: 9488,
+      token: 'active-token',
+    );
+
+    test('使用当前 roster 设备,不读取旧单设备连接配置', () {
+      final target = resolveWatcherConnectionTarget(
+        manager: const DeviceManagerState(
+          devices: [first, active],
+          activeDeviceId: 'dev-active',
+          loaded: true,
+        ),
+        session: PiState.initial().copyWith(
+          activeTransport: PiActiveTransport.lan,
+          selectedSourceId: 'desktop:active',
+          isStreaming: true,
+        ),
+      );
+
+      expect(target, (
+        deviceId: active.id,
+        host: active.host,
+        port: active.port,
+        token: active.token,
+        sourceId: 'desktop:active',
+        wasStreaming: true,
+      ));
+    });
+
+    test('P2P 实际通道不冒充可用的局域网 watcher', () {
+      final target = resolveWatcherConnectionTarget(
+        manager: const DeviceManagerState(
+          devices: [active],
+          activeDeviceId: 'dev-active',
+          loaded: true,
+        ),
+        session: PiState.initial().copyWith(
+          activeTransport: PiActiveTransport.p2p,
+          selectedSourceId: 'desktop:active',
+        ),
+      );
+
+      expect(target, isNull);
+    });
+
+    test('watcher clientId 按安装和设备隔离', () {
+      expect(
+        nativeWatcherClientId(appClientId: 'app-123', deviceId: active.id),
+        'app-123:native-watcher:${active.id}',
+      );
+      expect(
+        nativeWatcherClientId(appClientId: '', deviceId: active.id),
+        '${active.id}:native-watcher:${active.id}',
+      );
+    });
+  });
+
   test('连接中断通知使用保留的固定 id', () {
     expect(connectionLostNotificationId, 2);
   });

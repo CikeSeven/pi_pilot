@@ -15,7 +15,7 @@ import '../theme/squircle.dart';
 /// Editorial Retro 改版。设计规范说设置页「最容易出效果」,因为它天然适合
 /// 大留白 + 整齐卡片 + 标签化图标 + 分组信息——像一本优雅杂志的目录页。
 ///
-/// 结构:衬线大标题「设置」+ 品牌印章 → 栏目名 → 6 张描边纸卡入口,
+/// 结构:衬线大标题「设置」+ 品牌印章 → 栏目名 → 5 张描边纸卡入口,
 /// 每张带一枚复古色圆形图标和一行当前值摘要。
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -26,20 +26,7 @@ class SettingsScreen extends ConsumerWidget {
     final piState = ref.watch(piSessionProvider);
     final piColors = PiColors.of(context);
 
-    String connectionSummary() => switch (piState.status) {
-      PiConnStatus.connected => '已连接 · ${settings.host}:${settings.port}',
-      PiConnStatus.connecting => '正在连接…',
-      PiConnStatus.failed => '连接失败',
-      _ => settings.hasConnection ? '${settings.host}:${settings.port}' : '未配置',
-    };
-
     final entries = <_SettingsEntry>[
-      _SettingsEntry(
-        icon: Icons.link,
-        title: '连接',
-        summary: connectionSummary(),
-        builder: (_) => const ConnectionPage(),
-      ),
       _SettingsEntry(
         icon: Icons.palette_outlined,
         title: '外观',
@@ -85,7 +72,7 @@ class SettingsScreen extends ConsumerWidget {
     final colors = theme.colorScheme;
 
     // 这个页面**两用**:既作底栏的「设置」tab(外层 AppShell 已给背景),
-    // 又会被 Navigator.push 成独立路由(会话页「前往设置」、抽屉入口)。
+    // 又可以被 Navigator.push 成独立路由。
     // 透明 Scaffold 在 tab 模式下能透出外层背景,但 push 成独立路由时
     // 下面没有 BackdropPaper,会透出 MaterialApp 默认底色 → 黑白混搭。
     // 所以这里自己套一层 BackdropPaper,两种场景都自带正确背景。
@@ -113,7 +100,7 @@ class SettingsScreen extends ConsumerWidget {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          '连接、外观、行为与会话',
+                          '外观、通知、行为与会话',
                           style: AppType.serifItalic(
                             size: 14,
                             color: colors.onSurfaceVariant,

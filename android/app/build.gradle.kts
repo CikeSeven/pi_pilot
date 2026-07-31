@@ -49,4 +49,5 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     // 后台观察连接跑在原生线程上,不受 MIUI 冻结 Dart isolate 的影响
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("junit:junit:4.13.2")
 }

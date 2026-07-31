@@ -5,8 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
-import '../../state/settings_provider.dart';
-import '../settings/settings_screen.dart';
+import '../sessions/devices_page.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
@@ -554,15 +553,17 @@ class _NotConnectedView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(piSessionProvider.select((s) => s.status));
     final error = ref.watch(piSessionProvider.select((s) => s.error));
-    final hasConn = ref.watch(settingsProvider.select((s) => s.hasConnection));
+    final hasDevices = ref.watch(
+      deviceManagerProvider.select((s) => s.devices.isNotEmpty),
+    );
     final colors = Theme.of(context).colorScheme;
 
     // 空状态用场景插画而不是图标 —— 设计规范要的「安静等待」气质:
     // 「中央留白插画 + 标题 + 副文案 + 稳重主按钮」。
     final (message, hint) = switch (status) {
       PiConnStatus.connecting => ('正在连接…', '正在唤醒你的电脑。'),
-      PiConnStatus.failed => ('连接失败', '检查一下 bridge 地址和 token。'),
-      _ => ('尚未连接', '连接电脑,远程协作。'),
+      PiConnStatus.failed => ('连接失败', '请在设备页检查 bridge 地址和 token。'),
+      _ => ('尚未连接', '添加一台设备,开始远程协作。'),
     };
 
     // Center 包 SCSV:内容矮时居中,内容比视口高时(横屏/大字体/长错误
@@ -605,7 +606,7 @@ class _NotConnectedView extends ConsumerWidget {
                 runSpacing: 8,
                 alignment: WrapAlignment.center,
                 children: [
-                  if (status != PiConnStatus.connecting && hasConn)
+                  if (status != PiConnStatus.connecting && hasDevices)
                     FilledButton.icon(
                       onPressed: () => unawaited(
                         ref
@@ -618,11 +619,11 @@ class _NotConnectedView extends ConsumerWidget {
                   OutlinedButton.icon(
                     onPressed: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (_) => const SettingsScreen(),
+                        builder: (_) => const DevicesPage(),
                       ),
                     ),
-                    icon: const Icon(Icons.settings_outlined),
-                    label: const Text('前往设置'),
+                    icon: const Icon(Icons.devices_outlined),
+                    label: const Text('管理设备'),
                   ),
                 ],
               ),

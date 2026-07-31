@@ -117,7 +117,7 @@ class PiConnection {
     List<String> capabilities = const [],
     Duration timeout = const Duration(seconds: 12),
   }) async {
-    disconnect(notify: false);
+    await disconnectAndWait(notify: false);
 
     // 防御:主机栏可能误填完整 URL(http://…/path),先规范化
     final parsed = parseHostInput(host);
@@ -154,7 +154,7 @@ class PiConnection {
     String? clientId,
     Duration timeout = const Duration(seconds: 12),
   }) async {
-    disconnect(notify: false);
+    await disconnectAndWait(notify: false);
     return _attach(channel, () {
       send(<String, dynamic>{
         'type': 'auth',
@@ -253,14 +253,21 @@ class PiConnection {
     return true;
   }
 
-  void disconnect({bool notify = true}) {
-    _sub?.cancel();
+  Future<void> disconnectAndWait({bool notify = true}) async {
+    final sub = _sub;
     _sub = null;
     final channel = _channel;
     _channel = null;
-    if (channel != null) {
-      channel.close();
-    }
     if (notify) _status.add(PiConnStatus.disconnected);
+    try {
+      await sub?.cancel();
+    } catch (_) {}
+    try {
+      await channel?.close();
+    } catch (_) {}
+  }
+
+  void disconnect({bool notify = true}) {
+    unawaited(disconnectAndWait(notify: notify));
   }
 }

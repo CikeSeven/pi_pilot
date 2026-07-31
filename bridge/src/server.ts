@@ -91,6 +91,9 @@ interface PendingRequest {
 }
 
 const mobileClients = new Map<WebSocket, MobileClient>();
+/// 同一稳定 clientId 当前生效的 socket。旧连接的 close 可能晚于替代连接,
+/// close 清理必须先核对身份,否则会释放新连接正在使用的租约与 pending。
+const activeMobileSocketByClientId = new Map<string, WebSocket>();
 const desktopClients = new Set<DesktopClient>();
 const desktopBySource = new Map<string, DesktopClient>();
 /// 桌面源转为断开的时刻,用于延迟回收。只记桌面源:headless 的「断开」是
@@ -2965,13 +2968,17 @@ function acceptMobileClient(
     requestedClientId && /^[A-Za-z0-9._:-]{8,128}$/.test(requestedClientId)
       ? requestedClientId
       : crypto.randomUUID();
-  // 同一个 clientId 的旧连接直接换掉,避免两个 socket 共享租约身份
-  for (const [socket, existing] of mobileClients) {
-    if (existing.clientId === clientId) socket.close(4010, "client replaced");
-  }
+  // 同一个 clientId 的旧连接直接换掉,避免两个 socket 共享租约身份。
+  // 先登记新 socket 为 current,再关闭旧 socket:旧 close 即使立刻到达也只能
+  // 清理自己的 map 项,不能释放 current client 的租约与 pending。
+  const replacedSockets = [...mobileClients]
+    .filter(([, existing]) => existing.clientId === clientId)
+    .map(([socket]) => socket);
   const client: MobileClient = { clientId, ws, caps: new Set(caps) };
+  activeMobileSocketByClientId.set(clientId, ws);
   mobileClients.set(ws, client);
   liveSockets.set(ws, true);
+  for (const socket of replacedSockets) socket.close(4010, "client replaced");
   ws.on("pong", () => liveSockets.set(ws, true));
   sendObject(ws, {
     type: "bridge_hello",
@@ -3022,6 +3029,8 @@ function acceptMobileClient(
   ws.on("close", () => {
     mobileClients.delete(ws);
     liveSockets.delete(ws);
+    if (activeMobileSocketByClientId.get(client.clientId) !== ws) return;
+    activeMobileSocketByClientId.delete(client.clientId);
     const released = sources.releaseClient(client.clientId);
     for (const sourceId of released) notifyOwnerChanged(sourceId);
     for (const [requestId, request] of pending) {

@@ -5,8 +5,86 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/notification_service.dart';
 import 'device_alerts.dart';
+import 'device_manager.dart';
 import 'pi_session.dart';
 import 'settings_provider.dart';
+
+@visibleForTesting
+typedef WatcherConnectionTarget = ({
+  String deviceId,
+  String host,
+  int port,
+  String token,
+  String sourceId,
+  bool wasStreaming,
+});
+
+/// Resolve the watcher target from the active roster device, not the legacy
+/// single-device settings. The latter can point at a different bridge after
+/// the multi-device migration.
+@visibleForTesting
+WatcherConnectionTarget? resolveWatcherConnectionTarget({
+  required DeviceManagerState manager,
+  required PiState session,
+}) {
+  final deviceId = manager.activeDeviceId;
+  final device = deviceId == null
+      ? null
+      : manager.devices.where((item) => item.id == deviceId).firstOrNull;
+  final sourceId = session.selectedSourceId;
+  if (device == null ||
+      !device.hasLan ||
+      sourceId == null ||
+      sourceId.isEmpty) {
+    return null;
+  }
+  // A direct watcher cannot observe a P2P-only connection. Leaving the Dart
+  // fallback enabled is preferable to claiming a watcher that cannot connect.
+  if (session.activeTransport == PiActiveTransport.p2p) return null;
+  return (
+    deviceId: device.id,
+    host: device.host,
+    port: device.port,
+    token: device.token,
+    sourceId: sourceId,
+    wasStreaming: session.isStreaming,
+  );
+}
+
+@visibleForTesting
+String nativeWatcherClientId({
+  required String appClientId,
+  required String deviceId,
+}) {
+  final owner = appClientId.trim().isEmpty ? deviceId : appClientId.trim();
+  return '$owner:native-watcher:$deviceId';
+}
+
+typedef _WatcherIdentity = ({
+  String? deviceId,
+  String? host,
+  int? port,
+  String? token,
+  String? sourceId,
+  PiActiveTransport? activeTransport,
+});
+
+final _watcherIdentityProvider = Provider<_WatcherIdentity>((ref) {
+  final manager = ref.watch(deviceManagerProvider);
+  final activeId = manager.activeDeviceId;
+  final device = activeId == null
+      ? null
+      : manager.devices.where((item) => item.id == activeId).firstOrNull;
+  final session = ref.watch(piSessionProvider);
+  return (
+    deviceId: activeId,
+    host: device?.host,
+    port: device?.port,
+    token: device?.token,
+    sourceId: session.selectedSourceId,
+    activeTransport: session.activeTransport,
+  );
+});
 
 /// 任务完成通知的标题:「<会话名> 已完成」。会话名取不到时退成通用标题。
 /// 活跃设备(本文件)与非活跃设备扇出(device_alerts.dart)共用。
@@ -50,13 +128,12 @@ class NotificationOperationSequencer {
 }
 
 /// 监听 pi 状态,在需要时发本地通知并保活后台连接:
-/// - **前台服务(FGS)保活**:连上 bridge 时启动 dataSync 前台服务,把进程提到前台
-///   优先级。这样后台时 Dart isolate 仍能响应 bridge 的 10s 协议 ping,连接不至于
-///   被 20s 超时掐断 -> 实时收到 agent_end -> isStreaming 翻转 -> 触发完成通知。
-///   必须在应用前台时启动(Android 12+ 后台启动会抛 ForegroundServiceStartNotAllowedException)。
-/// - **任务完成通知**:isStreaming true->false。后台实时收到就实时通知;
-///   若进程曾被杀、回前台才补收到完成(_streamingWhenBackgrounded 兜底),也补发通知。
-/// - 扩展等待输入、连接中断:后台时通知。
+/// - **前台服务(FGS)**:连上 bridge 时启动 dataSync 服务,维持进程优先级和
+///   常驻通知。必须在应用前台启动(Android 12+ 禁止后台首次启动 FGS)。
+/// - **原生 watcher**:Dart isolate 被系统暂停时,在原生线程维护局域网观察连接,
+///   对账所选 source 的 streaming 状态,实时刷新工作计数和完成通知。
+/// - **Dart 兜底**:Dart 仍有调度时继续处理状态;若只在回前台后补到完成,
+///   `_streamingWhenBackgrounded` 会补发通知。扩展等待输入、断线也在后台提醒。
 ///
 /// 通知 id 策略:FGS 常驻通知固定 id=1;连接中断固定 id=2;任务通知 Dart
 /// 侧从 100 起、原生 watcher 从 200 起。回前台时用 getActiveNotifications
@@ -85,6 +162,8 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   bool _watcherActive = false;
   final _connectionNotificationOperations = NotificationOperationSequencer();
 
+  int _watcherRequestGeneration = 0;
+
   bool get _inBackground => _lifecycle != AppLifecycleState.resumed;
   bool get _enabled => ref.read(settingsProvider).notificationsEnabled;
   bool get _vibrate => ref.read(settingsProvider).notificationVibrationEnabled;
@@ -110,6 +189,10 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _watcherRequestGeneration++;
+    // A startWatcher MethodChannel call can still be in flight when the
+    // widget is disposed. Always issue the matching stop to close that race.
+    unawaited(NotificationService.instance.stopWatcher());
     super.dispose();
   }
 
@@ -140,24 +223,56 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   /// 交接给原生层。缺少任一连接参数(未连接/未选 source)时不启动,
   /// 此时仍由 Dart 的回前台兜底路径负责通知。
   Future<void> _startWatcher() async {
-    if (!_enabled) return;
+    final requestGeneration = ++_watcherRequestGeneration;
+    if (!_inBackground) return;
+    if (!_enabled) {
+      if (requestGeneration == _watcherRequestGeneration) {
+        _watcherActive = false;
+        await NotificationService.instance.stopWatcher();
+      }
+      return;
+    }
+    final manager = ref.read(deviceManagerProvider);
+    final session = ref.read(piSessionProvider);
+    final target = resolveWatcherConnectionTarget(
+      manager: manager,
+      session: session,
+    );
+    if (target == null) {
+      if (requestGeneration != _watcherRequestGeneration) return;
+      _watcherActive = false;
+      await NotificationService.instance.stopWatcher();
+      return;
+    }
     final settings = ref.read(settingsProvider);
-    final sourceId = ref.read(piSessionProvider).selectedSourceId;
-    if (settings.host.isEmpty || sourceId == null || sourceId.isEmpty) return;
     final started = await NotificationService.instance.startWatcher(
-      host: settings.host,
-      port: settings.port,
-      token: settings.token,
-      sourceId: sourceId,
+      host: target.host,
+      port: target.port,
+      token: target.token,
+      sourceId: target.sourceId,
       vibrate: settings.notificationVibrationEnabled,
       sessionName: _selectedSessionName(),
+      clientId: nativeWatcherClientId(
+        appClientId: settings.clientId,
+        deviceId: target.deviceId,
+      ),
+      wasStreaming: target.wasStreaming,
     );
-    if (mounted) _watcherActive = started;
+    if (!mounted || requestGeneration != _watcherRequestGeneration) return;
+    if (_inBackground) {
+      _watcherActive = started;
+    } else if (started) {
+      // The app returned to the foreground while startWatcher was awaiting
+      // the platform channel. Do not leave a second connection behind.
+      await NotificationService.instance.stopWatcher();
+    }
   }
 
   Future<void> _stopWatcher() async {
-    if (!_watcherActive) return;
+    ++_watcherRequestGeneration;
     _watcherActive = false;
+    // Do not gate this on _watcherActive: the native start call may have
+    // completed after the lifecycle callback, and still needs cancellation.
     await NotificationService.instance.stopWatcher();
   }
 
@@ -247,7 +362,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   /// 后台期间,进程被杀后回前台才补收到)。
   void _notifyTaskComplete() {
     if (!_enabled) return;
-    // 后台实时收到完成(FGS 保活成功) 或 前台兜底(回前台补收到后台期间的完成)
+    // Dart 在后台仍收到完成,或回前台补到后台期间的完成。
     final shouldNotify = _inBackground || _streamingWhenBackgrounded;
     // 消费兜底标记,避免后续前台正常完成误触发
     _streamingWhenBackgrounded = false;
@@ -275,6 +390,13 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     // 非活跃设备的任务完成提醒(多设备扇出)。挂在这里保证它与
     // 通知控制器同生命周期;活跃设备的通知仍由下面的 listener 负责。
     ref.watch(deviceAlertsProvider);
+
+    // 后台切换激活设备、source、实际通道或连接地址时重新交接 watcher，
+    // 避免原生连接继续订阅旧 bridge。
+    ref.listen(_watcherIdentityProvider, (previous, next) {
+      if (previous == null || previous == next) return;
+      if (_inBackground) unawaited(_startWatcher());
+    });
 
     // 常驻通知文案:连接状态或会话计数变化时推给原生刷新。
     ref.listen(

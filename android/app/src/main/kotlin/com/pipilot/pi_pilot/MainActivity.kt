@@ -46,6 +46,7 @@ class MainActivity : FlutterActivity() {
                         val token = call.argument<String>("token")
                         val sourceId = call.argument<String>("sourceId")
                         val clientId = call.argument<String>("clientId")
+                        val wasStreaming = call.argument<Boolean>("wasStreaming") ?: false
                         if (host.isNullOrEmpty() || port == null || token.isNullOrEmpty() ||
                             sourceId.isNullOrEmpty() || clientId.isNullOrEmpty()
                         ) {
@@ -59,6 +60,7 @@ class MainActivity : FlutterActivity() {
                                 sourceId = sourceId,
                                 vibrate = call.argument<Boolean>("vibrate") ?: false,
                                 clientId = clientId,
+                                wasStreaming = wasStreaming,
                                 sessionName = call.argument<String>("sessionName").orEmpty(),
                             )
                             result.success(null)

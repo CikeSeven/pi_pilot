@@ -414,12 +414,16 @@ class _RosterDeviceCard extends ConsumerWidget {
         ? colors.onPrimary.withValues(alpha: 0.78)
         : colors.onSurfaceVariant;
 
-    // 副标:在线 → 通道 + 窗口数;连接中 → 提示;失败 → 原因;
-    // 从未连上 → 传输偏好 + 点按提示。
+    final routeLabel = conn.activeTransport?.label ?? device.transportLabel;
+
+    // 副标:在线显示实际通道;重连时保留上一次通道标记;失败显示原因。
     final subtitle = switch ((online, connecting, streaming)) {
-      (true, _, true) => '正在生成…',
-      (true, _, false) => '${device.transportLabel} · $windowCount 个窗口',
+      (true, _, true) => '$routeLabel · 正在生成…',
+      (true, _, false) => '$routeLabel · $windowCount 个窗口',
+      (_, true, _) when conn.activeTransport != null => '$routeLabel · 重连中…',
       (_, true, _) => '连接中…',
+      _ when failed && conn.activeTransport != null =>
+        '$routeLabel · ${conn.error ?? '连接失败'}',
       _ when failed => conn.error ?? '连接失败,点按修改配置',
       _ => '${device.transportLabel} · 点按配置连接',
     };

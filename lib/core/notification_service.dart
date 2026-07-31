@@ -12,9 +12,9 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 /// Android 渠道的优先级和震动配置创建后不可修改,因此震动开关通过选择两条
 /// 独立渠道实现。`_v3` 也确保之前已经锁定的渠道不会吞掉新的横幅配置。
 ///
-/// 自有前台服务把进程提升为前台优先级并持有 partial wake lock,后台时 Dart
-/// isolate 仍能处理 bridge 心跳和事件。瞬时断线期间服务继续运行,给重连计时器
-/// 留出执行机会;只有用户显式断开会话时才停止。
+/// 自有前台服务维持进程优先级和常驻通知,但不假设 Dart isolate 在所有系统上
+/// 都会持续调度。Dart 被暂停时,原生 `BridgeWatcher` 独立维护局域网观察连接、
+/// 对账任务状态并刷新完成提醒;瞬时断线期间服务继续运行,只有显式断开才停止。
 class NotificationService {
   NotificationService._();
 
@@ -33,10 +33,6 @@ class NotificationService {
   static const MethodChannel _systemChannel = MethodChannel(
     'com.pipilot.pi_pilot/system',
   );
-
-  /// 原生观察连接使用独立 clientId:bridge 会踢掉同 clientId 的旧连接,
-  /// 复用 Dart 侧身份会让两条连接互相顶掉。
-  static const String _watcherClientId = 'pipilot-native-watcher';
 
   /// FGS 常驻通知的 id(在 KeepAliveService.kt 里固定为 1)。全扫取消任务
   /// 通知时必须跳过它,否则前台服务可能因通知被撤而被系统降级。
@@ -225,6 +221,8 @@ class NotificationService {
     required String token,
     required String sourceId,
     required bool vibrate,
+    required String clientId,
+    required bool wasStreaming,
     String? sessionName,
   }) async {
     await init();
@@ -236,7 +234,8 @@ class NotificationService {
         'token': token,
         'sourceId': sourceId,
         'vibrate': vibrate,
-        'clientId': _watcherClientId,
+        'clientId': clientId,
+        'wasStreaming': wasStreaming,
         'sessionName': sessionName ?? '',
       });
       await logDiagnostic('watcher started: source=$sourceId');

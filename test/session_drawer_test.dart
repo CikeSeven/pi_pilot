@@ -40,17 +40,17 @@ void main() {
     expect(find.byType(Drawer), findsOneWidget);
   });
 
-  testWidgets('抽屉只列 pi 窗口,不做会话创建与目录管理', (tester) async {
+  testWidgets('抽屉只列设备,不做会话创建与目录管理', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();
 
     await openDrawer(tester);
 
-    // 「pi 窗口」标题在抽屉和「设备」tab 里各有一份(同一份 UI 两个外壳),
+    // 「设备」标题在抽屉和「设备」tab 里各有一份(同一份 UI 两个外壳),
     // 所以限定在 Drawer 子树里断言。
     expect(
-      find.descendant(of: find.byType(Drawer), matching: find.text('pi 窗口')),
+      find.descendant(of: find.byType(Drawer), matching: find.text('设备')),
       findsOneWidget,
     );
     // 抽屉里**不再**有「设置」入口 —— 底栏已经有「设置」tab,
@@ -75,7 +75,7 @@ void main() {
 
     // 对话页的未连接态也有同样文案,这里只看抽屉里的那份
     expect(
-      find.descendant(of: find.byType(Drawer), matching: find.text('尚未连接')),
+      find.descendant(of: find.byType(Drawer), matching: find.text('还没有设备')),
       findsOneWidget,
     );
   });

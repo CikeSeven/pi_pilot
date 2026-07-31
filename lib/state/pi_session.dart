@@ -445,9 +445,20 @@ enum SyncPhase {
   degraded,
 }
 
+/// 当前实际承载协议流量的通道。与用户配置的 [DeviceTransport] 不同:
+/// auto 会在两种通道之间自动迁移,UI 和重连策略都看这个运行时结果。
+enum PiActiveTransport {
+  lan('局域网直连'),
+  p2p('P2P');
+
+  const PiActiveTransport(this.label);
+  final String label;
+}
+
 class PiState {
   const PiState({
     required this.status,
+    this.activeTransport,
     this.sessionPhase = SyncPhase.offline,
     required this.items,
     required this.revision,
@@ -503,6 +514,9 @@ class PiState {
   );
 
   final PiConnStatus status;
+
+  /// 最近一次成功连接使用的实际通道。断线重连期间保留,用于展示和 P2P 粘滞。
+  final PiActiveTransport? activeTransport;
 
   /// 业务就绪阶段(transport→auth→catalog→selected→synced)。
   /// UI 的"连接中/同步中/已同步/降级"四态以此渲染,不看裸 status。
@@ -614,6 +628,7 @@ class PiState {
 
   PiState copyWith({
     PiConnStatus? status,
+    PiActiveTransport? activeTransport,
     SyncPhase? sessionPhase,
     List<ChatItem>? items,
     int? revision,
@@ -651,6 +666,7 @@ class PiState {
     bool? hasMoreHistory,
     bool? loadingEarlier,
     bool clearError = false,
+    bool clearActiveTransport = false,
     bool clearSource = false,
     bool clearUiRequest = false,
     bool clearAsk = false,
@@ -658,6 +674,9 @@ class PiState {
   }) {
     return PiState(
       status: status ?? this.status,
+      activeTransport: clearActiveTransport
+          ? null
+          : (activeTransport ?? this.activeTransport),
       sessionPhase: sessionPhase ?? this.sessionPhase,
       items: items ?? this.items,
       revision: revision ?? this.revision,
@@ -738,6 +757,13 @@ final piSessionFamilyProvider =
 /// 把"另一端掉线后本机要等多久才能驱动"从 31s 压到即时。
 const int _leaseTtlMs = 8000;
 
+enum _OpenRoute { configured, lanOnly, p2pOnly }
+
+typedef _ConnectionScope = ({
+  int generation,
+  PiConnection connection,
+});
+
 class PiSessionNotifier extends Notifier<PiState> {
   /// family 注入:这台 notifier 负责的 roster 设备 id。
   /// 连接/重连/通知都按这个 id 各管各的,多设备互不干扰。
@@ -752,12 +778,22 @@ class PiSessionNotifier extends Notifier<PiState> {
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<PiConnStatus>? _statusSub;
   Timer? _reconnectTimer;
+  Timer? _lanRecoveryTimer;
   Timer? _leaseRenewTimer;
   Timer? _healthTimer;
   int _reconnectAttempt = 0;
   bool _reconnectInFlight = false;
+  bool _lanProbeInFlight = false;
+  bool _transportSwitchInFlight = false;
+  bool _preferP2pInAuto = false;
+  PiActiveTransport? _activeTransport;
+  int _connectionGeneration = 0;
   DateTime? _lastPongAt;
   final math.Random _jitterRandom = math.Random();
+
+  static const _lanRecoveryInterval = Duration(seconds: 30);
+  static const _lanProbeTimeout = Duration(seconds: 4);
+  static const _lanRecoveryBusyDelay = Duration(seconds: 5);
 
   final List<ChatItem> _items = [];
   final Map<String, ChatItem> _itemsByKey = {};
@@ -840,6 +876,23 @@ class PiSessionNotifier extends Notifier<PiState> {
     state = next;
   }
 
+  bool _connectionScopeCurrent(_ConnectionScope? scope) =>
+      scope == null ||
+      (scope.generation == _connectionGeneration &&
+          !_disposed &&
+          !_intentionalDisconnect &&
+          identical(_conn, scope.connection) &&
+          scope.connection.isOpen);
+
+  bool _syncWorkCurrent({
+    _ConnectionScope? connectionScope,
+    int? syncGeneration,
+    String? sourceId,
+  }) =>
+      _connectionScopeCurrent(connectionScope) &&
+      (syncGeneration == null || syncGeneration == _syncGeneration) &&
+      (sourceId == null || sourceId == state.selectedSourceId);
+
   @override
   PiState build() {
     ref.onDispose(() {
@@ -878,6 +931,14 @@ class PiSessionNotifier extends Notifier<PiState> {
       );
       return;
     }
+    final generation = ++_connectionGeneration;
+    _syncGeneration++;
+    _activeSyncGeneration = 0;
+    _cancelLanRecovery();
+    _preferP2pInAuto = false;
+    _activeTransport = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _intentionalDisconnect = false;
     _transport = device.transport;
     _creds = (
@@ -897,6 +958,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       status: PiConnStatus.connecting,
       sessionPhase: SyncPhase.connecting,
       clearError: true,
+      clearActiveTransport: true,
     );
 
     bool ok;
@@ -906,6 +968,11 @@ class PiSessionNotifier extends Notifier<PiState> {
       // 任何异常(如非法主机名)都不能让状态停在 connecting
       ok = false;
     }
+    if (generation != _connectionGeneration ||
+        _disposed ||
+        _intentionalDisconnect) {
+      return;
+    }
     if (!ok) {
       state = state.copyWith(
         status: PiConnStatus.failed,
@@ -914,10 +981,16 @@ class PiSessionNotifier extends Notifier<PiState> {
       return;
     }
     state = state.copyWith(status: PiConnStatus.connected, hasSession: true);
-    await _initializeAfterConnect();
+    await _initializeAfterConnect(generation);
   }
 
   void disconnect() {
+    _connectionGeneration++;
+    _syncGeneration++;
+    _activeSyncGeneration = 0;
+    _cancelLanRecovery();
+    _preferP2pInAuto = false;
+    _activeTransport = null;
     _intentionalDisconnect = true;
     _clearAllLeases();
     _tearDown();
@@ -1046,22 +1119,35 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// 重连后对账 pending 写操作:accepted/executed 标完成;
   /// unknown 一律提示"结果未知",禁止自动重放。
-  Future<void> _reconcilePendingOps() async {
+  Future<void> _reconcilePendingOps({
+    _ConnectionScope? connectionScope,
+    int? syncGeneration,
+    String? sourceId,
+  }) async {
+    bool current() => _syncWorkCurrent(
+      connectionScope: connectionScope,
+      syncGeneration: syncGeneration,
+      sourceId: sourceId,
+    );
     final store = _syncStore;
-    if (store == null || !_hubV2) return;
+    if (store == null || !_hubV2 || !current()) return;
     // 只对账本设备的 op(+ 单设备时代遗留的 NULL 行),
     // 不把别设备的排队写操作拿到这台 bridge 上问状态。
     final pending = await store.pendingOps(deviceKey: _deviceId);
+    if (!current()) return;
     for (final op in pending) {
-      if (_disposed || _conn?.isOpen != true) return;
+      if (!current() || _conn?.isOpen != true) return;
       final opId = op['op_id'] as String?;
       if (opId == null) continue;
       final resp = await _request('hub_op_status', {'opId': opId});
+      if (!current()) return;
       final status = (resp?['data'] as Map?)?['status'] as String?;
       if (status == 'accepted' || status == 'executed') {
         await store.updateOpStatus(opId, status!);
+        if (!current()) return;
       } else if (resp != null) {
         await store.updateOpStatus(opId, 'unknown');
+        if (!current()) return;
         _addSystem(
           '断线前的「${op['type']}」结果未知,请确认后手动重试',
           SystemKind.error,
@@ -1144,9 +1230,16 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   // -- Source Hub -------------------------------------------------------------
 
-  Future<List<SourceInfo>> refreshSources() async {
-    if (!_hubV2) return state.sources;
+  Future<List<SourceInfo>> refreshSources() => _refreshSources();
+
+  Future<List<SourceInfo>> _refreshSources({
+    _ConnectionScope? connectionScope,
+  }) async {
+    if (!_hubV2 || !_connectionScopeCurrent(connectionScope)) {
+      return state.sources;
+    }
     final resp = await _request('hub_list_sources');
+    if (!_connectionScopeCurrent(connectionScope)) return state.sources;
     final raw = (resp?['data'] as Map?)?['sources'] as List?;
     if (resp?['success'] != true || raw == null) return state.sources;
     final parsed = [
@@ -1160,9 +1253,17 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 拉取会话总表(活跃 + 磁盘上的)。
   /// 失败返回 null(保留旧列表),成功返回新列表 —— 调用方据此重试,
   /// 不再把"加载失败"和"没有会话"混为一谈。
-  Future<List<HubSession>?> refreshHubSessions({String? cwd}) async {
+  Future<List<HubSession>?> refreshHubSessions({String? cwd}) =>
+      _refreshHubSessions(cwd: cwd);
+
+  Future<List<HubSession>?> _refreshHubSessions({
+    String? cwd,
+    _ConnectionScope? connectionScope,
+  }) async {
     if (!_hubV2) return const [];
+    if (!_connectionScopeCurrent(connectionScope)) return null;
     final resp = await _request('hub_list_sessions', {'cwd': ?cwd});
+    if (!_connectionScopeCurrent(connectionScope)) return null;
     final raw = (resp?['data'] as Map?)?['sessions'] as List?;
     if (resp?['success'] != true || raw == null) {
       _logP2p(
@@ -1180,15 +1281,29 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// catalog 加载的失败重试(1s/2s/4s):连接刚建立时 P2P 慢链路上
   /// 一次超时是常态,放弃重试就是"列表永远空白"。
-  Future<void> refreshHubSessionsWithRetry({String? cwd}) async {
+  Future<void> refreshHubSessionsWithRetry({String? cwd}) =>
+      _refreshHubSessionsWithRetry(cwd: cwd);
+
+  Future<void> _refreshHubSessionsWithRetry({
+    String? cwd,
+    _ConnectionScope? connectionScope,
+  }) async {
     const delays = <Duration>[
       Duration(seconds: 1),
       Duration(seconds: 2),
       Duration(seconds: 4),
     ];
     for (var attempt = 0; attempt <= delays.length; attempt++) {
-      if (_disposed || _conn?.isOpen != true) return;
-      final result = await refreshHubSessions(cwd: cwd);
+      if (_disposed ||
+          _conn?.isOpen != true ||
+          !_connectionScopeCurrent(connectionScope)) {
+        return;
+      }
+      final result = await _refreshHubSessions(
+        cwd: cwd,
+        connectionScope: connectionScope,
+      );
+      if (!_connectionScopeCurrent(connectionScope)) return;
       if (result != null) return;
       if (attempt < delays.length) {
         await Future<void>.delayed(delays[attempt]);
@@ -1272,8 +1387,15 @@ class PiSessionNotifier extends Notifier<PiState> {
     return true;
   }
 
-  Future<bool> selectSource(String sourceId, {bool persist = true}) async {
-    if (!_hubV2) return false;
+  Future<bool> selectSource(String sourceId, {bool persist = true}) =>
+      _selectSource(sourceId, persist: persist);
+
+  Future<bool> _selectSource(
+    String sourceId, {
+    bool persist = true,
+    _ConnectionScope? connectionScope,
+  }) async {
+    if (!_hubV2 || !_connectionScopeCurrent(connectionScope)) return false;
 
     // hub 在响应之前就开始向本客户端广播事件,所以必须先武装缓冲、
     // 先设 selectedSourceId,否则这段窗口里的事件会触发并发重同步。
@@ -1289,7 +1411,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
 
     final resp = await _request('hub_select_source', {'sourceId': sourceId});
-    if (gen != _syncGeneration) return false;
+    if (gen != _syncGeneration ||
+        !_connectionScopeCurrent(connectionScope)) {
+      return false;
+    }
     if (resp?['success'] != true) {
       _activeSyncGeneration = 0;
       return false;
@@ -1321,8 +1446,12 @@ class PiSessionNotifier extends Notifier<PiState> {
             .setPreferredSource(selected.id, selected.sessionId),
       );
     }
-    await _syncSelectedSource(forceFull: true, generation: gen);
-    return true;
+    await _syncSelectedSource(
+      forceFull: true,
+      generation: gen,
+      connectionScope: connectionScope,
+    );
+    return _connectionScopeCurrent(connectionScope);
   }
 
   /// 确保持有某个源的租约。**自动、静默、可强制抢占** —— 用户永远看不到这一步。
@@ -1469,15 +1598,28 @@ class PiSessionNotifier extends Notifier<PiState> {
     return _leaseErrorMarkers.any(error.contains);
   }
 
-  Future<void> _initializeAfterConnect() async {
+  Future<void> _initializeAfterConnect(int generation) async {
+    final connection = _conn;
+    if (connection == null) return;
+    final connectionScope = (
+      generation: generation,
+      connection: connection,
+    );
+    if (!_connectionScopeCurrent(connectionScope)) return;
+
     _reconnectAttempt = 0;
     _startHealthMonitor();
+    _scheduleLanRecovery();
     if (!_hubV2) {
-      await _sync();
-      await _applyPreferences();
+      await _sync(connectionScope: connectionScope);
+      if (!_connectionScopeCurrent(connectionScope)) return;
+      await _applyPreferences(connectionScope: connectionScope);
       return;
     }
-    final available = await refreshSources();
+    final available = await _refreshSources(
+      connectionScope: connectionScope,
+    );
+    if (!_connectionScopeCurrent(connectionScope)) return;
     final settings = ref.read(settingsProvider);
     final preferred = settings.preferredSourceId;
     final preferredSession = settings.preferredSessionId;
@@ -1513,13 +1655,16 @@ class PiSessionNotifier extends Notifier<PiState> {
       healPreference = true;
     }
 
-    unawaited(refreshHubSessionsWithRetry());
+    unawaited(
+      _refreshHubSessionsWithRetry(connectionScope: connectionScope),
+    );
     if (target != null) {
-      await selectSource(
+      await _selectSource(
         target.id,
         persist: healPreference || preferred == null,
+        connectionScope: connectionScope,
       );
-    } else {
+    } else if (_connectionScopeCurrent(connectionScope)) {
       _resetConversation();
       state = state.copyWith(clearSource: true, sources: available);
     }
@@ -1996,7 +2141,10 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// Re-apply persisted preferences (model / thinking / auto-retry) that pi
   /// does not itself restore for a fresh process.
-  Future<void> _applyPreferences() async {
+  Future<void> _applyPreferences({
+    _ConnectionScope? connectionScope,
+  }) async {
+    if (!_connectionScopeCurrent(connectionScope)) return;
     final settings = ref.read(settingsProvider);
     final provider = settings.modelProvider;
     final modelId = settings.modelId;
@@ -2008,6 +2156,7 @@ class PiSessionNotifier extends Notifier<PiState> {
         'provider': provider,
         'modelId': modelId,
       });
+      if (!_connectionScopeCurrent(connectionScope)) return;
       final model = resp?['data'] as Map?;
       if (resp?['success'] == true) {
         state = state.copyWith(
@@ -2023,19 +2172,27 @@ class PiSessionNotifier extends Notifier<PiState> {
       final resp = await _mutatingRequest('set_thinking_level', {
         'level': level,
       });
+      if (!_connectionScopeCurrent(connectionScope)) return;
       if (resp?['success'] == true) {
         state = state.copyWith(thinkingLevel: level);
       }
     }
-    if (_sourceSupports('set_auto_retry')) {
+    if (_connectionScopeCurrent(connectionScope) &&
+        _sourceSupports('set_auto_retry')) {
       await _mutatingRequest('set_auto_retry', {'enabled': settings.autoRetry});
     }
   }
 
   // -- connection plumbing ----------------------------------------------------
 
-  Future<bool> _open() async {
+  Future<bool> _open({_OpenRoute route = _OpenRoute.configured}) async {
+    final generation = _connectionGeneration;
     await _closeConn();
+    if (generation != _connectionGeneration ||
+        _disposed ||
+        _intentionalDisconnect) {
+      return false;
+    }
     final creds = _creds;
     if (creds == null) return false;
 
@@ -2043,19 +2200,40 @@ class PiSessionNotifier extends Notifier<PiState> {
     _conn = conn;
     _msgSub = conn.messages.listen(_handleEvent);
     _statusSub = conn.status.listen(_onConnStatus);
+    bool currentAttempt() =>
+        generation == _connectionGeneration &&
+        !_disposed &&
+        !_intentionalDisconnect &&
+        identical(_conn, conn);
 
-    // 局域网 WebSocket 与 P2P 配置相互独立。即使 P2P 已启用，直连仍需
-    // 保留完整握手窗口；否则 bridge 冷启动或设备刚恢复网络时会在 5 秒被
-    // 误判失败，并提前落到 P2P。Android/Xiaomi 可能把 Wi-Fi 标成不可用，
-    // 所以整个建链阶段通过进程级网络门闩串行，并只在 LAN socket + hello
-    // 期间绑定 Wi-Fi；finally 解绑后才允许 P2P 信令建 socket。
+    // auto 首次仍给 LAN 完整 12s 握手窗口;一旦回落 P2P 成功,后续重连
+    // 直接走 P2P。LAN 恢复由独立匿名探测负责,不再阻塞主连接重建。
     final p2p = _p2p;
     final transport = _transport;
+    final stickyP2p =
+        route == _OpenRoute.configured &&
+        transport == DeviceTransport.auto &&
+        _preferP2pInAuto;
+    final tryLan = switch (route) {
+      _OpenRoute.lanOnly => true,
+      _OpenRoute.p2pOnly => false,
+      _OpenRoute.configured =>
+        transport != DeviceTransport.p2p && !stickyP2p,
+    };
+    final tryP2p =
+        p2p != null &&
+        switch (route) {
+          _OpenRoute.lanOnly => false,
+          _OpenRoute.p2pOnly => true,
+          _OpenRoute.configured => transport != DeviceTransport.lan,
+        };
+
+    PiActiveTransport? openedVia;
     final hello = await LanNetworkBinding.serializeOpen<Map<String, dynamic>?>(
       () async {
-        if (!identical(_conn, conn)) return null;
+        if (!currentAttempt()) return null;
         Map<String, dynamic>? hello;
-        if (transport != DeviceTransport.p2p) {
+        if (tryLan) {
           hello = await LanNetworkBinding.withWifiBinding(
             () => conn.connect(
               host: creds.host,
@@ -2066,12 +2244,13 @@ class PiSessionNotifier extends Notifier<PiState> {
               timeout: const Duration(seconds: 12),
             ),
           );
+          if (!currentAttempt()) {
+            await conn.disconnectAndWait(notify: false);
+            return null;
+          }
+          if (hello != null) openedVia = PiActiveTransport.lan;
         }
-        // 仅直连(lan)不回落:用户明确不要公网通道时,失败就如实失败。
-        if (hello == null &&
-            p2p != null &&
-            transport != DeviceTransport.lan &&
-            identical(_conn, conn)) {
+        if (hello == null && tryP2p && currentAttempt()) {
           final settings = ref.read(settingsProvider.notifier);
           final channel = await P2pConnector(onLog: _logP2p).connect(
             rendezvousUrl: p2p.rendezvous,
@@ -2091,24 +2270,53 @@ class PiSessionNotifier extends Notifier<PiState> {
               onFailure: () => settings.failP2pIceMode(p2p.deviceId),
             ),
           );
+          if (!currentAttempt()) {
+            await channel?.close();
+            await conn.disconnectAndWait(notify: false);
+            return null;
+          }
           if (channel != null) {
-            if (identical(_conn, conn)) {
-              hello = await conn.connectViaChannel(
-                channel,
-                token: creds.token,
-                clientId: creds.clientId,
-              );
-            } else {
-              // 打洞期间用户已断开/换了连接:通道不能漏,关掉。
-              await channel.close();
+            hello = await conn.connectViaChannel(
+              channel,
+              token: creds.token,
+              clientId: creds.clientId,
+            );
+            if (!currentAttempt()) {
+              await conn.disconnectAndWait(notify: false);
+              return null;
             }
+            if (hello != null) openedVia = PiActiveTransport.p2p;
           }
         }
         return hello;
       },
     );
-    if (hello == null) return false;
+    if (!currentAttempt()) {
+      await conn.disconnectAndWait(notify: false);
+      return false;
+    }
+    final activeTransport = openedVia;
+    if (hello == null || activeTransport == null) return false;
 
+    _applyHello(hello);
+    if (transport == DeviceTransport.auto) {
+      if (activeTransport == PiActiveTransport.lan) {
+        _preferP2pInAuto = false;
+        _cancelLanRecovery();
+      } else {
+        _preferP2pInAuto = true;
+      }
+    }
+    _activeTransport = activeTransport;
+    state = state.copyWith(activeTransport: activeTransport);
+    _logP2p(
+      'transport_open{route:${activeTransport.name},policy:${route.name},'
+      'sticky:$_preferP2pInAuto}',
+    );
+    return true;
+  }
+
+  void _applyHello(Map<String, dynamic> hello) {
     final version = hello['version'] as int? ?? 1;
     final hubId = hello['hubId'] as String?;
     _hubV2 = version >= 2 && hubId != null;
@@ -2121,21 +2329,195 @@ class PiSessionNotifier extends Notifier<PiState> {
         cwd: hello['cwd'] as String?,
       );
     }
-    return true;
+  }
+
+  bool get _shouldRecoverLan =>
+      !_disposed &&
+      !_intentionalDisconnect &&
+      _transport == DeviceTransport.auto &&
+      _preferP2pInAuto &&
+      _activeTransport == PiActiveTransport.p2p &&
+      _creds != null &&
+      _p2p != null;
+
+  bool get _transportSwitchBusy =>
+      state.status == PiConnStatus.connected &&
+      (state.isStreaming || _pending.isNotEmpty);
+
+  void _cancelLanRecovery() {
+    _lanRecoveryTimer?.cancel();
+    _lanRecoveryTimer = null;
+  }
+
+  void _scheduleLanRecovery({Duration? delay, bool replace = false}) {
+    if (!_shouldRecoverLan) {
+      _cancelLanRecovery();
+      return;
+    }
+    if (_lanRecoveryTimer?.isActive == true) {
+      if (!replace) return;
+      _lanRecoveryTimer?.cancel();
+    }
+    _lanRecoveryTimer = Timer(delay ?? _lanRecoveryInterval, () {
+      _lanRecoveryTimer = null;
+      unawaited(_attemptLanRecovery());
+    });
+  }
+
+  Future<void> _attemptLanRecovery() async {
+    if (!_shouldRecoverLan) return;
+    if (_lanProbeInFlight ||
+        _transportSwitchInFlight ||
+        _reconnectInFlight ||
+        _transportSwitchBusy) {
+      _scheduleLanRecovery(delay: _lanRecoveryBusyDelay, replace: true);
+      return;
+    }
+    final creds = _creds;
+    if (creds == null) return;
+    final generation = _connectionGeneration;
+    final expectedHubId = state.hubId;
+    final probe = PiConnection();
+    Map<String, dynamic>? hello;
+    _lanProbeInFlight = true;
+    try {
+      hello = await LanNetworkBinding.serializeOpen<Map<String, dynamic>?>(
+        () async {
+          if (generation != _connectionGeneration || !_shouldRecoverLan) {
+            return null;
+          }
+          return LanNetworkBinding.withWifiBinding(
+            () => probe.connect(
+              host: creds.host,
+              port: creds.port,
+              token: creds.token,
+              // 稳定 clientId 会让 bridge 踢掉正在工作的 P2P 连接。
+              // 匿名探测握手后立刻关闭,只验证 LAN 路由与鉴权。
+              clientId: null,
+              timeout: _lanProbeTimeout,
+            ),
+          );
+        },
+      );
+    } catch (_) {
+      hello = null;
+    } finally {
+      await probe.disconnectAndWait(notify: false);
+      _lanProbeInFlight = false;
+    }
+
+    if (generation != _connectionGeneration || !_shouldRecoverLan) return;
+    final probeHubId = hello?['hubId'] as String?;
+    final wrongHub =
+        expectedHubId != null && probeHubId != expectedHubId;
+    if (hello == null || wrongHub) {
+      _scheduleLanRecovery(replace: true);
+      if (state.status != PiConnStatus.connected &&
+          !_reconnectInFlight &&
+          !_transportSwitchInFlight) {
+        _scheduleReconnect();
+      }
+      return;
+    }
+    if (_transportSwitchBusy) {
+      _scheduleLanRecovery(delay: _lanRecoveryBusyDelay, replace: true);
+      return;
+    }
+    _logP2p('lan_recovery_probe{success:true,hubId:$probeHubId}');
+    await _switchToLan(generation);
+  }
+
+  Future<void> _switchToLan(int generation) async {
+    if (generation != _connectionGeneration || !_shouldRecoverLan) return;
+    if (_transportSwitchInFlight ||
+        _reconnectInFlight ||
+        _transportSwitchBusy) {
+      _scheduleLanRecovery(delay: _lanRecoveryBusyDelay, replace: true);
+      return;
+    }
+
+    _transportSwitchInFlight = true;
+    _cancelLanRecovery();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _stopHealthMonitor();
+    var connectionRestored = false;
+    try {
+      state = state.copyWith(
+        status: PiConnStatus.connecting,
+        sessionPhase: SyncPhase.connecting,
+        clearError: true,
+      );
+      bool lanOk;
+      try {
+        lanOk = await _open(route: _OpenRoute.lanOnly);
+      } catch (_) {
+        lanOk = false;
+      }
+      if (generation != _connectionGeneration || _intentionalDisconnect) {
+        return;
+      }
+      if (lanOk) {
+        connectionRestored = true;
+        state = state.copyWith(status: PiConnStatus.connected);
+        await _initializeAfterConnect(generation);
+        return;
+      }
+
+      // 探测与正式建链之间仍可能发生网络竞态。LAN 失败就立刻恢复 P2P,
+      // 粘滞标记保持不变,用户不会因后台优化永久掉线。
+      bool p2pOk;
+      try {
+        p2pOk = await _open(route: _OpenRoute.p2pOnly);
+      } catch (_) {
+        p2pOk = false;
+      }
+      if (generation != _connectionGeneration || _intentionalDisconnect) {
+        return;
+      }
+      if (p2pOk) {
+        connectionRestored = true;
+        state = state.copyWith(status: PiConnStatus.connected);
+        await _initializeAfterConnect(generation);
+        return;
+      }
+      state = state.copyWith(
+        status: PiConnStatus.connecting,
+        sessionPhase: SyncPhase.offline,
+      );
+    } finally {
+      final connectionStillOpen =
+          connectionRestored &&
+          state.status == PiConnStatus.connected &&
+          _conn?.isOpen == true;
+      _transportSwitchInFlight = false;
+      if (generation == _connectionGeneration && !_intentionalDisconnect) {
+        if (!connectionStillOpen) _scheduleReconnect();
+        _scheduleLanRecovery();
+      }
+    }
   }
 
   Future<void> _closeConn() async {
     _clearAllLeases();
-    await _msgSub?.cancel();
-    await _statusSub?.cancel();
+    _syncGeneration++;
+    _activeSyncGeneration = 0;
+    _bufferedSourceEvents.clear();
+    final messageSub = _msgSub;
+    final statusSub = _statusSub;
+    final conn = _conn;
     _msgSub = null;
     _statusSub = null;
-    _conn?.disconnect(notify: false);
     _conn = null;
     for (final completer in _pending.values) {
       if (!completer.isCompleted) completer.complete(null);
     }
     _pending.clear();
+    final statusCancel = statusSub?.cancel();
+    final messageCancel = messageSub?.cancel();
+    await statusCancel;
+    await messageCancel;
+    await conn?.disconnectAndWait(notify: false);
   }
 
   void _onConnStatus(PiConnStatus status) {
@@ -2153,7 +2535,10 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// 指数退避:min(30s, 1s·2^attempt) × jitter(0.8–1.2)。
   void _scheduleReconnect() {
-    if (_disposed || _reconnectInFlight || _reconnectTimer?.isActive == true) {
+    if (_disposed ||
+        _reconnectInFlight ||
+        _transportSwitchInFlight ||
+        _reconnectTimer?.isActive == true) {
       return;
     }
     final baseSeconds = math.min(
@@ -2171,11 +2556,31 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
   }
 
+  void _scheduleReconnectAfterContention() {
+    if (_disposed ||
+        _intentionalDisconnect ||
+        _reconnectInFlight ||
+        _transportSwitchInFlight ||
+        _reconnectTimer?.isActive == true) {
+      return;
+    }
+    _reconnectTimer = Timer(_lanRecoveryBusyDelay, () {
+      _reconnectTimer = null;
+      unawaited(_attemptReconnect());
+    });
+  }
+
   Future<void> _attemptReconnect() async {
+    final generation = _connectionGeneration;
     if (_disposed ||
         _intentionalDisconnect ||
         _creds == null ||
         _reconnectInFlight) {
+      return;
+    }
+    if (_transportSwitchInFlight) return;
+    if (_lanProbeInFlight) {
+      _scheduleReconnectAfterContention();
       return;
     }
     _reconnectTimer?.cancel();
@@ -2189,14 +2594,18 @@ class PiSessionNotifier extends Notifier<PiState> {
     } finally {
       _reconnectInFlight = false;
     }
-    if (_disposed || _intentionalDisconnect) return;
+    if (generation != _connectionGeneration ||
+        _disposed ||
+        _intentionalDisconnect) {
+      return;
+    }
     if (!ok) {
       _scheduleReconnect();
       return;
     }
     _reconnectAttempt = 0;
     state = state.copyWith(status: PiConnStatus.connected);
-    await _initializeAfterConnect();
+    await _initializeAfterConnect(generation);
   }
 
   /// App 回前台:若状态不是 connected,或最后一个 pong 已经过期,跳过退避
@@ -2205,6 +2614,9 @@ class PiSessionNotifier extends Notifier<PiState> {
   void onAppResumed() {
     if (_disposed) return;
     if (_intentionalDisconnect || _creds == null || !state.hasSession) return;
+    if (_shouldRecoverLan) {
+      _scheduleLanRecovery(delay: Duration.zero, replace: true);
+    }
     final lastPong = _lastPongAt;
     final connectionFresh =
         state.status == PiConnStatus.connected &&
@@ -2236,6 +2648,9 @@ class PiSessionNotifier extends Notifier<PiState> {
   void onNetworkChanged(String reason) {
     if (_disposed) return;
     if (_intentionalDisconnect || _creds == null || !state.hasSession) return;
+    if (_shouldRecoverLan) {
+      _scheduleLanRecovery(delay: Duration.zero, replace: true);
+    }
     _logP2p('network_changed{reason:$reason,status:${state.status.name}}');
     // 已经在连了就不打断:重复推倒会把退避计数器清零并反复重建 PeerConnection。
     if (state.status == PiConnStatus.connecting) return;
@@ -2339,6 +2754,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   }
 
   void _tearDown() {
+    _cancelLanRecovery();
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _resyncTimer?.cancel();
@@ -2365,17 +2781,40 @@ class PiSessionNotifier extends Notifier<PiState> {
     return 'hub.cursor:$hubId:$sourceId';
   }
 
-  Future<void> _loadLeafId() async {
-    if (state.sessionId == null) return;
+  Future<void> _loadLeafId({
+    _ConnectionScope? connectionScope,
+    int? syncGeneration,
+    String? sourceId,
+  }) async {
+    bool current() => _syncWorkCurrent(
+      connectionScope: connectionScope,
+      syncGeneration: syncGeneration,
+      sourceId: sourceId,
+    );
+    if (state.sessionId == null || !current()) return;
+    final key = _leafStorageKey;
     final prefs = await SharedPreferences.getInstance();
-    _leafId = prefs.getString(_leafStorageKey);
+    if (!current()) return;
+    _leafId = prefs.getString(key);
   }
 
-  Future<void> _saveLeafId() async {
+  Future<void> _saveLeafId({
+    _ConnectionScope? connectionScope,
+    int? syncGeneration,
+    String? sourceId,
+  }) async {
+    bool current() => _syncWorkCurrent(
+      connectionScope: connectionScope,
+      syncGeneration: syncGeneration,
+      sourceId: sourceId,
+    );
+    if (!current()) return;
     final leafId = _leafId;
     if (state.sessionId == null || leafId == null) return;
+    final key = _leafStorageKey;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_leafStorageKey, leafId);
+    if (!current()) return;
+    await prefs.setString(key, leafId);
   }
 
   Future<HubCursor?> _loadHubCursor() async {
@@ -2392,15 +2831,31 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
   }
 
-  Future<void> _saveHubCursor() async {
+  Future<void> _saveHubCursor({
+    _ConnectionScope? connectionScope,
+    int? syncGeneration,
+    String? expectedSourceId,
+  }) async {
+    bool current() => _syncWorkCurrent(
+      connectionScope: connectionScope,
+      syncGeneration: syncGeneration,
+      sourceId: expectedSourceId,
+    );
+    if (!current()) return;
     final key = _cursorStorageKey;
     final hubId = state.hubId;
     final sourceId = state.selectedSourceId;
     final epoch = state.sourceEpoch;
+    final seq = state.lastSourceSeq;
+    final sessionId = state.sessionId;
+    final leafId = _leafId;
+    final store = _syncStore;
+    final sourceKey = _syncSourceKey;
     if (key == null || hubId == null || sourceId == null || epoch == null) {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
+    if (!current()) return;
     await prefs.setString(
       key,
       jsonEncode(
@@ -2408,14 +2863,13 @@ class PiSessionNotifier extends Notifier<PiState> {
           hubId: hubId,
           sourceId: sourceId,
           sourceEpoch: epoch,
-          seq: state.lastSourceSeq,
+          seq: seq,
         ).toMap(),
       ),
     );
+    if (!current()) return;
     // cursor v2:附带 entryId rebase 锚点。bridge 重启(hubId 必变)后
     // 事件游标作废,但可从最后一条 entry 正向补齐,历史不用重拉。
-    final store = _syncStore;
-    final sourceKey = _syncSourceKey;
     if (store != null && sourceKey != null) {
       unawaited(
         store.commitEventWithCursor(
@@ -2425,9 +2879,9 @@ class PiSessionNotifier extends Notifier<PiState> {
             'hubId': hubId,
             'sourceId': sourceId,
             'sourceEpoch': epoch,
-            'seq': state.lastSourceSeq,
-            'sessionId': state.sessionId,
-            'lastEntryId': _leafId,
+            'seq': seq,
+            'sessionId': sessionId,
+            'lastEntryId': leafId,
             'savedAt': DateTime.now().millisecondsSinceEpoch,
           },
         ),
@@ -2447,15 +2901,17 @@ class PiSessionNotifier extends Notifier<PiState> {
     bool forceFull = false,
     bool reconcile = false,
     int? generation,
+    _ConnectionScope? connectionScope,
   }) async {
     if (!_hubV2 || state.selectedSourceId == null) return;
     final sourceId = state.selectedSourceId;
     final gen = generation ?? ++_syncGeneration;
     _activeSyncGeneration = gen;
-    // 每个 await 之后都要确认自己还是最新一代且 source 没换
+    // 每个 await 之后都要确认自己还是最新一代、source 没换且连接没被替代。
     bool stale() =>
         _disposed ||
         gen != _syncGeneration ||
+        !_connectionScopeCurrent(connectionScope) ||
         state.selectedSourceId != sourceId;
     try {
       final cursor = forceFull ? null : await _loadHubCursor();
@@ -2524,7 +2980,13 @@ class PiSessionNotifier extends Notifier<PiState> {
               sourceEpoch: snapshot['epoch'] as String?,
               lastSourceSeq: snapshot['baseSeq'] as int? ?? 0,
             );
-            unawaited(_rebaseFromEntry(rebaseEntryId, generation: gen));
+            unawaited(
+              _rebaseFromEntry(
+                rebaseEntryId,
+                generation: gen,
+                connectionScope: connectionScope,
+              ),
+            );
           }
         }
         // 桥为了不撞爆手机的 2MB 套接字缓冲,只发了 entries 的尾巴。
@@ -2535,7 +2997,12 @@ class PiSessionNotifier extends Notifier<PiState> {
           state = state.copyWith(hasMoreHistory: true);
         }
       } else if (mode == 'rpc') {
-        await _sync(forceFull: forceFull);
+        await _sync(
+          forceFull: forceFull,
+          connectionScope: connectionScope,
+          syncGeneration: gen,
+          sourceId: sourceId,
+        );
         if (stale()) return;
         state = state.copyWith(
           sourceEpoch: data['sourceEpoch'] as String?,
@@ -2562,7 +3029,11 @@ class PiSessionNotifier extends Notifier<PiState> {
       // 这里必须立刻带着已推进的 cursor 再来一轮 —— 否则客户端会误以为已经
       // 追平,后面那段事件永远不会被应用。
       if (data['eventsTruncated'] == true && events.isNotEmpty) {
-        await _saveHubCursor();
+        await _saveHubCursor(
+          connectionScope: connectionScope,
+          syncGeneration: gen,
+          expectedSourceId: sourceId,
+        );
         if (stale()) return;
         if (_eventPageRounds++ < _maxEventPageRounds) {
           _logP2p(
@@ -2570,18 +3041,36 @@ class PiSessionNotifier extends Notifier<PiState> {
             'round:$_eventPageRounds}',
           );
           // 交回当前一代继续翻:cursor 已前进,下一轮取后续事件页。
-          await _syncSelectedSource(reconcile: reconcile, generation: gen);
+          await _syncSelectedSource(
+            reconcile: reconcile,
+            generation: gen,
+            connectionScope: connectionScope,
+          );
           return;
         }
         _logP2p('events_truncated: 连续翻页超过 $_maxEventPageRounds 轮,改走全量');
         _eventPageRounds = 0;
-        await _syncSelectedSource(forceFull: true, generation: gen);
+        await _syncSelectedSource(
+          forceFull: true,
+          generation: gen,
+          connectionScope: connectionScope,
+        );
         return;
       }
       _eventPageRounds = 0;
       state = state.copyWith(sessionPhase: SyncPhase.synced);
-      unawaited(_reconcilePendingOps());
-      await _saveHubCursor();
+      unawaited(
+        _reconcilePendingOps(
+          connectionScope: connectionScope,
+          syncGeneration: gen,
+          sourceId: sourceId,
+        ),
+      );
+      await _saveHubCursor(
+        connectionScope: connectionScope,
+        syncGeneration: gen,
+        expectedSourceId: sourceId,
+      );
     } finally {
       if (gen == _syncGeneration) {
         _activeSyncGeneration = 0;
@@ -2592,12 +3081,17 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// bridge 重启后的 entryId rebase:从本地最后一条 entry 正向分页补齐,
   /// 历史不整段重拉。失败回退全量快照。
-  Future<void> _rebaseFromEntry(String anchorEntryId, {int? generation}) async {
+  Future<void> _rebaseFromEntry(
+    String anchorEntryId, {
+    int? generation,
+    _ConnectionScope? connectionScope,
+  }) async {
     final gen = generation ?? _syncGeneration;
     final sourceId = state.selectedSourceId;
     bool stale() =>
         _disposed ||
         gen != _syncGeneration ||
+        !_connectionScopeCurrent(connectionScope) ||
         state.selectedSourceId != sourceId;
     String? since = anchorEntryId;
     String? tipId;
@@ -2620,7 +3114,11 @@ class PiSessionNotifier extends Notifier<PiState> {
       final data = resp?['data'] as Map?;
       if (resp?['success'] != true || data == null) {
         _logP2p('rebase: get_entries 失败,回退全量快照');
-        await _syncSelectedSource(forceFull: true);
+        await _syncSelectedSource(
+          forceFull: true,
+          generation: gen,
+          connectionScope: connectionScope,
+        );
         return;
       }
       tipId = data['tipId'] as String?;
@@ -2636,7 +3134,13 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (!stale()) {
       _logP2p('rebase: entryId 锚点补齐完成');
       state = state.copyWith(sessionPhase: SyncPhase.synced);
-      unawaited(_saveHubCursor());
+      unawaited(
+        _saveHubCursor(
+          connectionScope: connectionScope,
+          syncGeneration: gen,
+          expectedSourceId: sourceId,
+        ),
+      );
     }
   }
 
@@ -2745,24 +3249,46 @@ class PiSessionNotifier extends Notifier<PiState> {
     _syncStreamingFlag();
   }
 
-  Future<void> _sync({bool forceFull = false}) async {
+  Future<void> _sync({
+    bool forceFull = false,
+    _ConnectionScope? connectionScope,
+    int? syncGeneration,
+    String? sourceId,
+  }) async {
+    bool stale() => !_syncWorkCurrent(
+      connectionScope: connectionScope,
+      syncGeneration: syncGeneration,
+      sourceId: sourceId,
+    );
+    if (stale()) return;
     final stateResp = await _request('get_state');
+    if (stale()) return;
     if (stateResp != null && stateResp['success'] == true) {
       final data = stateResp['data'];
       if (data is Map) _applyStateData(Map<String, dynamic>.from(data));
     }
 
-    if (_leafId == null) await _loadLeafId();
+    if (_leafId == null) {
+      await _loadLeafId(
+        connectionScope: connectionScope,
+        syncGeneration: syncGeneration,
+        sourceId: sourceId,
+      );
+      if (stale()) return;
+    }
     Map<String, dynamic>? entriesResp;
     var incremental = false;
     final leafId = forceFull ? null : _leafId;
     if (leafId != null) {
       entriesResp = await _request('get_entries', {'since': leafId});
+      if (stale()) return;
       incremental = entriesResp != null && entriesResp['success'] == true;
     }
     if (!incremental) {
+      if (stale()) return;
       _resetConversation();
       entriesResp = await _request('get_entries');
+      if (stale()) return;
     }
 
     final data = entriesResp?['data'] as Map?;
@@ -2780,7 +3306,11 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 与「更早的历史还在不在」无关,覆盖掉会让「加载更早」凭空消失。
     state = state.copyWith(hasMoreHistory: incremental ? null : more);
     _emit();
-    await _saveLeafId();
+    await _saveLeafId(
+      connectionScope: connectionScope,
+      syncGeneration: syncGeneration,
+      sourceId: sourceId,
+    );
   }
 
   /// 往前补一段历史。

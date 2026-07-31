@@ -6,14 +6,18 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import java.util.concurrent.TimeUnit
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 
 /// 后台期间由原生层持有的**只读观察连接**。
@@ -36,7 +40,7 @@ object BridgeWatcher {
     /// 原生通知 id 从 200 起,避开 FGS 常驻通知(1)与 Dart 任务通知(100+)。
     private const val notificationIdBase = 200
 
-    private val client = OkHttpClient.Builder()
+    private val baseClient = OkHttpClient.Builder()
         // OkHttp 会自动回应服务端 ping,同时主动 ping 保活 NAT 映射
         .pingInterval(15, TimeUnit.SECONDS)
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -53,6 +57,11 @@ object BridgeWatcher {
         val sessionName: String,
     )
 
+    private data class RoutedClient(
+        val client: OkHttpClient,
+        val route: String,
+    )
+
     private var config: Config? = null
     private var socket: WebSocket? = null
     private var appContext: Context? = null
@@ -64,11 +73,17 @@ object BridgeWatcher {
     /// 不该还躺着「任务完成」。
     private val postedNotificationIds = mutableSetOf<Int>()
 
-    /// 已经为当前一轮生成发过完成通知,避免 agent_end 与 agent_settled 重复触发。
-    private var endNotified = false
+    /// 每次 start/stop 都递增。旧 socket 的回调不能影响新连接。
+    private var runGeneration = 0L
+    private var socketGeneration = 0L
+    private var reconnectPending = false
+    private var reconnectRunnable: Runnable? = null
+
+    /// 后台切换时从 Dart 带入的基线,以及断线重连后从 hub_sessions_changed
+    /// / hub_list_sessions 对账出的当前状态。
+    private val taskState = WatcherTaskState()
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var reconnectPending = false
 
     @Synchronized
     fun start(
@@ -79,30 +94,40 @@ object BridgeWatcher {
         sourceId: String,
         vibrate: Boolean,
         clientId: String,
+        wasStreaming: Boolean,
         sessionName: String,
     ) {
         appContext = context.applicationContext
         val next = Config(host, port, token, sourceId, vibrate, clientId, sessionName)
-        if (running && config == next && socket != null) {
-            Log.i(tag, "already watching source=$sourceId")
+        if (running && config == next) {
+            // Flutter may emit inactive/hidden/paused in quick succession. Keep
+            // the existing watcher and only strengthen its streaming baseline.
+            if (wasStreaming) {
+                taskState.updateBaseline(runGeneration, wasStreaming = true)
+            }
+            if (socket == null && !reconnectPending) connectLocked(runGeneration)
             return
         }
+        runGeneration++
+        cancelReconnectLocked()
         config = next
         running = true
         attempt = 0
-        endNotified = false
-        closeSocket()
-        connect()
+        taskState.start(runGeneration, wasStreaming)
+        closeSocketLocked()
+        connectLocked(runGeneration)
     }
 
     @Synchronized
     fun stop() {
-        if (!running && socket == null && postedNotificationIds.isEmpty()) return
+        if (!running && socket == null && !reconnectPending) return
+        runGeneration++
         running = false
         config = null
         attempt = 0
-        reconnectPending = false
-        closeSocket()
+        taskState.stop()
+        cancelReconnectLocked()
+        closeSocketLocked()
         cancelPostedNotifications()
         Log.i(tag, "stopped")
     }
@@ -110,100 +135,227 @@ object BridgeWatcher {
     private fun cancelPostedNotifications() {
         if (postedNotificationIds.isEmpty()) return
         val manager = appContext?.getSystemService(NotificationManager::class.java) ?: return
-        for (id in postedNotificationIds) {
-            manager.cancel(id)
-        }
+        for (id in postedNotificationIds) manager.cancel(id)
         postedNotificationIds.clear()
     }
 
-    private fun closeSocket() {
-        socket?.let {
+    @Synchronized
+    private fun cancelReconnectLocked() {
+        reconnectRunnable?.let(handler::removeCallbacks)
+        reconnectRunnable = null
+        reconnectPending = false
+    }
+
+    @Synchronized
+    private fun closeSocketLocked() {
+        // Invalidate the callback before closing: OkHttp may synchronously call
+        // onClosed/onFailure while close() is running.
+        val old = socket
+        socket = null
+        socketGeneration++
+        old?.let {
             try {
                 it.close(1000, "watcher stopped")
             } catch (_: Exception) {
                 it.cancel()
             }
         }
-        socket = null
     }
 
-    private fun connect() {
+    private fun isCurrent(run: Long, socketId: Long, webSocket: WebSocket): Boolean =
+        synchronized(this) {
+            running && run == runGeneration && socketId == socketGeneration && socket === webSocket
+        }
+
+    @Synchronized
+    private fun connectLocked(run: Long) {
         val current = config ?: return
-        if (!running) return
+        if (!running || run != runGeneration) return
         // IPv6 地址必须带方括号才是合法 URL;Dart 侧存的 host 是不带括号的
         val urlHost = if (current.host.contains(':')) "[${current.host}]" else current.host
         val url = "ws://$urlHost:${current.port}/" +
             "?token=${java.net.URLEncoder.encode(current.token, "UTF-8")}" +
             "&clientId=${java.net.URLEncoder.encode(current.clientId, "UTF-8")}"
-        Log.i(tag, "connecting host=${current.host}:${current.port} source=${current.sourceId}")
-        socket = client.newWebSocket(
+        val context = appContext ?: return
+        val routed = routedClient(context)
+        val socketId = ++socketGeneration
+        Log.i(tag, "connecting host=${current.host}:${current.port} source=${current.sourceId} route=${routed.route}")
+        val webSocket = routed.client.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    attempt = 0
-                    Log.i(tag, "connected")
+                    if (!isCurrent(run, socketId, webSocket)) return
+                    Log.i(tag, "socket opened route=${routed.route}")
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    handleFrame(webSocket, text)
+                    if (isCurrent(run, socketId, webSocket)) {
+                        handleFrame(run, socketId, webSocket, text)
+                    }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (!isCurrent(run, socketId, webSocket)) return
                     Log.w(tag, "socket failure: ${t.message}")
-                    scheduleReconnect()
+                    scheduleReconnect(run, socketId, webSocket)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (!isCurrent(run, socketId, webSocket)) return
                     Log.i(tag, "socket closed: $code $reason")
-                    scheduleReconnect()
+                    scheduleReconnect(run, socketId, webSocket)
                 }
             },
         )
+        socket = webSocket
     }
 
-    private fun handleFrame(webSocket: WebSocket, text: String) {
+    private fun routedClient(context: Context): RoutedClient {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        val wifi = connectivity?.allNetworks?.firstOrNull { network ->
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            val links = connectivity.getLinkProperties(network)?.linkAddresses
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                !links.isNullOrEmpty()
+        } ?: return RoutedClient(baseClient, "default")
+
+        return try {
+            // Do not use bindProcessToNetwork here: Dart may be opening a P2P
+            // signaling socket at the same time. Route only this OkHttp client.
+            val client = baseClient.newBuilder()
+                .socketFactory(wifi.socketFactory)
+                .dns(object : Dns {
+                    override fun lookup(hostname: String): List<java.net.InetAddress> =
+                        wifi.getAllByName(hostname).toList()
+                })
+                .build()
+            RoutedClient(client, "wifi")
+        } catch (error: Exception) {
+            Log.w(tag, "Wi-Fi route unavailable, using default network: ${error.message}")
+            RoutedClient(baseClient, "default")
+        }
+    }
+
+    private fun handleFrame(
+        run: Long,
+        socketId: Long,
+        webSocket: WebSocket,
+        text: String,
+    ) {
         val frame = try {
             JSONObject(text)
         } catch (_: Exception) {
             return
         }
         when (frame.optString("type")) {
-            // 握手完成后立刻订阅目标 source,否则 bridge 不会向本连接广播事件
+            // 握手完成后立刻订阅目标 source,否则 bridge 不会向本连接广播事件。
+            // 同时拉一份轻量会话表,用来补判 watcher 断线期间错过的 agent_end。
             "bridge_hello" -> {
-                val sourceId = config?.sourceId ?: return
-                val select = JSONObject()
-                    .put("type", "hub_select_source")
-                    .put("id", "watcher-select")
-                    .put("sourceId", sourceId)
-                webSocket.send(select.toString())
+                val current = config ?: return
+                synchronized(this) { attempt = 0 }
+                appContext?.let { KeepAliveService.updateConnection(it, true) }
+                val suffix = "$run-$socketId"
+                webSocket.send(
+                    JSONObject()
+                        .put("type", "hub_select_source")
+                        .put("id", "watcher-select-$suffix")
+                        .put("sourceId", current.sourceId)
+                        .toString(),
+                )
+                webSocket.send(
+                    JSONObject()
+                        .put("type", "hub_list_sessions")
+                        .put("id", "watcher-sessions-$suffix")
+                        .toString(),
+                )
             }
 
-            "agent_start" -> endNotified = false
-
-            // agent_end 与 agent_settled 都代表本轮结束,取先到的那个
-            "agent_end", "agent_settled" -> {
-                if (endNotified) return
-                endNotified = true
-                notifyTaskComplete()
+            "response" -> {
+                val id = frame.optString("id")
+                if (id.startsWith("watcher-sessions-")) {
+                    frame.optJSONObject("data")?.optJSONArray("sessions")?.let {
+                        reconcileSessions(run, it)
+                    }
+                }
             }
+
+            "hub_sessions_changed" -> {
+                frame.optJSONArray("sessions")?.let { reconcileSessions(run, it) }
+            }
+
+            "hub_source_snapshot" -> {
+                val current = config
+                if (current != null && frame.optString("sourceId") == current.sourceId &&
+                    frame.has("isStreaming")
+                ) {
+                    reconcileStreaming(run, frame.optBoolean("isStreaming"), true)
+                }
+            }
+
+            "agent_start" -> reconcileStreaming(run, true, false)
+
+            // agent_end 与 agent_settled 都代表本轮结束,取先到的那个。
+            "agent_end", "agent_settled" -> reconcileStreaming(run, false, true)
         }
     }
 
-    private fun scheduleReconnect() {
+    private fun reconcileSessions(run: Long, sessions: JSONArray) {
+        val current = config ?: return
+        var connected = 0
+        var working = 0
+        var selectedStreaming: Boolean? = null
+        for (index in 0 until sessions.length()) {
+            val session = sessions.optJSONObject(index) ?: continue
+            if (session.optBoolean("connected")) connected++
+            if (session.optBoolean("connected") && session.optBoolean("streaming")) working++
+            if (session.optString("sourceId") == current.sourceId) {
+                selectedStreaming = session.optBoolean("streaming")
+            }
+        }
+        appContext?.let {
+            KeepAliveService.updateStatus(it, true, connected, working)
+        }
+        selectedStreaming?.let { reconcileStreaming(run, it, true) }
+    }
+
+    private fun reconcileStreaming(
+        run: Long,
+        streaming: Boolean,
+        notifyIfFinished: Boolean,
+    ) {
+        if (taskState.note(run, streaming, notifyIfFinished)) notifyTaskComplete()
+    }
+
+    @Synchronized
+    private fun scheduleReconnect(run: Long, socketId: Long, webSocket: WebSocket) {
+        if (!running || run != runGeneration || socketId != socketGeneration || socket !== webSocket) {
+            return
+        }
         socket = null
-        if (!running || reconnectPending) return
+        socketGeneration++
+        appContext?.let { KeepAliveService.updateConnection(it, false) }
+        if (reconnectPending) return
         reconnectPending = true
         attempt += 1
         val delayMs = minOf(1000L * (1 shl minOf(attempt - 1, 4)), 15_000L)
-        handler.postDelayed({
-            reconnectPending = false
-            if (running) connect()
-        }, delayMs)
+        val runnable = Runnable {
+            synchronized(this) {
+                if (!running || run != runGeneration || !reconnectPending) return@synchronized
+                reconnectPending = false
+                reconnectRunnable = null
+                connectLocked(runGeneration)
+            }
+        }
+        reconnectRunnable = runnable
+        handler.postDelayed(runnable, delayMs)
     }
 
+    @Synchronized
     private fun notifyTaskComplete() {
+        if (!running) return
+        val current = config ?: return
         val context = appContext ?: return
-        val vibrate = config?.vibrate ?: false
+        val vibrate = current.vibrate
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         createTaskChannels(manager)
 
@@ -224,7 +376,7 @@ object BridgeWatcher {
             Notification.Builder(context)
         }
         val id = ++notificationId
-        val name = config?.sessionName.orEmpty()
+        val name = current.sessionName
         // 与 Dart 侧 _notifyTaskComplete 同一格式:「<会话名> 已完成 / 点击查看结果」
         val title = if (name.isNotEmpty()) "$name 已完成" else "PiPilot 任务完成"
         val notification = builder

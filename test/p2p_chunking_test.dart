@@ -119,6 +119,8 @@ void main() {
       clientId: 'stable-client',
     );
 
+    // connectViaChannel 先等待旧订阅/通道完成关闭,鉴权帧在下一轮微任务发送。
+    await Future<void>.delayed(Duration.zero);
     expect(channel.sent, hasLength(1));
     final auth = jsonDecode(channel.sent.single) as Map<String, dynamic>;
     expect(auth['type'], 'auth');

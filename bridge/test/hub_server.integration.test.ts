@@ -240,6 +240,51 @@ test("Source Hub isolates clients and fences desktop mutations", async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const acquiredAfterDisconnect = await phoneB.request("hub_acquire_owner", { ttlMs: 10_000 });
     assert.equal(acquiredAfterDisconnect.success, true);
+
+    // 相同稳定 clientId 的新 socket 会替换旧 socket。旧 close 晚到时不能把
+    // 新连接继承的 owner lease 释放掉。
+    const stableClientId = "stable-replacement-client";
+    const replaced = await open(
+      `ws://127.0.0.1:${port}?token=mobile-test-token&clientId=${stableClientId}`,
+    );
+    peers.push(replaced);
+    await replaced.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await replaced.request("hub_select_source", { sourceId: "desktop:test" })).success,
+      true,
+    );
+    const stableLease = await replaced.request("hub_acquire_owner", {
+      ttlMs: 10_000,
+      force: true,
+    });
+    assert.equal(stableLease.success, true);
+
+    const replacedClosed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("replaced socket did not close")),
+        3_000,
+      );
+      replaced.ws.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const replacement = await open(
+      `ws://127.0.0.1:${port}?token=mobile-test-token&clientId=${stableClientId}`,
+    );
+    peers.push(replacement);
+    await replacement.waitFor((frame) => frame.type === "bridge_hello");
+    await replacedClosed;
+    assert.equal(
+      (await replacement.request("hub_select_source", { sourceId: "desktop:test" })).success,
+      true,
+    );
+    const renewed = await replacement.request("hub_renew_owner", {
+      leaseId: stableLease.data.leaseId,
+      fence: stableLease.data.fence,
+      ttlMs: 10_000,
+    });
+    assert.equal(renewed.success, true);
   } finally {
     for (const peer of peers) peer.ws.close();
     child.kill("SIGTERM");
