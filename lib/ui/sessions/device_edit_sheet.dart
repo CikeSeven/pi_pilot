@@ -119,12 +119,22 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
       return;
     }
     final wantsP2p = _transport != DeviceTransport.lan;
+    final rendezvous = _rendezvous.text.trim();
+    final p2pDeviceId = _p2pDeviceId.text.trim();
+    final p2pSecret = _secret.text.trim();
     final p2pComplete =
-        _rendezvous.text.trim().isNotEmpty &&
-        _p2pDeviceId.text.trim().isNotEmpty &&
-        _secret.text.trim().isNotEmpty;
+        rendezvous.isNotEmpty && p2pDeviceId.isNotEmpty && p2pSecret.isNotEmpty;
     if (_transport == DeviceTransport.p2p && !p2pComplete) {
       setState(() => _error = '仅 P2P 模式下,信令服 / 设备名 / 配对密钥都要填');
+      return;
+    }
+    // 半成品三要素必须拦下:静默丢弃的话用户以为存上了,重开一看全没了。
+    // 信令服有默认值预填,所以「想配 P2P」的信号看设备名/密钥两栏;
+    // 两栏都空 = 不要 P2P(自动 = 仅直连),正常放行。
+    if (wantsP2p &&
+        (p2pDeviceId.isNotEmpty || p2pSecret.isNotEmpty) &&
+        !p2pComplete) {
+      setState(() => _error = 'P2P 三要素要填全:信令服 / 设备名 / 配对密钥缺一不可,否则不会保存');
       return;
     }
 
@@ -137,10 +147,10 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
       port: parsed.port ?? port,
       token: token,
       transport: _transport,
-      // 填全了才存;残缺的三要素等于没配(避免「以为有回落其实没有」)。
-      p2pRendezvous: wantsP2p && p2pComplete ? _rendezvous.text.trim() : null,
-      p2pDeviceId: wantsP2p && p2pComplete ? _p2pDeviceId.text.trim() : null,
-      p2pSecret: wantsP2p && p2pComplete ? _secret.text.trim() : null,
+      // 填全了才存;设备名/密钥两栏都空视为不要 P2P(半成品已被上面拦下)。
+      p2pRendezvous: wantsP2p && p2pComplete ? rendezvous : null,
+      p2pDeviceId: wantsP2p && p2pComplete ? p2pDeviceId : null,
+      p2pSecret: wantsP2p && p2pComplete ? p2pSecret : null,
       lastHubId: widget.existing?.lastHubId ?? widget.discovered?.hubId,
     );
     Navigator.of(context).pop(DeviceEditSheetResult.saved(device));
