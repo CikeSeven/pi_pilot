@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -81,6 +83,10 @@ class _MessageNavRailState extends State<MessageNavRail>
   /// 正在拖拽/长按预览的刻度下标(null = 未交互)。
   int? _activeIndex;
 
+  /// 拖拽中手指的归一化位置(0~1):波形跟着手指走,
+  /// 松手后回到滚动进度。比「离散步进」顺滑得多。
+  double? _dragT;
+
   /// 预览卡中心 y(相对轨道顶)。
   double _previewY = 0;
 
@@ -108,27 +114,18 @@ class _MessageNavRailState extends State<MessageNavRail>
     super.dispose();
   }
 
-  /// 当前视口位置最近的刻度下标(联动高亮用)。
-  int _currentIndexFor(double progress) {
-    final n = widget.anchors.length;
-    if (n == 0) return -1;
-    return (progress.clamp(0.0, 1.0) * (n - 1)).round();
-  }
-
   /// 手势 y → 刻度下标:轨道内均匀分布,与绘制同一套映射。
   int _indexAt(double y, double height) {
     final n = widget.anchors.length;
     if (n == 0) return 0;
-    const pad = _RailPainter.vPad;
-    final usable = (height - pad * 2).clamp(1.0, double.infinity);
-    final t = ((y - pad) / usable).clamp(0.0, 1.0);
-    return (t * (n - 1)).round();
+    return (_tAt(y, height) * (n - 1)).round();
   }
 
   void _startPreview(double y, double height) {
     widget.onInteractionChanged(true);
     setState(() {
       _activeIndex = _indexAt(y, height);
+      _dragT = _tAt(y, height);
       _previewY = y.clamp(0.0, height);
     });
   }
@@ -136,6 +133,7 @@ class _MessageNavRailState extends State<MessageNavRail>
   void _updatePreview(double y, double height) {
     setState(() {
       _activeIndex = _indexAt(y, height);
+      _dragT = _tAt(y, height);
       _previewY = y.clamp(0.0, height);
     });
   }
@@ -143,10 +141,20 @@ class _MessageNavRailState extends State<MessageNavRail>
   void _endPreview() {
     final index = _activeIndex;
     widget.onInteractionChanged(false);
-    setState(() => _activeIndex = null);
+    setState(() {
+      _activeIndex = null;
+      _dragT = null;
+    });
     if (index != null && index < widget.anchors.length) {
       widget.onJump(widget.anchors[index].rowIndex);
     }
+  }
+
+  /// 手势 y → 归一化位置(0~1)。
+  double _tAt(double y, double height) {
+    const pad = _RailPainter.vPad;
+    final usable = (height - pad * 2).clamp(1.0, double.infinity);
+    return ((y - pad) / usable).clamp(0.0, 1.0);
   }
 
   @override
@@ -197,23 +205,22 @@ class _MessageNavRailState extends State<MessageNavRail>
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [
-                      // 游标跟滚动进度走:ValueListenableBuilder 只重画
-                      // painter,滚动时不触发任何外层 rebuild。
+                      // 波形跟进度/手指走:ValueListenableBuilder 只重画
+                      // painter,滚动/拖拽时不触发任何外层 rebuild。
                       ValueListenableBuilder<double>(
                         valueListenable: widget.progress,
                         builder: (context, progress, _) => CustomPaint(
                           size: Size(28, railHeight),
                           painter: _RailPainter(
                             count: widget.anchors.length,
-                            progress: progress,
-                            currentIndex: _currentIndexFor(progress),
-                            activeIndex: _activeIndex,
+                            // 拖拽时波形跟手指,否则跟滚动进度。
+                            focus: _dragT ?? progress,
                             tickColor: colors.onSurfaceVariant.withValues(
-                              alpha: 0.38,
+                              alpha: 0.32,
                             ),
-                            currentColor: colors.primary,
+                            focusColor: colors.primary,
                             trackColor: colors.onSurfaceVariant.withValues(
-                              alpha: 0.18,
+                              alpha: 0.16,
                             ),
                           ),
                         ),
@@ -238,20 +245,21 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 }
 
-/// 刻度绘制:轨道内均匀分布的小刻度 + 连续游标。
+/// 声波波形绘制:一排从基线向右伸出的横条,
+/// 长度/颜色随「焦点位置」连续起伏。
+///
+/// 每根条的影响力 = 高斯衰减(离焦点越近越大):
+/// - 长度 6 → 21 连续变化,颜色从灰调渐变到强调色;
+/// - 焦点(滚动进度/手指位置)本身是连续值,所以条高变化
+///   天然丝滑 —— 不需要任何补间动画,没有「跳到最近节点」的阶跃。
 ///
 /// 过密(相邻 < 3px)时抽样绘制;抽样只影响视觉,手势映射仍按全量序号。
-/// 游标画在 progress 的精确位置(连续值),滚动时实时滑动 ——
-/// 它不属于任何刻度,是「视口现在在哪」的 thumb;最近的锚点刻度
-/// 联动染上强调色。基线极淡,只负责让稀疏区读起来是「轨道」。
 class _RailPainter extends CustomPainter {
   _RailPainter({
     required this.count,
-    required this.progress,
-    required this.currentIndex,
-    required this.activeIndex,
+    required this.focus,
     required this.tickColor,
-    required this.currentColor,
+    required this.focusColor,
     required this.trackColor,
   });
 
@@ -259,20 +267,16 @@ class _RailPainter extends CustomPainter {
 
   final int count;
 
-  /// 滚动进度 0~1(连续)。游标位置。
-  final double progress;
-  final int currentIndex;
-  final int? activeIndex;
+  /// 焦点位置 0~1(连续):滚动进度,拖拽时是手指位置。
+  final double focus;
   final Color tickColor;
-  final Color currentColor;
+  final Color focusColor;
   final Color trackColor;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (count <= 0) return;
-    final paint = Paint()
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round;
+    final paint = Paint()..strokeCap = StrokeCap.round;
     final usable = size.height - vPad * 2;
 
     // 轨道基线:极淡,克制。
@@ -284,53 +288,31 @@ class _RailPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
-    // 均匀密布:3px 一个刻度,超出容量就抽样(视觉),交互不受影响。
+    // 均匀密布:3px 一根,超出容量就抽样(视觉),交互不受影响。
     final maxTicks = (usable / 3).floor().clamp(1, count);
     final step = (count / maxTicks).ceil();
+    // 高斯衰减的 σ:影响范围约 ±2~3 根(刻度稀) / ±7% 轨道高(刻度密)。
+    final sigma = math.max(0.05, step * 1.3 / count);
 
     for (var i = 0; i < count; i += step) {
-      final y = count == 1
-          ? vPad + usable / 2
-          : vPad + usable * i / (count - 1);
-      final isCurrent =
-          i == currentIndex ||
-          (currentIndex >= 0 && (currentIndex - i).abs() < step);
-      final isActive = i == activeIndex;
-      // 普通刻度短而克制;游标附近的联动刻度染强调色但不抢长度 ——
-      // 「长」只属于游标本标,视觉层级才不会乱。
-      final width = isActive ? 10.0 : 6.0;
-      paint.color = isCurrent
-          ? currentColor
-          : isActive
-          ? currentColor.withValues(alpha: 0.65)
-          : tickColor;
-      canvas.drawLine(Offset(4, y), Offset(4 + width, y), paint);
+      final t = count == 1 ? 0.5 : i / (count - 1);
+      final y = vPad + usable * t;
+      final dist = t - focus;
+      final influence = math.exp(-(dist * dist) / (2 * sigma * sigma));
+      final len = 6.0 + 15.0 * influence;
+      paint
+        ..strokeWidth = 2.0 + 0.6 * influence
+        ..color = Color.lerp(tickColor, focusColor, influence)!;
+      canvas.drawLine(Offset(4, y), Offset(4 + len, y), paint);
     }
-
-    // 连续游标:20px 陶土橙胶囊,位置 = 滚动进度,滚动时实时滑动。
-    // 带一点点投影,从刻度层里「浮」出来。
-    final cursorY = vPad + usable * progress.clamp(0.0, 1.0);
-    final cursorRect = RRect.fromRectAndRadius(
-      Rect.fromCenter(center: Offset(6.5, cursorY), width: 5, height: 20),
-      const Radius.circular(2.5),
-    );
-    canvas.drawRRect(
-      cursorRect.shift(const Offset(0.6, 1)),
-      Paint()
-        ..color = currentColor.withValues(alpha: 0.25)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
-    );
-    canvas.drawRRect(cursorRect, Paint()..color = currentColor);
   }
 
   @override
   bool shouldRepaint(_RailPainter old) =>
       old.count != count ||
-      old.progress != progress ||
-      old.currentIndex != currentIndex ||
-      old.activeIndex != activeIndex ||
+      old.focus != focus ||
       old.tickColor != tickColor ||
-      old.currentColor != currentColor ||
+      old.focusColor != focusColor ||
       old.trackColor != trackColor;
 }
 
