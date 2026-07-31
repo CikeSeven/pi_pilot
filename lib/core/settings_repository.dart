@@ -50,7 +50,7 @@ class SettingsRepository {
       'ui.notificationVibrationEnabled';
   static const _kAccent = 'ui.accentColor';
   // 远程打洞(WebRTC P2P):信令服地址/设备名/配对密钥。
-  // 配对密钥只存在本机与信令服配置里,不进仓库、不上行明文。
+  // 配对密钥保存在 App 本机,配对时通过强制 WSS hello 发送;不进仓库。
   static const _kP2pEnabled = 'p2p.enabled';
   static const _kP2pRendezvous = 'p2p.rendezvous';
   static const _kP2pDeviceId = 'p2p.deviceId';

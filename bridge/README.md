@@ -86,7 +86,7 @@ bridge 配置示例：
   "p2p": {
     "rendezvousUrl": "signal.example.com/pipilot",
     "deviceId": "my-desktop",
-    "secret": "替换为至少16位的随机配对Key"
+    "secret": "Replace-With-Random-Key-2026!"
   }
 }
 ```

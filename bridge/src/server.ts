@@ -3163,8 +3163,9 @@ if (config.p2p.enabled && config.p2p.rendezvousUrl && config.p2p.secret) {
     acceptMobile: (socket, clientId, caps) => acceptMobileClient(socket, clientId, caps),
     log: (line) => console.log(`[p2p] ${line}`),
   });
-  p2pHost.start();
-  console.log(`P2P 打洞已启用:信令服 ${config.p2p.rendezvousUrl},设备名 ${config.p2p.deviceId}`);
+  if (p2pHost.start()) {
+    console.log(`P2P 打洞已启用:信令服 ${config.p2p.rendezvousUrl},设备名 ${config.p2p.deviceId}`);
+  }
 }
 
 async function shutdown(): Promise<void> {

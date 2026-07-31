@@ -147,7 +147,7 @@ test("TURN 配置严格校验并签发 coturn REST 短期凭据", () => {
   );
 });
 
-test("host 注册、guest 加入,信令双向转发", async () => {
+test("host 建房、guest 加入,信令双向转发", async () => {
   const running = await startRendezvous();
   try {
     const host = await Peer.connect(running.url);

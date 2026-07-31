@@ -28,6 +28,7 @@ import {
   V2_DIRECT_BYTES,
   V2_MAX_NACK_PAGES,
 } from "./p2p_transfer_v2.js";
+import { isValidP2pDeviceId, isValidP2pPairingKey } from "./p2p_key_policy.js";
 import {
   isAllowedP2pSignalingUrl,
   normalizeP2pSignalingUrl,
@@ -675,16 +676,25 @@ export class P2pHost {
     this.rendezvousUrl = normalizeP2pSignalingUrl(deps.rendezvousUrl);
   }
 
-  start(): void {
+  start(): boolean {
     if (!isAllowedP2pSignalingUrl(this.rendezvousUrl)) {
       this.log("拒绝不安全的 P2P 信令地址:公网必须使用 wss://");
-      return;
+      return false;
+    }
+    if (!isValidP2pDeviceId(this.deps.deviceId)) {
+      this.log("拒绝无效的 P2P 设备名:需为 3-64 位英文字母、数字、点、下划线或连字符");
+      return false;
+    }
+    if (!isValidP2pPairingKey(this.deps.secret)) {
+      this.log("拒绝无效的 P2P 配对 Key:需为 16-128 位可打印 ASCII 且至少包含三类字符");
+      return false;
     }
     // 主动到期回收:retained/assembler 的 sweep 原本只在收发帧时触发,
     // 空闲期(没有新 transfer)已过期的状态会一直占着几十 MB 预算。
     this.sweepTimer = setInterval(() => this.sweepOwnerStores(), OWNER_SWEEP_MS);
     this.sweepTimer.unref();
     this.connect();
+    return true;
   }
 
   /// 取得该 owner 的 chunk-v2 状态桶(不存在则创建)。
@@ -825,7 +835,7 @@ export class P2pHost {
           server.urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:")),
         );
         this.log(
-          `已在信令服注册为 ${this.deps.deviceId},ICE=${this.iceServers.length},TURN=${hasTurn ? "on" : "off"}`,
+          `已在信令服建立房间 ${this.deps.deviceId},ICE=${this.iceServers.length},TURN=${hasTurn ? "on" : "off"}`,
         );
         this.armCredentialRefresh(ws);
         return;

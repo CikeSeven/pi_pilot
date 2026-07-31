@@ -5,10 +5,49 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 /// 配对密钥通过强制 TLS/WSS 传输,由信令服校验策略并在房间内比较摘要。
 /// 信令服不落盘、不记录密钥;公网明文 ws 仍被客户端拒绝。
+const p2pDeviceIdMinLength = 3;
+const p2pDeviceIdMaxLength = 64;
+const p2pPairingKeyMinLength = 16;
+const p2pPairingKeyMaxLength = 128;
+
 final _explicitUrlScheme = RegExp(
   r'^[a-z][a-z0-9+.-]*://',
   caseSensitive: false,
 );
+final _p2pDeviceIdPattern = RegExp(r'^[A-Za-z0-9._-]{3,64}$');
+
+/// 设备名是信令服中的临时房间标识,仅允许跨端一致的安全字符集。
+bool isValidP2pDeviceId(String value) => _p2pDeviceIdPattern.hasMatch(value);
+
+/// 配对 Key 必须是 16-128 位可打印 ASCII,且至少包含四类字符中的三类。
+bool isValidP2pPairingKey(String value) {
+  if (value.length < p2pPairingKeyMinLength ||
+      value.length > p2pPairingKeyMaxLength) {
+    return false;
+  }
+  var classes = 0;
+  var hasLowercase = false;
+  var hasUppercase = false;
+  var hasDigit = false;
+  var hasSymbol = false;
+  for (final codeUnit in value.codeUnits) {
+    if (codeUnit < 0x21 || codeUnit > 0x7e) return false;
+    if (codeUnit >= 0x61 && codeUnit <= 0x7a) {
+      hasLowercase = true;
+    } else if (codeUnit >= 0x41 && codeUnit <= 0x5a) {
+      hasUppercase = true;
+    } else if (codeUnit >= 0x30 && codeUnit <= 0x39) {
+      hasDigit = true;
+    } else {
+      hasSymbol = true;
+    }
+  }
+  if (hasLowercase) classes++;
+  if (hasUppercase) classes++;
+  if (hasDigit) classes++;
+  if (hasSymbol) classes++;
+  return classes >= 3;
+}
 
 /// 裸域名默认走 WSS;显式 scheme 保留给后续安全校验。
 String normalizeP2pSignalingUrl(String value) {
@@ -134,7 +173,11 @@ class GuestSignaling {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     final normalizedUrl = normalizeP2pSignalingUrl(url);
-    if (!isAllowedP2pSignalingUrl(normalizedUrl)) return null;
+    if (!isAllowedP2pSignalingUrl(normalizedUrl) ||
+        !isValidP2pDeviceId(deviceId) ||
+        !isValidP2pPairingKey(secret)) {
+      return null;
+    }
     final WebSocketChannel channel;
     try {
       channel = WebSocketChannel.connect(Uri.parse(normalizedUrl));

@@ -234,30 +234,19 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
       }
       return false;
     }
-    if (_enabled && !RegExp(r'^[A-Za-z0-9._-]{3,64}$').hasMatch(deviceId)) {
+    if (_enabled && !isValidP2pDeviceId(deviceId)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('设备名需为 3–64 位字母、数字、点、下划线或连字符')),
+          const SnackBar(content: Text('设备名需为 3-64 位,仅限英文字母、数字、点、下划线和连字符')),
         );
       }
       return false;
     }
-    final keyClasses = <bool>[
-      RegExp(r'[a-z]').hasMatch(secret),
-      RegExp(r'[A-Z]').hasMatch(secret),
-      RegExp(r'[0-9]').hasMatch(secret),
-      RegExp(r'[^A-Za-z0-9]').hasMatch(secret),
-    ].where((matched) => matched).length;
-    final validKey =
-        secret.length >= 16 &&
-        secret.length <= 128 &&
-        RegExp(r'^[\x21-\x7e]+$').hasMatch(secret) &&
-        keyClasses >= 3;
-    if (_enabled && !validKey) {
+    if (_enabled && !isValidP2pPairingKey(secret)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('配对 Key 需为 16–128 位，且至少包含大小写、数字、符号中的三类'),
+            content: Text('配对 Key 需为 16-128 位可打印 ASCII,且至少包含大小写、数字、符号中的三类'),
           ),
         );
       }
@@ -333,8 +322,8 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               controller: _secret,
               obscureText: _obscure,
               decoration: InputDecoration(
-                labelText: '配对 Key',
-                hintText: '16–128 位，至少包含三类字符',
+                labelText: '配对密钥',
+                hintText: '与 bridge 填写相同的 Key,无需在信令服预注册',
                 prefixIcon: const Icon(Icons.vpn_key_outlined),
                 suffixIcon: IconButton(
                   tooltip: _obscure ? '显示' : '隐藏',
