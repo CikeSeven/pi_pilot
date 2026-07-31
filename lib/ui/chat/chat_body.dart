@@ -452,8 +452,14 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
               else if (state.items.isEmpty)
                 const _EmptyHint()
               else
-                ListView.builder(
+                // 滚动条:长会话粗定位靠它。interactive 让滑块可拖;
+                // 不设 thumbVisibility —— 滚动时浮现、静止后淡出,
+                // 不常驻占位(会话树那种几千行的列表才需要常显滑块)。
+                Scrollbar(
                   controller: _scroll,
+                  interactive: true,
+                  child: ListView.builder(
+                    controller: _scroll,
                   // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
                   // 顶部留出灵动岛高度,静止时第一项在岛下面。
                   // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。
@@ -528,6 +534,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                       children: [MessageTimestamp(time: rowTime), view],
                     );
                   },
+                  ),
                 ),
               if (state.hasSession)
                 Positioned(

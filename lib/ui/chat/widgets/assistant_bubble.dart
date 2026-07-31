@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
+import '../../../state/settings_provider.dart';
 import '../../theme/motion.dart';
 import 'markdown_body.dart';
 import 'message_actions_sheet.dart';
@@ -30,6 +31,7 @@ class AssistantBubble extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final settings = ref.watch(settingsProvider);
     final streaming = !item.complete;
 
     // 空回复不渲染:AI 直接调用工具时会产生一个 text 和 thinking 都空的
@@ -39,9 +41,7 @@ class AssistantBubble extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final bodyStyle = theme.textTheme.bodyLarge?.copyWith(
-      color: colors.onSurface,
-    );
+    final bodyStyle = chatBodyStyle(context, settings, color: colors.onSurface);
 
     final Widget body;
     if (item.text.isEmpty && streaming) {
@@ -49,24 +49,32 @@ class AssistantBubble extends ConsumerWidget {
     } else if (streaming) {
       // 流式期:纯文本(零解析开销) + 末尾闪烁竖线光标。
       //
-      // 光标作为独立 WidgetSpan 而不是拼接 '▍' 字符:字符拼接会跟着文本
-      // 末尾位置一起跳、也不会闪。StrutStyle 锁行高,光标不撑高当前行。
+      // 光标对齐用 middle(行框内垂直居中)而不是 baseline:
+      // baseline 对齐是「光标底部贴正文 baseline」,18px 高的光标从
+      // baseline 向上冒,比大写字母还高出一截,多行时像顶进上一行。
+      // middle 对齐让光标在行框内居中,前后再加一个 hair space,
+      // 既不贴最后一个字,也不撑高当前行(strut 已锁行高)。
+      // 光标高度跟正文行高走(~72%),字号/行距设置变了它也变。
+      final linePx =
+          (bodyStyle.fontSize ?? 16) * (bodyStyle.height ?? 1.45);
       body = SelectableText.rich(
         TextSpan(
           text: item.text,
           style: bodyStyle,
           children: [
+            const TextSpan(text: '\u200A'),
             WidgetSpan(
-              alignment: PlaceholderAlignment.baseline,
-              baseline: TextBaseline.alphabetic,
-              child: StreamingCursor(color: colors.primary),
+              alignment: PlaceholderAlignment.middle,
+              child: StreamingCursor(
+                color: colors.primary,
+                height: linePx * 0.72,
+              ),
             ),
           ],
         ),
         // 行高锁定在正文字阶上 —— 光标不撑高当前行。
-        // 字号/行高都从 bodyLarge 取,不手写数字。
         strutStyle: StrutStyle.fromTextStyle(
-          bodyStyle ?? const TextStyle(),
+          bodyStyle,
           forceStrutHeight: true,
         ),
       );

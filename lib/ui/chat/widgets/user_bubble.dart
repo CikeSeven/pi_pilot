@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
+import '../../../state/settings_provider.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
 import 'message_actions_sheet.dart';
@@ -64,9 +65,10 @@ class UserBubble extends ConsumerWidget {
                   ),
                   child: SelectableText(
                     item.text,
-                    style: theme.textTheme.bodyLarge?.copyWith(
+                    style: chatBodyStyle(
+                      context,
+                      ref.watch(settingsProvider),
                       color: colors.onPrimary,
-                      height: 1.5,
                     ),
                   ),
                 ),

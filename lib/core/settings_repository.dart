@@ -25,6 +25,8 @@ typedef SettingsData = ({
   String p2pRendezvous,
   String p2pDeviceId,
   String p2pSecret,
+  double chatFontScale,
+  double chatLineHeight,
 });
 
 /// SharedPreferences 统一持久化层。所有配置键集中在这里。
@@ -59,6 +61,9 @@ class SettingsRepository {
   /// 上次成功的 ICE 模式缓存前缀(p2p.icemode.{deviceId}):
   /// relay 网络的每次重连可省 7s direct 空等。
   static const _kP2pIceModePrefix = 'p2p.icemode.';
+  /// 聊天排版:字号缩放(1.0 = 系统默认)与正文行高倍数。
+  static const _kChatFontScale = 'ui.chatFontScale';
+  static const _kChatLineHeight = 'ui.chatLineHeight';
 
   /// 读取缓存的成功模式('direct'/'relay');7 天过期,连败 2 次作废。
   Future<String?> loadP2pIceMode(String deviceId) async {
@@ -150,6 +155,8 @@ class SettingsRepository {
       p2pRendezvous: prefs.getString(_kP2pRendezvous) ?? '',
       p2pDeviceId: prefs.getString(_kP2pDeviceId) ?? '',
       p2pSecret: prefs.getString(_kP2pSecret) ?? '',
+      chatFontScale: prefs.getDouble(_kChatFontScale) ?? 1.0,
+      chatLineHeight: prefs.getDouble(_kChatLineHeight) ?? 1.45,
     );
   }
 
@@ -220,6 +227,15 @@ class SettingsRepository {
   Future<void> saveAccent(String name) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kAccent, name);
+  }
+
+  Future<void> saveChatTypography({
+    required double fontScale,
+    required double lineHeight,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kChatFontScale, fontScale);
+    await prefs.setDouble(_kChatLineHeight, lineHeight);
   }
 
   Future<void> saveP2pConfig({

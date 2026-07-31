@@ -1356,6 +1356,21 @@ function clipEntriesForMobile(
   }
   const clipped = start === 0 ? cappedEntries : cappedEntries.slice(start);
   const first = clipped[0];
+  // 压缩摘要卡是上下文边界的锚点:它位于 branch 头部,替代了被压缩掉的
+  // 全部历史。从尾向前收会把它连同老历史一起砍掉,手机端于是「收到了
+  // 压缩完成的提示,却怎么也看不到摘要卡」(得翻「加载更早」到顶才有)。
+  // 把被砍部分里最近的一条 compaction/branch_summary 降级后保到结果最前 ——
+  // 它已经过 hardCap(摘要留 2KB 开头),体积可控;分页游标 oldestId 仍指向
+  // 窗口首条,这条锚点不参与分页,客户端按 id/timestamp 去重也不会重复渲染。
+  if (start > 0) {
+    for (let i = start - 1; i >= 0; i--) {
+      const anchor = cappedEntries[i];
+      if (anchor?.type === "compaction" || anchor?.type === "branch_summary") {
+        clipped.unshift(anchor);
+        break;
+      }
+    }
+  }
   return {
     entries: clipped,
     omitted: start,

@@ -486,6 +486,7 @@ class PiState {
     this.transientNotice,
     this.backgroundFinishTick = 0,
     this.backgroundFinishName,
+    this.activityStatus,
   });
 
   factory PiState.initial() => const PiState(
@@ -546,6 +547,10 @@ class PiState {
   /// 一次性提示(横幅),由 `_LivenessBanner` 渲染,用户点掉后调
   /// `dismissNotice()` 清空。
   final String? transientNotice;
+
+  /// 桌面 working-activity 插件推过来的实时状态行(TUI Working 行同源)。
+  /// 非空时灵动岛直接显示它,不再用本地从 items 推导的二手状态。
+  final String? activityStatus;
 
   /// 后台会话刚刚跑完:tick 自增用于触发监听,name 是会话显示名。
   /// (通知要不要真的弹由 NotificationController 按前后台状态决定。)
@@ -644,6 +649,7 @@ class PiState {
     String? transientNotice,
     int? backgroundFinishTick,
     String? backgroundFinishName,
+    String? activityStatus,
     int? rttMs,
     UiRequest? pendingUiRequest,
     AskRequest? pendingAsk,
@@ -657,6 +663,7 @@ class PiState {
     bool clearUiRequest = false,
     bool clearAsk = false,
     bool clearNotice = false,
+    bool clearActivity = false,
   }) {
     return PiState(
       status: status ?? this.status,
@@ -695,6 +702,9 @@ class PiState {
       transientNotice: clearNotice
           ? null
           : (transientNotice ?? this.transientNotice),
+      activityStatus: clearSource || clearActivity
+          ? null
+          : (activityStatus ?? this.activityStatus),
       backgroundFinishTick: backgroundFinishTick ?? this.backgroundFinishTick,
       backgroundFinishName: backgroundFinishName ?? this.backgroundFinishName,
       rttMs: rttMs ?? this.rttMs,
@@ -3378,6 +3388,14 @@ class PiSessionNotifier extends Notifier<PiState> {
           steeringQueue: _stringList(event['steering']),
           followUpQueue: _stringList(event['followUp']),
         );
+      // 桌面 working-activity 插件的 Working 行镜像:手机灵动岛直接显示。
+      case 'working_activity':
+        final text = event['text'] as String?;
+        if (text == null || text.isEmpty) {
+          state = state.copyWith(clearActivity: true);
+        } else {
+          state = state.copyWith(activityStatus: text);
+        }
       // pi 内部事件流用 compaction_start/compaction_end,而桌面 relay 的
       // emitBoundary 转发的是扩展钩子事件 session_before_compact/session_compact。
       // 两套名字都要认 —— 只认前者的话,桌面压缩时 app 一条提示都收不到。
