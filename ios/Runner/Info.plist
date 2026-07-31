@@ -60,11 +60,18 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
-	<array>
+}} ?? text text<array>
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- mDNS 局域网发现:声明要浏览的服务类型 + 本地网络用途说明(iOS 14+ 必需) -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_pipilot._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于在局域网内自动发现运行 PiPilot bridge 的设备</string>
 </dict>
 </plist>

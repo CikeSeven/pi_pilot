@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/device_models.dart';
+import '../core/lan_discovery.dart';
 import '../core/settings_repository.dart';
 import 'pi_session.dart';
 
@@ -132,7 +133,34 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
       }
     }
     unawaited(_hydrate());
+    // 局域网发现:mDNS 为主、子网扫描兜底。测试环境跳过——
+    // 扫描/组播都是真实网络行为,理由同 _hydrate 的连接守卫。
+    if (!isTestEnvironment) {
+      final discovery = LanDiscovery.platform();
+      final sub = discovery.devices.listen(_onDiscovered);
+      unawaited(discovery.start());
+      ref.onDispose(() {
+        unawaited(sub.cancel());
+        unawaited(discovery.stop());
+      });
+    }
     return const DeviceManagerState();
+  }
+
+  /// 发现流入口:更新 discovered,并对 roster 设备做 DHCP 自愈。
+  void _onDiscovered(List<DiscoveredDevice> list) {
+    state = state.copyWith(discovered: list);
+    for (final discovered in list) {
+      if (discovered.hubId.isEmpty) continue;
+      final hit = state.devices
+          .where((device) => device.lastHubId == discovered.hubId)
+          .firstOrNull;
+      // hubId 认出「这还是原来那台」,但地址变了 → 静默更新并重连。
+      if (hit != null &&
+          (hit.host != discovered.host || hit.port != discovered.port)) {
+        unawaited(refreshAddress(discovered));
+      }
+    }
   }
 
   Future<void> _persistHubId(String deviceId, String hubId) async {

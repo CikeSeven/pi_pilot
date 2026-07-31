@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Bridge traffic is plaintext ws:// on LAN/Tailscale; required for release builds. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- mDNS 局域网发现(bonsoir):Android 收发组播包必须显式申请 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <!-- WebRTC(flutter_webrtc)的网络监听器要调 ConnectivityManager,没这个权限
          libjingle 的 network_thread 会 JNI 异常后 CHECK 失败直接 SIGABRT(闪退)。
          flutter_webrtc 自身 manifest 是空的,不会传递带入,必须我们声明。 -->

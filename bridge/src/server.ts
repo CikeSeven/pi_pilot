@@ -4,6 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { lanUrls, loadConfig, writeFileConfig } from "./config.js";
+import { startAnnounce } from "./announce.js";
 import {
   HUB_PROTOCOL_VERSION,
   MAX_BUFFERED_SOCKET_BYTES,
@@ -3140,6 +3141,17 @@ server.on("error", (error) => {
 
 server.listen(config.port, config.host, printBanner);
 
+// mDNS 自我宣告:让手机在局域网里「找得到」。只发布非机密元数据,
+// token 不上广播。只听回环时没必要宣告(宣告了别人也够不着)。
+const stopAnnounce =
+  config.host === "127.0.0.1" || config.host === "localhost"
+    ? () => {}
+    : startAnnounce({
+        port: config.port,
+        hubId: sources.hubId,
+        protocolVersion: HUB_PROTOCOL_VERSION,
+      });
+
 // P2P(打洞)远程通道:作为 WebRTC host 挂到信令服,手机叫进来后在
 // DataChannel 上跑与 WS 完全相同的 hub 协议。信令服只交换握手,不碰流量。
 if (config.p2p.enabled && config.p2p.rendezvousUrl && config.p2p.secret) {
@@ -3158,6 +3170,7 @@ if (config.p2p.enabled && config.p2p.rendezvousUrl && config.p2p.secret) {
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopAnnounce();
   clearInterval(leaseTimer);
   clearInterval(pingTimer);
   clearInterval(desktopSweeper);
