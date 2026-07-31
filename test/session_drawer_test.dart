@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/core/device_models.dart';
+import 'package:pi_pilot/state/device_manager.dart';
+import 'package:pi_pilot/state/pi_session.dart';
 import 'package:pi_pilot/ui/chat/widgets/island_bar.dart';
 import 'package:pi_pilot/ui/sessions/devices_page.dart';
 import 'package:pi_pilot/ui/sessions/sessions_drawer.dart';
@@ -357,6 +360,84 @@ void main() {
     expect(find.byType(DynamicIslandBar), findsOneWidget);
   });
 
+  testWidgets('抽屉打开后点会话项:切换会话并关抽屉', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    const work = DeviceProfile(
+      id: 'dev-work',
+      name: '工作机',
+      host: 'h',
+      port: 1,
+      token: 't',
+    );
+    final harness = <String, _FakeSession>{};
+    final state = PiState.initial().copyWith(
+      status: PiConnStatus.connected,
+      selectedSourceId: 'win-1',
+      sources: const [
+        SourceInfo(
+          id: 'win-1',
+          kind: PiSourceKind.desktop,
+          label: 'win-1',
+          connected: true,
+          epoch: 'e1',
+          capabilities: [],
+          ownerPresent: false,
+          ownedByYou: false,
+          cwd: '/a',
+          sessionName: '修复登录页',
+        ),
+        SourceInfo(
+          id: 'win-2',
+          kind: PiSourceKind.desktop,
+          label: 'win-2',
+          connected: true,
+          epoch: 'e2',
+          capabilities: [],
+          ownerPresent: false,
+          ownedByYou: false,
+          cwd: '/b',
+          sessionName: '写周报',
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          deviceManagerProvider.overrideWith(
+            () => _FakeManager(
+              const DeviceManagerState(
+                devices: [work],
+                activeDeviceId: 'dev-work',
+                loaded: true,
+              ),
+            ),
+          ),
+          piSessionFamilyProvider.overrideWith2(
+            (deviceId) => harness[deviceId] = _FakeSession(deviceId, state),
+          ),
+        ],
+        child: MaterialApp(theme: buildLightTheme(), home: const AppShell()),
+      ),
+    );
+    await settle(tester);
+
+    // 右滑拉开抽屉。
+    final gesture = await dragOpen(tester, dx: 240);
+    await gesture.up();
+    await settle(tester);
+    expect(find.byType(SessionsDrawer), findsOneWidget);
+
+    // 点「写周报」:必须触发选源,而不是被手势吞掉。
+    // 回归守卫:抽屉开着时 DrawerDragRecognizer 若在 pointer down 就
+    // accept,竞技场会当场拒掉 InkWell 的 TapGestureRecognizer,
+    // 这里 selectedSources 就会是空的。
+    await tester.tap(find.text('写周报'));
+    await settle(tester);
+    expect(harness['dev-work']!.selectedSources, ['win-2']);
+    // 选完抽屉自己关上(onClose 回调)。
+    expect(find.byType(SessionsDrawer), findsNothing);
+  });
+
   testWidgets('关抽屉不会把焦点还给输入框(否则键盘每次都弹出来)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
@@ -371,6 +452,15 @@ void main() {
 
     // 关抽屉后若把焦点还给 body 里第一个可聚焦节点(= 输入框),
     // 键盘就跟着弹出来。判据取「没有任何文本框持有焦点」。
+    //
+    // 先断言抽屉真的关了:早先这条用例点了遮罩却从不检查结果,
+    // 以至于「抽屉开着时识别器在 pointer down 就 accept、竞技场当场拒掉
+    // 所有 TapGestureRecognizer」的 bug(点击切换会话失灵)从这里溜过去。
+    expect(
+      find.byType(SessionsDrawer),
+      findsNothing,
+      reason: '点遮罩后抽屉必须关闭,否则遮罩上的点击也被手势吞了',
+    );
     for (final editable in tester.widgetList<EditableText>(
       find.byType(EditableText),
     )) {
@@ -381,4 +471,36 @@ void main() {
       );
     }
   });
+}
+
+/// 只给抽屉喂固定状态的假会话:notifier 不连网,selectSource 只记账。
+class _FakeSession extends PiSessionNotifier {
+  _FakeSession(super.deviceId, this._initial);
+
+  final PiState _initial;
+  final List<String> selectedSources = [];
+
+  @override
+  PiState build() => _initial;
+
+  @override
+  Future<bool> selectSource(String sourceId, {bool persist = true}) async {
+    selectedSources.add(sourceId);
+    return true;
+  }
+}
+
+/// roster 固定的假设备管理:不读盘、不发现、不连网。
+class _FakeManager extends DeviceManagerNotifier {
+  _FakeManager(this._initial);
+
+  final DeviceManagerState _initial;
+
+  @override
+  DeviceManagerState build() => _initial;
+
+  @override
+  Future<void> setActive(String deviceId) async {
+    state = state.copyWith(activeDeviceId: deviceId);
+  }
 }

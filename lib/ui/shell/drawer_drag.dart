@@ -20,7 +20,15 @@ import 'package:flutter/widgets.dart';
 ///   `PageView` 翻页;**向右才 accept**,开始拉开抽屉。
 /// - 抽屉已开、或本次手势已被 accept:左右两个方向都由它持有,`PageView`
 ///   拿不到这根手指。于是同一根手指反向左滑时,进度连续从 1 降到 0。
-/// - 竖向为主的位移一律 reject,交给聊天列表滚动。
+/// - 竖向为主的位移一律 reject,交给聊天列表或抽屉内部的会话列表滚动。
+///
+/// 时序上有一条铁律:**任何方向判定都必须等位移真正发生之后**,绝不能
+/// 在 pointer 落下瞬间(pointer down)就表态。竞技场里谁先 `resolve(accepted)`,
+/// 其余成员全部收到 `rejectGesture` —— 早先抽屉开着时在 down 事件就宣布
+/// 胜利,抽屉里 InkWell 的 TapGestureRecognizer 当场被拒,点击切换会话
+/// 完全失灵;抽屉内列表的竖向滚动也一样被杀。Scrollable 之所以能和 Tap
+/// 共存,靠的就是 drag 识别器耐心等过 slop、让 Tap 在松手时先赢。
+/// 本识别器遵守同一时序:松手前手指没动过,就什么都不声明,点击完整放行。
 class DrawerDragRecognizer extends OneSequenceGestureRecognizer {
   DrawerDragRecognizer({
     required this.isOpen,
@@ -75,13 +83,9 @@ class DrawerDragRecognizer extends OneSequenceGestureRecognizer {
     _accepted = false;
     _velocity = VelocityTracker.withKind(event.kind);
     startTrackingPointer(event.pointer, event.transform);
-    // 抽屉已经开着:这根手指从落下就归抽屉,不必等方向判定。
-    // 遮罩上的横向滑动要能直接把抽屉推回去。
-    if (isOpen()) {
-      _accepted = true;
-      onStart();
-      resolve(GestureDisposition.accepted);
-    }
+    // 抽屉开着也**不能**在这里表态:立刻 accept 会让竞技场当场拒掉同一点位上
+    // 的 TapGestureRecognizer,抽屉里的会话项就点不动了(见类文档)。方向判定
+    // 一律推迟到第一个 PointerMoveEvent,松手前没位移的点击完整放行。
   }
 
   @override
@@ -94,7 +98,7 @@ class DrawerDragRecognizer extends OneSequenceGestureRecognizer {
         return;
       }
       _accum += event.delta;
-      // 竖向为主:这是在滚聊天列表,让给它。
+      // 竖向为主:这是在滚聊天列表(或抽屉内的会话列表),让给它。
       if (_accum.dy.abs() > _verticalSlop &&
           _accum.dy.abs() > _accum.dx.abs()) {
         resolve(GestureDisposition.rejected);
@@ -102,15 +106,15 @@ class DrawerDragRecognizer extends OneSequenceGestureRecognizer {
         return;
       }
       if (_accum.dx.abs() < _slop) return;
-      if (_accum.dx > 0) {
-        // 向右:开抽屉的意图,接管这根手指。
+      // 横向意图成立。抽屉已开时左右都归抽屉(右继续拉开、左推回),
+      // 关着时只认向右 —— 向左那是翻页,让给 PageView。
+      if (isOpen() || _accum.dx > 0) {
         _accepted = true;
         onStart();
         resolve(GestureDisposition.accepted);
         // slop 期间攒下的位移不能丢,否则抽屉起手会「跳一下」才跟上手指。
         onDelta(_accum.dx);
       } else {
-        // 向左且抽屉关着:那是翻页,让给 PageView。
         resolve(GestureDisposition.rejected);
         stopTrackingPointer(event.pointer);
       }
