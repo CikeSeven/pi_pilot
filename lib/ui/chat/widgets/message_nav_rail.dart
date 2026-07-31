@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../theme/motion.dart';
 
@@ -69,7 +70,7 @@ class MessageNavRail extends StatefulWidget {
 }
 
 class _MessageNavRailState extends State<MessageNavRail>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _ctrl = AnimationController(
     vsync: this,
     duration: PiMotion.entrance,
@@ -90,10 +91,43 @@ class _MessageNavRailState extends State<MessageNavRail>
   /// 预览卡中心 y(相对轨道顶)。
   double _previewY = 0;
 
+  // -- 焦点平滑层 ----------------------------------------------------------
+  //
+  // painter 不吃原始进度:所有 focus 变化(滚动/跳转/拖拽/窗口扩展)
+  // 都经过一道指数平滑,跳变被拉成 ~150ms 的弹簧收尾。
+  // 拖拽时系数放大 —— 跟手优先,平滑退居其次。
+  late final Ticker _focusTicker = createTicker(_tickFocus);
+  final _smoothFocus = ValueNotifier<double>(0);
+  double _targetFocus = 0;
+  static const _kFollowScroll = 0.20;
+  static const _kFollowDrag = 0.38;
+
+  void _setFocusTarget(double t) {
+    _targetFocus = t.clamp(0.0, 1.0);
+    if (!_focusTicker.isTicking) _focusTicker.start();
+  }
+
+  void _tickFocus(Duration _) {
+    final k = _dragT != null ? _kFollowDrag : _kFollowScroll;
+    final cur = _smoothFocus.value;
+    final next = cur + (_targetFocus - cur) * k;
+    if ((next - _targetFocus).abs() < 0.0005) {
+      _smoothFocus.value = _targetFocus;
+      _focusTicker.stop();
+    } else {
+      _smoothFocus.value = next;
+    }
+  }
+
+  void _onExternalProgress() => _setFocusTarget(widget.progress.value);
+
   @override
   void initState() {
     super.initState();
     if (widget.visible) _ctrl.value = 1;
+    _smoothFocus.value = widget.progress.value;
+    _targetFocus = widget.progress.value;
+    widget.progress.addListener(_onExternalProgress);
   }
 
   @override
@@ -106,10 +140,18 @@ class _MessageNavRailState extends State<MessageNavRail>
         _ctrl.reverse();
       }
     }
+    if (old.progress != widget.progress) {
+      old.progress.removeListener(_onExternalProgress);
+      widget.progress.addListener(_onExternalProgress);
+      _onExternalProgress();
+    }
   }
 
   @override
   void dispose() {
+    widget.progress.removeListener(_onExternalProgress);
+    _focusTicker.dispose();
+    _smoothFocus.dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -128,6 +170,7 @@ class _MessageNavRailState extends State<MessageNavRail>
       _dragT = _tAt(y, height);
       _previewY = y.clamp(0.0, height);
     });
+    _setFocusTarget(_dragT!);
   }
 
   void _updatePreview(double y, double height) {
@@ -136,6 +179,7 @@ class _MessageNavRailState extends State<MessageNavRail>
       _dragT = _tAt(y, height);
       _previewY = y.clamp(0.0, height);
     });
+    _setFocusTarget(_dragT!);
   }
 
   void _endPreview() {
@@ -208,13 +252,13 @@ class _MessageNavRailState extends State<MessageNavRail>
                       // 波形跟进度/手指走:ValueListenableBuilder 只重画
                       // painter,滚动/拖拽时不触发任何外层 rebuild。
                       ValueListenableBuilder<double>(
-                        valueListenable: widget.progress,
-                        builder: (context, progress, _) => CustomPaint(
+                        valueListenable: _smoothFocus,
+                        builder: (context, focus, _) => CustomPaint(
                           size: Size(28, railHeight),
                           painter: _RailPainter(
                             count: widget.anchors.length,
-                            // 拖拽时波形跟手指,否则跟滚动进度。
-                            focus: _dragT ?? progress,
+                            // 平滑层出口:滚动/拖拽/跳转统一走这里。
+                            focus: focus,
                             tickColor: colors.onSurfaceVariant.withValues(
                               alpha: 0.5,
                             ),
@@ -228,14 +272,24 @@ class _MessageNavRailState extends State<MessageNavRail>
                           ),
                         ),
                       ),
-                      if (_activeIndex != null)
-                        Positioned(
-                          left: 32,
-                          top: (_previewY - 44).clamp(0.0, railHeight - 88),
-                          child: _PreviewCard(
-                            anchor: widget.anchors[_activeIndex!],
+                      Positioned(
+                        left: 32,
+                        top: (_previewY - 44).clamp(0.0, railHeight - 88),
+                        child: AnimatedScale(
+                          scale: _activeIndex != null ? 1 : 0.92,
+                          duration: PiMotion.quick,
+                          curve: PiMotion.enter,
+                          child: AnimatedOpacity(
+                            opacity: _activeIndex != null ? 1 : 0,
+                            duration: PiMotion.quick,
+                            child: _activeIndex != null
+                                ? _PreviewCard(
+                                    anchor: widget.anchors[_activeIndex!],
+                                  )
+                                : const SizedBox(width: 240, height: 60),
                           ),
                         ),
+                      ),
                     ],
                   ),
                 ),
@@ -252,7 +306,7 @@ class _MessageNavRailState extends State<MessageNavRail>
 /// 双排从基线向右伸出的横条,随「焦点位置」连续起伏。
 ///
 /// - 小节点均匀插在大节点之间,只负责让波形连续好看,不映射消息;
-/// - **增益分离**:焦点处大节点 8→24px 冒尖、小节点只 3.5→10px,
+/// - **增益分离**:焦点处大节点 8→18px 冒尖、小节点只 3.5→10px,
 ///   峰值差距拉开,「当前在哪条消息」一眼能看出来;
 /// - 包络 σ 收窄到一个大节点间隔内 —— 焦点在大节点上时,
 ///   两侧小节点只微微隆起,不会和峰值一样高;
@@ -325,7 +379,7 @@ class _RailPainter extends CustomPainter {
         paint
           ..strokeWidth = 2.2 + 0.9 * influence
           ..color = Color.lerp(tickColor, focusColor, influence)!;
-        canvas.drawLine(Offset(4, y), Offset(4 + 8 + 16 * influence, y), paint);
+        canvas.drawLine(Offset(4, y), Offset(4 + 8 + 10 * influence, y), paint);
       } else {
         paint
           ..strokeWidth = 1.8 + 0.4 * influence

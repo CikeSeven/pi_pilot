@@ -114,6 +114,34 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   /// 游标如果吃 build 里现算的值,会停在滚动前的位置不动。
   final _scrollProgress = ValueNotifier<double>(0);
 
+  /// 滚动位置 → 锚点序号比例(0~1)。
+  ///
+  /// 不做「像素比例 = 进度」—— 那样峰值位置和第几条消息对不上。
+  /// 先把像素比例换算成行号,再在相邻锚点之间按行号线性插序号:
+  /// 视口正在看第 i 条消息,进度就严格落在第 i 个大节点上;
+  /// 两条消息之间连续插值,既严格匹配又不阶跃。
+  double _anchorFocusT() {
+    final rows = _rows.length;
+    final anchors = _navAnchors;
+    if (rows <= 1 || anchors.isEmpty) return 0;
+    if (!_scroll.hasClients) return _scrollProgress.value;
+    final position = _scroll.position;
+    final extent = position.hasContentDimensions ? position.maxScrollExtent : 0;
+    if (extent <= 0) return 0;
+    final rowF = (position.pixels / extent) * (rows - 1);
+    if (rowF <= anchors.first.rowIndex) return 0;
+    if (rowF >= anchors.last.rowIndex) return 1;
+    for (var j = 0; j + 1 < anchors.length; j++) {
+      final a = anchors[j].rowIndex.toDouble();
+      final b = anchors[j + 1].rowIndex.toDouble();
+      if (rowF <= b) {
+        final local = ((rowF - a) / (b - a)).clamp(0.0, 1.0);
+        return (j + local) / (anchors.length - 1);
+      }
+    }
+    return 1;
+  }
+
   void _showRail() {
     _railHideTimer?.cancel();
     if (!_railVisible) setState(() => _railVisible = true);
@@ -215,13 +243,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     _showRail();
     _scheduleRailHide();
     if (_scroll.hasClients) {
-      final position = _scroll.position;
-      final extent = position.hasContentDimensions
-          ? position.maxScrollExtent
-          : 0;
-      _scrollProgress.value = extent > 0
-          ? (position.pixels / extent).clamp(0.0, 1.0)
-          : 0;
+      _scrollProgress.value = _anchorFocusT();
     }
     if (_autoLoading || !_scroll.hasClients) return;
     final position = _scroll.position;
