@@ -150,7 +150,7 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
       client.role = role;
       client.deviceId = deviceId;
       client.authed = true;
-      console.log(`[rdv] host 注册: ${deviceId}`);
+      console.log(`[rdv] host 建立房间: ${deviceId}`);
       send(client, { type: "ok", iceServers: buildClientIceServers(config) });
       return;
     }
@@ -170,7 +170,7 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
     client.authed = true;
     client.peerId = peerId;
     room.guests.set(peerId, client);
-    console.log(`[rdv] guest 注册: ${deviceId} peer=${peerId}`);
+    console.log(`[rdv] guest 加入房间: ${deviceId} peer=${peerId}`);
     send(client, {
       type: "ok",
       peerId,

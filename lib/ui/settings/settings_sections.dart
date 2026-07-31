@@ -195,10 +195,30 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
 
   Future<bool> save({bool showNotice = true}) async {
     final rendezvous = normalizeP2pSignalingUrl(_rendezvous.text);
+    final deviceId = _deviceId.text.trim();
+    final secret = _secret.text;
     if (_enabled && !isAllowedP2pSignalingUrl(rendezvous)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('公网信令必须使用 wss://,ws:// 仅限本机测试')),
+        );
+      }
+      return false;
+    }
+    if (_enabled && !isValidP2pDeviceId(deviceId)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('设备名需为 3-64 位,仅限英文字母、数字、点、下划线和连字符')),
+        );
+      }
+      return false;
+    }
+    if (_enabled && !isValidP2pPairingKey(secret)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('配对 Key 需为 16-128 位可打印 ASCII,且至少包含大小写、数字、符号中的三类'),
+          ),
         );
       }
       return false;
@@ -208,8 +228,8 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
         .setP2pConfig(
           enabled: _enabled,
           rendezvous: rendezvous,
-          deviceId: _deviceId.text.trim(),
-          secret: _secret.text.trim(),
+          deviceId: deviceId,
+          secret: secret,
         );
     if (showNotice && mounted) {
       ScaffoldMessenger.of(
@@ -274,7 +294,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               obscureText: _obscure,
               decoration: InputDecoration(
                 labelText: '配对密钥',
-                hintText: '与信令服 devices 表一致',
+                hintText: '与 bridge 填写相同的 Key,无需在信令服预注册',
                 prefixIcon: const Icon(Icons.vpn_key_outlined),
                 suffixIcon: IconButton(
                   tooltip: _obscure ? '显示' : '隐藏',

@@ -42,6 +42,55 @@ class FakeRendezvous {
 }
 
 void main() {
+  String repeated(String value, int count) => List.filled(count, value).join();
+  const validPairingKey = 'S3cret-Key-2026!';
+
+  group('P2P 配对策略', () {
+    test('设备名长度边界与允许字符', () {
+      expect(isValidP2pDeviceId('ab'), isFalse);
+      expect(isValidP2pDeviceId('abc'), isTrue);
+      expect(isValidP2pDeviceId(repeated('a', 64)), isTrue);
+      expect(isValidP2pDeviceId(repeated('a', 65)), isFalse);
+      expect(isValidP2pDeviceId('Az09._-'), isTrue);
+    });
+
+    test('设备名拒绝空格、路径字符、换行和非 ASCII', () {
+      for (final value in [
+        'bad name',
+        'bad/name',
+        'bad\\name',
+        'bad\nname',
+        '设备名',
+      ]) {
+        expect(isValidP2pDeviceId(value), isFalse, reason: value);
+      }
+    });
+
+    test('配对 Key 长度边界', () {
+      expect(isValidP2pPairingKey('${repeated('a', 12)}A1!'), isFalse);
+      expect(isValidP2pPairingKey('${repeated('a', 13)}A1!'), isTrue);
+      expect(isValidP2pPairingKey('${repeated('a', 125)}A1!'), isTrue);
+      expect(isValidP2pPairingKey('${repeated('a', 126)}A1!'), isFalse);
+    });
+
+    test('配对 Key 接受可打印 ASCII 边界并要求至少三类字符', () {
+      expect(isValidP2pPairingKey('Aa1${repeated('!', 12)}~'), isTrue);
+      expect(isValidP2pPairingKey('Aa1${repeated('a', 13)}'), isTrue);
+      expect(isValidP2pPairingKey(repeated('A1', 8)), isFalse);
+    });
+
+    test('配对 Key 拒绝空格、DEL、换行和非 ASCII', () {
+      for (final value in [
+        'Aa1! with spaces',
+        'Aa1!${repeated('x', 12)}\x7f',
+        'Aa1!${repeated('x', 12)}\n',
+        'Aa1!${repeated('x', 12)}中',
+      ]) {
+        expect(isValidP2pPairingKey(value), isFalse, reason: value);
+      }
+    });
+  });
+
   group('信令地址安全', () {
     test('裸域名自动补 WSS,显式 scheme 保持原样', () {
       expect(
@@ -82,7 +131,7 @@ void main() {
         await GuestSignaling.connect(
           url: 'ws://signal.example.com:9378',
           deviceId: 'dev1',
-          secret: 's',
+          secret: validPairingKey,
         ),
         isNull,
       );
@@ -396,9 +445,9 @@ void main() {
         if (frame['type'] == 'hello') {
           expect(frame['role'], 'guest');
           expect(frame['deviceId'], 'dev1');
-          expect(frame['secret'], 's3cret');
+          expect(frame['secret'], validPairingKey);
           // hello 通过 WSS 传输 Key;伪服务只用于测试协议字段。
-          expect(jsonEncode(frame).contains('s3cret'), isTrue);
+          expect(jsonEncode(frame).contains(validPairingKey), isTrue);
           ws.add(
             jsonEncode({
               'type': 'ok',
@@ -423,7 +472,7 @@ void main() {
       final signaling = await GuestSignaling.connect(
         url: url,
         deviceId: 'dev1',
-        secret: 's3cret',
+        secret: validPairingKey,
       );
       expect(signaling, isNotNull);
       expect(signaling!.peerId, 'p1');
@@ -475,7 +524,11 @@ void main() {
         }
       };
       expect(
-        await GuestSignaling.connect(url: url, deviceId: 'dev1', secret: 's'),
+        await GuestSignaling.connect(
+          url: url,
+          deviceId: 'dev1',
+          secret: validPairingKey,
+        ),
         isNull,
       );
       await server.stop();
@@ -489,7 +542,7 @@ void main() {
         await GuestSignaling.connect(
           url: url,
           deviceId: 'dev1',
-          secret: 's',
+          secret: validPairingKey,
           timeout: const Duration(milliseconds: 300),
         ),
         isNull,
@@ -506,13 +559,13 @@ void main() {
         enabled: true,
         rendezvous: 'wss://signal.example.com',
         deviceId: 'home-desktop',
-        secret: 'pairing-secret',
+        secret: validPairingKey,
       );
       final data = await repo.load();
       expect(data.p2pEnabled, isTrue);
       expect(data.p2pRendezvous, 'wss://signal.example.com');
       expect(data.p2pDeviceId, 'home-desktop');
-      expect(data.p2pSecret, 'pairing-secret');
+      expect(data.p2pSecret, validPairingKey);
     });
 
     test('hasP2p:开关加三个字段齐备才为真', () {
@@ -524,7 +577,7 @@ void main() {
               p2pEnabled: true,
               p2pRendezvous: 'wss://signal.example.com',
               p2pDeviceId: 'home-desktop',
-              p2pSecret: 's',
+              p2pSecret: validPairingKey,
             )
             .hasP2p,
         isTrue,
