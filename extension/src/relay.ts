@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
@@ -55,6 +56,27 @@ const ASK_TOOL_NAME = "ask_user_question";
 const MAX_ASK_QUESTIONS = 4;
 const MAX_ASK_OPTIONS = 8;
 const MAX_ASK_PREVIEW = 2_000;
+
+/**
+ * 思考时长持久化文件(msgTs -> ms)。
+ *
+ * 手机端只能现算「它连着时看到的流」;断线重连、锁屏后一次性到位的
+ * 消息它算不出时长,胶囊退化成「已思考」。relay 在 pi 进程里看着每
+ * 一条 delta,是唯一全量的来源 —— 把结果持久化,pi 重启后回放老会
+ * 话也能补上。
+ */
+const THINKING_DURATIONS_PATH = path.join(
+  os.homedir(),
+  ".pi",
+  "agent",
+  "pipilot-thinking-durations.json",
+);
+/** LRU 上限:一条 assistant 消息一对键值,4000 条覆盖几百个会话。 */
+const MAX_THINKING_DURATIONS = 4_000;
+/** 在途跟踪上限(正常同时只有一条 assistant 在流)。 */
+const MAX_THINKING_PROGRESS = 32;
+/** 写盘节流。 */
+const THINKING_DURATIONS_SAVE_MS = 5_000;
 
 /**
  * 答案信封的开头。
@@ -606,13 +628,27 @@ export class DesktopRelay {
   private selectedClients = 0;
   private pendingAsks = new Map<string, PendingAsk>();
 
+  /// 思考时长跟踪:msgTs -> 首个/最后 thinking 增长时刻 + 上次长度。
+  /// 只在长度**增长**时推进 last —— thinking 停下后时长定格,
+  /// 正文生成时间不会被算进「思考了 Xs」。
+  private thinkingProgress = new Map<
+    number,
+    { first: number; last: number; len: number }
+  >();
+  /// 已定局的思考时长(msgTs -> ms),持久化,重启后回放可补。
+  private thinkingDurations = new Map<number, number>();
+  private thinkingDurationsDirty = false;
+  private thinkingSaveTimer: NodeJS.Timeout | undefined;
+
   readonly sourceId = sanitizeSourceId(`${os.hostname()}:${process.pid}`);
 
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly config: RelayConfig,
     private readonly navCache?: NavCommandContextCache,
-  ) {}
+  ) {
+    this.loadThinkingDurations();
+  }
 
   start(ctx: ExtensionContext): void {
     this.stopInternal(false);
@@ -754,6 +790,7 @@ export class DesktopRelay {
       this.pendingMessageUpdate = cloned;
       if (cloned.message && typeof cloned.message === "object") {
         this.inFlightMessage = cloned.message as JsonObject;
+        this.noteThinkingProgress(cloned.message);
       }
     } catch {
       this.resnapshot("message update too large");
@@ -773,8 +810,136 @@ export class DesktopRelay {
   emitMessageEnd(event: unknown, ctx: ExtensionContext): void {
     if (!this.isCurrent(ctx)) return;
     this.flushMessageUpdate();
-    this.sendEvent(event);
+    this.sendEvent(this.settleThinkingDuration(event));
     this.inFlightMessage = undefined;
+  }
+
+  /**
+   * 从 message_update 里跟踪 thinking 块的增长。
+   *
+   * 手机端自己也现算,但它只能看着「自己连着时」的流;断线重连/锁屏
+   * 后一次性到位的消息它算不出。relay 在 pi 进程里看着每一条 delta,
+   * 是全量的唯一来源 —— 算好的值附到 message_end 和快照上发出去。
+   */
+  private noteThinkingProgress(message: unknown): void {
+    if (!message || typeof message !== "object") return;
+    const msg = message as JsonObject;
+    if (msg.role !== "assistant" || typeof msg.timestamp !== "number") return;
+    const content = msg.content;
+    if (!Array.isArray(content)) return;
+    let thinkingLen = 0;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as JsonObject;
+      if (b.type === "thinking" && typeof b.thinking === "string") {
+        thinkingLen += b.thinking.length;
+      }
+    }
+    if (thinkingLen === 0) return;
+    const msgTs = msg.timestamp;
+    const prev = this.thinkingProgress.get(msgTs);
+    // 没增长:不动。时长定格在最后一次增长,正文时间不计入。
+    if (prev && prev.len >= thinkingLen) return;
+    const now = Date.now();
+    this.thinkingProgress.set(msgTs, {
+      first: prev?.first ?? now,
+      last: now,
+      len: thinkingLen,
+    });
+    if (this.thinkingProgress.size > MAX_THINKING_PROGRESS) {
+      const oldest = this.thinkingProgress.keys().next().value;
+      if (oldest !== undefined) this.thinkingProgress.delete(oldest);
+    }
+  }
+
+  /// message_end 结算:返回附带 thinkingDurationMs 的事件(有值的话)。
+  private settleThinkingDuration(event: unknown): unknown {
+    if (!event || typeof event !== "object") return event;
+    const evt = event as JsonObject;
+    const msg = evt.message;
+    if (!msg || typeof msg !== "object") return event;
+    const m = msg as JsonObject;
+    if (typeof m.timestamp !== "number") return event;
+    const msgTs = m.timestamp;
+    const progress = this.thinkingProgress.get(msgTs);
+    this.thinkingProgress.delete(msgTs);
+    let ms =
+      progress && progress.last > progress.first
+        ? progress.last - progress.first
+        : undefined;
+    if (ms !== undefined) {
+      this.thinkingDurations.set(msgTs, ms);
+      this.thinkingDurationsDirty = true;
+      this.trimThinkingDurations();
+      this.scheduleSaveThinkingDurations();
+    } else {
+      // 这条消息的流式没经过本 relay(比如手机端 sync 触发的):
+      // 查查持久化里有没有老值。
+      ms = this.thinkingDurations.get(msgTs);
+    }
+    if (ms === undefined) return event;
+    return { ...evt, message: { ...m, thinkingDurationMs: ms } };
+  }
+
+  /// 快照里的 assistant entries 补时长(历史回放路径)。
+  private attachThinkingDurations(entries: JsonObject[]): void {
+    if (this.thinkingDurations.size === 0) return;
+    for (const entry of entries) {
+      const msg = entry?.message;
+      if (!msg || typeof msg !== "object") continue;
+      const m = msg as JsonObject;
+      if (m.role !== "assistant" || typeof m.timestamp !== "number") continue;
+      if (typeof m.thinkingDurationMs === "number") continue;
+      const ms = this.thinkingDurations.get(m.timestamp);
+      if (ms !== undefined) m.thinkingDurationMs = ms;
+    }
+  }
+
+  private trimThinkingDurations(): void {
+    while (this.thinkingDurations.size > MAX_THINKING_DURATIONS) {
+      const oldest = this.thinkingDurations.keys().next().value;
+      if (oldest === undefined) break;
+      this.thinkingDurations.delete(oldest);
+    }
+  }
+
+  private loadThinkingDurations(): void {
+    try {
+      const raw = fs.readFileSync(THINKING_DURATIONS_PATH, "utf8");
+      const data = JSON.parse(raw) as Record<string, number>;
+      for (const [k, v] of Object.entries(data)) {
+        const msgTs = Number(k);
+        if (Number.isFinite(msgTs) && typeof v === "number" && v > 0) {
+          this.thinkingDurations.set(msgTs, v);
+        }
+      }
+      this.trimThinkingDurations();
+    } catch {
+      // 没有文件或损坏:从零开始,不致命。
+    }
+  }
+
+  private scheduleSaveThinkingDurations(): void {
+    if (this.thinkingSaveTimer) return;
+    this.thinkingSaveTimer = setTimeout(() => {
+      this.thinkingSaveTimer = undefined;
+      this.flushThinkingDurations();
+    }, THINKING_DURATIONS_SAVE_MS);
+    this.thinkingSaveTimer.unref();
+  }
+
+  /** 立即写盘(若脏)。session_shutdown 时由 index.ts 调用。 */
+  flushThinkingDurations(): void {
+    if (!this.thinkingDurationsDirty) return;
+    try {
+      fs.mkdirSync(path.dirname(THINKING_DURATIONS_PATH), { recursive: true });
+      const data: Record<string, number> = {};
+      for (const [k, v] of this.thinkingDurations) data[String(k)] = v;
+      fs.writeFileSync(THINKING_DURATIONS_PATH, JSON.stringify(data));
+      this.thinkingDurationsDirty = false;
+    } catch {
+      // 写不进就算了,下次启动重新跟踪新消息。
+    }
   }
 
   emitToolUpdate<T extends { toolCallId?: unknown }>(
@@ -1220,6 +1385,8 @@ export class DesktopRelay {
         }
       }
     }
+    // 历史回放补时长:assistant entry 附上持久化过的 thinkingDurationMs。
+    this.attachThinkingDurations(entries);
     const models = ctx.modelRegistry.getAvailable().map((model) => serializeModel(model));
     const contextUsage = ctx.getContextUsage();
     const state: JsonObject = {

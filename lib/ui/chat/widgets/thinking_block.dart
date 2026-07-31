@@ -84,8 +84,6 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.psychology_outlined, size: 15, color: muted),
-                const SizedBox(width: 7),
                 Flexible(
                   child: Text(
                     _durationLabel,

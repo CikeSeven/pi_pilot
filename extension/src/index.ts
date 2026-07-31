@@ -32,6 +32,7 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", (event, ctx) => {
     relay?.emitBoundary(event, ctx);
+    relay?.flushThinkingDurations();
     relay?.stop(ctx);
     relay = undefined;
     if (ctx.mode === "tui") ctx.ui.setStatus("pipilot-sync", undefined);
