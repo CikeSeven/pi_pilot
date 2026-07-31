@@ -3,6 +3,8 @@ import 'dart:math' show Random;
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'device_models.dart';
+
 /// 读取结果(用 record 避免与 state 层互相 import)。
 typedef SettingsData = ({
   String host,
@@ -59,6 +61,118 @@ class SettingsRepository {
   /// 上次成功的 ICE 模式缓存前缀(p2p.icemode.{deviceId}):
   /// relay 网络的每次重连可省 7s direct 空等。
   static const _kP2pIceModePrefix = 'p2p.icemode.';
+
+  /// 多设备 roster(JSON 数组,元素见 DeviceProfile.toMap)。
+  static const _kDeviceList = 'devices.list';
+
+  /// 当前激活设备 id(聊天页读哪台)。
+  static const _kActiveDeviceId = 'devices.activeId';
+
+  // -- 多设备 roster ---------------------------------------------------------
+
+  /// 读取设备列表;首次启动时把旧版单设备配置(conn.* / p2p.*)迁移成
+  /// roster[0]。迁移后旧键保留只读(留一版做回滚保险),新写入只走新键。
+  Future<List<DeviceProfile>> loadDevices() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kDeviceList);
+    if (raw != null) {
+      try {
+        final list = jsonDecode(raw) as List;
+        return [
+          for (final item in list)
+            if (item is Map)
+              DeviceProfile.fromMap(item.cast<String, dynamic>()),
+        ];
+      } catch (_) {
+        return const [];
+      }
+    }
+    // 迁移:旧单设备心智 → roster。旧键 host 为空说明是新装机,不动。
+    final host = prefs.getString(_kHost) ?? '';
+    if (host.isEmpty) return const [];
+    final migrated = DeviceProfile(
+      id: generateDeviceId(),
+      name: '默认设备',
+      host: host,
+      port: prefs.getInt(_kPort) ?? 9377,
+      token: prefs.getString(_kToken) ?? '',
+      transport: DeviceTransport.auto,
+      p2pRendezvous: _emptyToNull(prefs.getString(_kP2pRendezvous)),
+      p2pDeviceId: _emptyToNull(prefs.getString(_kP2pDeviceId)),
+      p2pSecret: _emptyToNull(prefs.getString(_kP2pSecret)),
+    );
+    // 旧版 P2P 有独立开关,关掉就等价 lan(直连失败不回落)。
+    final device = (prefs.getBool(_kP2pEnabled) ?? false)
+        ? migrated
+        : migrated.copyWith(clearP2p: true);
+    await saveDevices([device]);
+    return [device];
+  }
+
+  Future<void> saveDevices(List<DeviceProfile> devices) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _kDeviceList,
+      jsonEncode([for (final d in devices) d.toMap()]),
+    );
+  }
+
+  /// 新增或按 id 覆盖一台设备。
+  Future<void> upsertDevice(DeviceProfile device) async {
+    final devices = await loadDevices();
+    final index = devices.indexWhere((d) => d.id == device.id);
+    if (index >= 0) {
+      devices[index] = device;
+    } else {
+      devices.add(device);
+    }
+    await saveDevices(devices);
+  }
+
+  Future<void> removeDevice(String deviceId) async {
+    final devices = await loadDevices();
+    devices.removeWhere((d) => d.id == deviceId);
+    await saveDevices(devices);
+    if (await loadActiveDeviceId() == deviceId) {
+      await saveActiveDeviceId(devices.isEmpty ? null : devices.first.id);
+    }
+  }
+
+  /// DHCP 自愈:发现里 hubId 命中但地址变了 → 静默更新 host/port。
+  /// 返回更新后的设备;没有命中返回 null。
+  Future<DeviceProfile?> refreshDeviceAddress({
+    required String hubId,
+    required String host,
+    required int port,
+  }) async {
+    if (hubId.isEmpty) return null;
+    final devices = await loadDevices();
+    final index = devices.indexWhere(
+      (d) => d.lastHubId == hubId && (d.host != host || d.port != port),
+    );
+    if (index < 0) return null;
+    final updated = devices[index].copyWith(host: host, port: port);
+    devices[index] = updated;
+    await saveDevices(devices);
+    return updated;
+  }
+
+  Future<String?> loadActiveDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_kActiveDeviceId);
+  }
+
+  Future<void> saveActiveDeviceId(String? deviceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (deviceId == null) {
+      await prefs.remove(_kActiveDeviceId);
+    } else {
+      await prefs.setString(_kActiveDeviceId, deviceId);
+    }
+  }
+
+  static String? _emptyToNull(String? value) =>
+      (value == null || value.isEmpty) ? null : value;
 
   /// 读取缓存的成功模式('direct'/'relay');7 天过期,连败 2 次作废。
   Future<String?> loadP2pIceMode(String deviceId) async {

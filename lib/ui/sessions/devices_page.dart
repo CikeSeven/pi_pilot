@@ -1,34 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/device_models.dart';
+import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
+import '../../state/settings_provider.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
-import '../theme/typography.dart';
 import '../theme/squircle.dart';
+import '../theme/typography.dart';
+import 'device_edit_sheet.dart';
+import 'device_sessions_page.dart';
 
-/// 设备页:**深炭全屏 + 复古插画 + 陶土橙当前卡**。
+/// 设备页:**深炭全屏 + 复古插画 + 陶土橙当前卡**(Editorial Retro)。
 ///
-/// Editorial Retro 改版。参考图里设备列表是整个 app 唯一的深色全屏页面——
-/// 「一张深色侧边抽屉、一台当前设备卡片、背景有淡淡的复古场景插图,
-/// 很有工作台的感觉」。
-///
-/// 分两段:**pi 窗口**(电脑上开着的)+ **历史会话**(只在磁盘上的)。
-///
-/// 原设计刻意*不*枚举 `~/.pi/agent/sessions/`,理由是「手机只负责连到已经开着
-/// 的窗口」。这条决策在这里被推翻,因为它让大会话对手机**永久不可达**:
-/// 本机最大的会话是 50.40MB / 9554 条,只在磁盘上,电脑端没开着它 ——
-/// 于是无论 bridge 侧把分页做得多快,用户在手机上都找不到入口打开它。
-/// bridge 早就把磁盘会话一起发过来了(`hub_list_sessions` 实测 63 个,
-/// 带 sizeBytes/timestamp/path),`openSession()` 也早就能唤醒它们 ——
-/// 缺的一直只是这段列表 UI。
-///
-/// 「电脑上多开一个 pi,这里就多一行」的原意在**第一段**里完整保留。
+/// 多设备改造(见 docs/multi-device-plan.md)后这一页是**两级结构的第一级**:
+/// - 第一级(本文件)= 设备列表:已添加设备 + 局域网发现 + 手动添加入口;
+/// - 第二级([DeviceSessionsPage])= 某台设备的会话列表(旧版设备页的正身,
+///   pi 窗口 + 历史会话两段原样下沉)。
 ///
 /// 同一份 UI 有两个外壳:
 /// - [DevicesPage]  底部导航的「设备」tab,整页;
 /// - [DevicesDrawer] 会话页左滑出来的抽屉。
 /// 两者共用 [_DevicesBody],避免两处各写一遍列表。
+///
+/// **迭代 1 的数据来源**:多连接状态层(pi_session family 化)落地前,
+/// 在线状态仍从旧版单连接 `piSessionProvider` 旁路推导——host/port/token
+/// 与设置匹配的那台设备 = 当前连接,其余设备显示传输偏好与「未连接」。
+/// DeviceManager 占位骨架(device_manager.dart)已把 roster/激活设备/发现
+/// 容器就位,迭代 2 只需替换状态来源,UI 不动。
 class DevicesPage extends StatelessWidget {
   const DevicesPage({super.key});
 
@@ -75,201 +75,142 @@ class _DevicesBody extends ConsumerStatefulWidget {
 }
 
 class _DevicesBodyState extends ConsumerState<_DevicesBody> {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
-  }
-
-  Future<void> _refresh() async {
-    if (!mounted) return;
-    if (ref.read(piSessionProvider).status != PiConnStatus.connected) return;
-    final notifier = ref.read(piSessionProvider.notifier);
-    // 两个都要拉:refreshSources 只给「开着的窗口」,磁盘上的历史会话
-    // 只有 hub_list_sessions 才带回来(它连 sizeBytes/path 一起给)。
-    // 少拉后者,下面的「历史会话」段就永远是空的。
-    await notifier.refreshSources();
-    if (!mounted) return;
-    await notifier.refreshHubSessions();
-  }
-
-  /// 唤醒一个只在磁盘上的会话。bridge 会按需 spawn 一个无头 pi 并订阅它,
-  /// **从不 kill 任何进程**,所以电脑端正在生成时点这里也不会互相打断。
-  Future<void> _wake(HubSession session) async {
-    final messenger = ScaffoldMessenger.of(context);
-    if (widget.inDrawer) Navigator.of(context).pop();
-    String? error;
-    var ok = false;
-    try {
-      ok = await ref.read(piSessionProvider.notifier).openSession(
-        sessionId: session.sessionId,
-        cwd: session.cwd,
-        // sessionPath 是懒唤醒的关键:descriptor 装不下它,
-        // 没有它 bridge 只能靠 sessionId 猜文件位置。
-        sessionPath: session.path,
-      );
-    } catch (failure) {
-      error = failure.toString();
+  /// 打开添加/编辑 sheet 并落库。新设备保存后直接进它的会话页。
+  Future<void> _editDevice({
+    DeviceProfile? existing,
+    DiscoveredDevice? discovered,
+  }) async {
+    final result = await showDeviceEditSheet(
+      context,
+      existing: existing,
+      discovered: discovered,
+    );
+    if (result == null || !mounted) return;
+    final notifier = ref.read(deviceManagerProvider.notifier);
+    if (result.deleted) {
+      if (existing != null) await notifier.removeDevice(existing.id);
+      return;
     }
-    if (ok) return;
-    final reason = error ?? ref.read(piSessionProvider).error ?? '唤醒这个会话失败';
-    if (!mounted) return;
-    messenger.showSnackBar(SnackBar(content: Text(reason)));
+    final device = result.device!;
+    await notifier.upsertDevice(device);
+    if (!mounted || _isEdit(existing)) return;
+    _openSessions(device);
   }
 
-  Future<void> _connect(SourceInfo source) async {
-    // pop / snackbar 都要用外层 context,先抓好
-    final messenger = ScaffoldMessenger.of(context);
-    // 先关抽屉再连:selectSource 要跑整轮同步(数秒),如果连完才 pop,
-    // 期间用户已从抽屉进了设置页的话,这一下 pop 会把设置页误关掉。
+  bool _isEdit(DeviceProfile? existing) => existing != null;
+
+  void _openSessions(DeviceProfile device) {
+    // 抽屉里要先关抽屉再 push,否则返回时落回抽屉下的页面,抽屉还开着。
     if (widget.inDrawer) Navigator.of(context).pop();
-    String? error;
-    var ok = false;
-    try {
-      ok = await ref.read(piSessionProvider.notifier).selectSource(source.id);
-    } catch (failure) {
-      error = failure.toString();
-    }
-    if (ok) return;
-    final reason = error ?? ref.read(piSessionProvider).error ?? '连接这个窗口失败';
-    messenger.showSnackBar(SnackBar(content: Text(reason)));
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => DeviceSessionsPage(device: device)));
+    // 点哪台,聊天页就指向哪台。
+    ref.read(deviceManagerProvider.notifier).setActive(device.id);
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(piSessionProvider);
-    final connected = state.status == PiConnStatus.connected;
+    final manager = ref.watch(deviceManagerProvider);
+    final settings = ref.watch(settingsProvider);
+    final conn = ref.watch(piSessionProvider);
 
-    // 第一段:电脑上开着的窗口。headless / 已断开的都不列。
-    final windows = [
-      for (final source in state.sources)
-        if (source.isDesktop && source.connected) source,
-    ];
+    // 迭代 1 的旁路:与当前连接匹配的设备才能显示真实在线状态。
+    DeviceProfile? liveDevice;
+    for (final device in manager.devices) {
+      if (DeviceSessionsPage.isLiveDevice(device, settings)) {
+        liveDevice = device;
+        break;
+      }
+    }
+    final connected = liveDevice != null &&
+        conn.status == PiConnStatus.connected;
 
-    // 第二段:不在电脑窗口里的会话 —— 磁盘上休眠的(dormant)和已经被唤醒、
-    // 活在 bridge 进程池里的(headless)都算。
-    //
-    // headless 必须一起收:否则点开一个历史会话、它变成 headless 之后,
-    // 窗口段(只收 isDesktop)和历史段(只收 dormant)都不要它,这一行就
-    // **凭空消失**,用户既看不出它在跑,也没法再回到它。
-    final shownSessionIds = {
-      for (final source in windows) source.sessionId,
-    }..removeWhere((id) => id == null);
-    final history = [
-      for (final session in state.sessions)
-        if (session.liveness != SessionLiveness.desktop &&
-            session.sessionId.isNotEmpty &&
-            !shownSessionIds.contains(session.sessionId))
-          session,
-    ]..sort((a, b) {
-      // timestamp 是 ISO8601,字符串降序即时间降序。缺失的排最后。
-      final left = a.timestamp ?? '';
-      final right = b.timestamp ?? '';
-      if (left.isEmpty && right.isEmpty) return 0;
-      if (left.isEmpty) return 1;
-      if (right.isEmpty) return -1;
-      return right.compareTo(left);
-    });
-
-    return Stack(
-      children: [
-        // 这里曾放一张「工作台」环境插画做氛围。撤掉了:
-        // 素材自带象牙纸底,在深炭页面上无论怎么混合都会留下一块灰方块
-        // (screen 提亮成灰块 / multiply 把线条一起压黑)。
-        // 深色页面的识别度已经由陶土橙当前卡 + 衬线标题承担,不缺这一层。
-        SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _Header(
-                connected: connected,
-                onRefresh: connected ? _refresh : null,
-              ),
-              Expanded(child: _body(state, connected, windows, history)),
-              // 抽屉页脚原本有个「设置」入口。撤掉了:底栏已经有「设置」tab,
-              // 同一个目的地给两个入口只会让人犹豫点哪个。
-            ],
+    return SafeArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _Header(
+            onlineCount: connected ? 1 : 0,
+            total: manager.devices.length,
           ),
-        ),
-      ],
+          Expanded(
+            child: _body(manager, liveDevice, conn),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _body(
-    PiState state,
-    bool connected,
-    List<SourceInfo> windows,
-    List<HubSession> history,
+    DeviceManagerState manager,
+    DeviceProfile? liveDevice,
+    PiState conn,
   ) {
-    if (!connected) {
-      return const _Placeholder(
-        title: '尚未连接',
-        body: '在设置里填写 bridge 地址,\n就能看到电脑上开着的 pi 窗口。',
-      );
-    }
-    if (windows.isEmpty && history.isEmpty) {
-      return const _Placeholder(
-        title: '电脑上没有打开的 pi',
-        body: '在电脑上开一个 pi 窗口,\n它会自动出现在这里。',
-      );
+    final colors = Theme.of(context).colorScheme;
+
+    if (manager.loaded && manager.devices.isEmpty) {
+      return _EmptyRoster(onAdd: () => _editDevice());
     }
 
-    final colors = Theme.of(context).colorScheme;
+    // 发现区:已经在 roster 里(按 hubId 或地址命中)的不重复列。
+    final discovered = [
+      for (final d in manager.discovered)
+        if (!manager.devices.any(
+          (p) =>
+              (d.hubId.isNotEmpty && p.lastHubId == d.hubId) ||
+              (p.host == d.host && p.port == d.port),
+        ))
+          d,
+    ];
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
       children: [
-        if (windows.isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 14),
-            child: Text(
-              '电脑上没有打开的 pi。下面是磁盘上的会话,点一下即时唤醒。',
-              style: AppType.serifItalic(
-                size: 13.5,
-                color: colors.onSurfaceVariant,
-              ),
-            ),
-          ),
-        for (final source in windows) ...[
-          _DeviceCard(
-            source: source,
-            state: state,
-            onTap: () => _connect(source),
+        for (final device in manager.devices) ...[
+          _RosterDeviceCard(
+            device: device,
+            isActive: device.id == manager.activeDeviceId,
+            live: device.id == liveDevice?.id,
+            conn: device.id == liveDevice?.id ? conn : null,
+            onTap: () => _openSessions(device),
+            onLongPress: () => _editDevice(existing: device),
           ),
           const SizedBox(height: 10),
         ],
-        if (history.isNotEmpty) ...[
+        if (discovered.isNotEmpty) ...[
           Padding(
-            padding: EdgeInsets.fromLTRB(4, windows.isEmpty ? 0 : 14, 4, 12),
+            padding: const EdgeInsets.fromLTRB(4, 14, 4, 12),
             child: Eyebrow(
-              text: '会话 · ${history.length}',
+              text: '局域网发现 · ${discovered.length}',
               color: colors.onSurfaceVariant,
               withRule: true,
             ),
           ),
-          for (final session in history) ...[
-            _HistoryCard(
-              session: session,
-              isCurrent: session.sourceId == state.selectedSourceId,
-              onTap: () => _wake(session),
+          for (final d in discovered) ...[
+            _DiscoveredCard(
+              discovered: d,
+              onTap: () => _editDevice(discovered: d),
             ),
             const SizedBox(height: 10),
           ],
         ],
+        const SizedBox(height: 4),
+        _AddDeviceCard(onTap: () => _editDevice()),
       ],
     );
   }
 }
 
-/// 页头:衬线大标题 + 说明 + 刷新。
+/// 页头:衬线大标题 + 说明。
 class _Header extends StatelessWidget {
-  const _Header({required this.connected, this.onRefresh});
+  const _Header({required this.onlineCount, required this.total});
 
-  final bool connected;
-  final VoidCallback? onRefresh;
+  final int onlineCount;
+  final int total;
 
   @override
   Widget build(BuildContext context) {
-    // 颜色一律从 scheme 取 —— 这一页现在跟随主题,写死深色前景在浅色下就瞎了。
     final colors = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 22, 12, 16),
@@ -278,40 +219,24 @@ class _Header extends StatelessWidget {
         children: [
           Row(
             children: [
-              Expanded(
-                child: Row(
-                  children: [
-                    Text(
-                      'pi 窗口',
-                      style: AppType.displayTitle(
-                        size: 27,
-                        color: colors.onSurface,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    // 素材里的星芒 PNG 自带象牙底,深色页面上是个小白块 ——
-                    // 这里用同形状的 Material 图标代替。
-                    Padding(
-                      padding: const EdgeInsets.only(top: 5),
-                      child: Icon(
-                        Icons.auto_awesome,
-                        size: 15,
-                        color: colors.primary,
-                      ),
-                    ),
-                  ],
-                ),
+              Text(
+                '设备',
+                style: AppType.displayTitle(size: 27, color: colors.onSurface),
               ),
-              IconButton(
-                tooltip: '刷新',
-                icon: Icon(Icons.refresh, color: colors.onSurfaceVariant),
-                onPressed: onRefresh,
+              const SizedBox(width: 10),
+              Padding(
+                padding: const EdgeInsets.only(top: 5),
+                child: Icon(
+                  Icons.auto_awesome,
+                  size: 15,
+                  color: colors.primary,
+                ),
               ),
             ],
           ),
           const SizedBox(height: 4),
           Text(
-            connected ? '电脑上每开一个 pi,这里就多一个' : '未连接 bridge',
+            '每台电脑是一个工作台',
             style: AppType.serifItalic(
               size: 14,
               color: colors.onSurfaceVariant,
@@ -319,7 +244,7 @@ class _Header extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Eyebrow(
-            text: connected ? '在线设备' : '离线',
+            text: total == 0 ? '离线' : '在线 · $onlineCount/$total',
             color: colors.primary,
             withRule: true,
           ),
@@ -329,46 +254,76 @@ class _Header extends StatelessWidget {
   }
 }
 
-/// 设备卡:当前连接的那台用**陶土橙实心**,其余用深色抬升面 + 描边。
-class _DeviceCard extends StatelessWidget {
-  const _DeviceCard({
-    required this.source,
-    required this.state,
+/// 已添加设备卡:**当前设备陶土橙实心**,其余深色抬升面 + 描边。
+///
+/// 与旧 _DeviceCard(现 _WindowCard)同一套视觉语言:
+/// 方正印章图标、monoLabel 副标、流式 spinner、「当前」chip。
+/// 长按进编辑;短按进这台设备的会话页。
+class _RosterDeviceCard extends StatelessWidget {
+  const _RosterDeviceCard({
+    required this.device,
+    required this.isActive,
+    required this.live,
+    required this.conn,
     required this.onTap,
+    required this.onLongPress,
   });
 
-  final SourceInfo source;
-  final PiState state;
+  final DeviceProfile device;
+
+  /// 聊天页指向的设备(activeDeviceId)。与「在线」是两个维度:
+  /// 在线 ≠ 当前,当前设备掉线时也保持当前标。
+  final bool isActive;
+
+  /// 迭代 1 旁路:这台设备就是设置里那条连接,有实时状态可看。
+  final bool live;
+
+  /// live 时的连接状态快照;非 live 为 null。
+  final PiState? conn;
+
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isCurrent = source.id == state.selectedSourceId;
-    final streaming = state.sessions
-        .where((item) => item.sourceId == source.id)
-        .any((item) => item.streaming);
-
-    // 当前设备:主强调色实心卡,是这一页的视觉主角(参考图如此)。
-    // 其余用一级卡片面 —— 浅色下是象牙白、深色下是深咖灰,都由主题给。
     final colors = theme.colorScheme;
-    final bg = isCurrent ? colors.primary : colors.surfaceContainerLow;
-    final fg = isCurrent ? colors.onPrimary : colors.onSurface;
-    final fgMuted = isCurrent
+
+    final online = live && conn?.status == PiConnStatus.connected;
+    final connecting = live && conn?.status == PiConnStatus.connecting;
+    final streaming = online &&
+        (conn?.sessions.any((item) => item.streaming) ?? false);
+    final windowCount = online
+        ? conn!.sources.where((s) => s.isDesktop && s.connected).length
+        : 0;
+
+    // 当前设备 = 陶土橙实心卡,是这一页的视觉主角(沿用旧版约定)。
+    final bg = isActive ? colors.primary : colors.surfaceContainerLow;
+    final fg = isActive ? colors.onPrimary : colors.onSurface;
+    final fgMuted = isActive
         ? colors.onPrimary.withValues(alpha: 0.78)
         : colors.onSurfaceVariant;
+
+    // 副标:在线 → 通道 + 窗口数;连接中 → 提示;离线 → 传输偏好。
+    final subtitle = switch ((online, connecting, streaming)) {
+      (true, _, true) => '正在生成…',
+      (true, _, false) => '${device.transportLabel} · $windowCount 个窗口',
+      (_, true, _) => '连接中…',
+      _ => device.transportLabel,
+    };
 
     return Material(
       color: bg,
       shape: SquircleBorder(
         borderRadius: BorderRadius.circular(PiShape.lg),
         side: BorderSide(
-          color: isCurrent ? Colors.transparent : colors.outlineVariant,
+          color: isActive ? Colors.transparent : colors.outlineVariant,
         ),
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: isCurrent ? null : onTap,
+        onTap: onTap,
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 15, 16, 15),
           child: Row(
@@ -383,9 +338,9 @@ class _DeviceCard extends StatelessWidget {
                   border: Border.all(color: fg.withValues(alpha: 0.22)),
                 ),
                 child: Icon(
-                  Icons.desktop_windows_outlined,
+                  Icons.computer,
                   size: 20,
-                  color: fg,
+                  color: online || isActive ? fg : fgMuted,
                 ),
               ),
               const SizedBox(width: 14),
@@ -395,17 +350,14 @@ class _DeviceCard extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      windowTitleFor(
-                        cwd: source.cwd,
-                        sessionName: source.sessionName,
-                      ),
+                      device.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.titleSmall?.copyWith(color: fg),
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      streaming ? '正在生成…' : (source.cwd ?? source.label),
+                      subtitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: AppType.monoLabel(color: fgMuted),
@@ -414,14 +366,13 @@ class _DeviceCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              if (streaming)
+              if (streaming || connecting)
                 SizedBox(
                   width: 18,
                   height: 18,
                   child: CircularProgressIndicator(strokeWidth: 2.2, color: fg),
                 )
-              else if (isCurrent)
-                // 「当前」标:编辑式小标签,不是红角标
+              else if (isActive)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 9,
@@ -443,41 +394,20 @@ class _DeviceCard extends StatelessWidget {
   }
 }
 
-/// 历史会话卡:只在磁盘上的会话,点一下即时唤醒。
-///
-/// 视觉上刻意比 [_DeviceCard] 轻一档(描边卡 + 虚线感图标),因为它还不是
-/// 一个活着的窗口 —— 避免和「当前」那张陶土橙实心卡抢视觉重心。
-class _HistoryCard extends StatelessWidget {
-  const _HistoryCard({
-    required this.session,
-    required this.isCurrent,
-    required this.onTap,
-  });
+/// 局域网发现卡(未添加):比已添加设备卡**轻一档**——
+/// 复刻历史卡对设备卡的轻量关系,因为它「还不是你的设备」。
+/// 右端是 ＋ 而不是 chevron:动作是「添加」,不是「进入」。
+class _DiscoveredCard extends StatelessWidget {
+  const _DiscoveredCard({required this.discovered, required this.onTap});
 
-  final HubSession session;
-  final bool isCurrent;
+  final DiscoveredDevice discovered;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final fg = colors.onSurface;
     final fgMuted = colors.onSurfaceVariant;
-    // headless = 已经在 bridge 上跑着;dormant = 只在磁盘上,点了才唤醒。
-    final running = session.liveness == SessionLiveness.headless;
-
-    // 副标题把「多大 · 什么时候」摆出来:大会话唤醒要花几秒,
-    // 让人点之前就知道自己在打开一个多大的东西。
-    final size = session.sizeBytes;
-    final dir = session.cwd;
-    final parts = <String>[
-      if (running) '运行中',
-      if (size != null && size > 0) formatSessionSize(size),
-      ?formatSessionTime(session.timestamp),
-      if (dir != null && dir.isNotEmpty)
-        dir.split('/').where((part) => part.isNotEmpty).lastOrNull ?? dir,
-    ];
 
     return Material(
       color: colors.surfaceContainerLowest,
@@ -487,7 +417,7 @@ class _HistoryCard extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: isCurrent ? null : onTap,
+        onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 13, 16, 13),
           child: Row(
@@ -500,11 +430,7 @@ class _HistoryCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(PiShape.sm),
                   border: Border.all(color: colors.outlineVariant),
                 ),
-                child: Icon(
-                  running ? Icons.dns_outlined : Icons.history,
-                  size: 18,
-                  color: running ? colors.primary : fgMuted,
-                ),
+                child: Icon(Icons.radar, size: 18, color: colors.primary),
               ),
               const SizedBox(width: 13),
               Expanded(
@@ -513,17 +439,16 @@ class _HistoryCard extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      windowTitleFor(
-                        cwd: session.cwd,
-                        sessionName: session.name,
-                      ),
+                      discovered.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleSmall?.copyWith(color: fg),
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: colors.onSurface,
+                      ),
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      parts.isEmpty ? '只在磁盘上' : parts.join(' · '),
+                      '${discovered.host}:${discovered.port} · 待添加',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: AppType.monoLabel(color: fgMuted),
@@ -532,20 +457,7 @@ class _HistoryCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              if (isCurrent)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colors.primary.withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(PiShape.sm),
-                  ),
-                  child: Text('当前', style: AppType.eyebrow(color: colors.primary)),
-                )
-              else
-                Icon(Icons.play_arrow_rounded, size: 20, color: colors.primary),
+              Icon(Icons.add_circle_outline, size: 20, color: colors.primary),
             ],
           ),
         ),
@@ -554,36 +466,52 @@ class _HistoryCard extends StatelessWidget {
   }
 }
 
-/// 会话文件大小的人类可读形式。大会话是这个产品的常态(本机最大 50.40MB),
-/// 所以到 MB 就够,不做 GB 档。
-String formatSessionSize(int bytes) {
-  if (bytes < 1024) return '${bytes}B';
-  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)}KB';
-  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}MB';
-}
+/// 手动添加入口:最轻的一档卡,虚位以待的语义。
+class _AddDeviceCard extends StatelessWidget {
+  const _AddDeviceCard({required this.onTap});
 
-/// 会话时间戳的短形式:今天只给时刻,更早给日期。
-/// 解析失败返回 null —— 宁可不显示,也不显示一串 ISO8601 给人看。
-String? formatSessionTime(String? raw) {
-  if (raw == null || raw.isEmpty) return null;
-  final parsed = DateTime.tryParse(raw);
-  if (parsed == null) return null;
-  final local = parsed.toLocal();
-  final now = DateTime.now();
-  String two(int value) => value.toString().padLeft(2, '0');
-  if (local.year == now.year && local.month == now.month && local.day == now.day) {
-    return '今天 ${two(local.hour)}:${two(local.minute)}';
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+
+    return Material(
+      color: Colors.transparent,
+      shape: SquircleBorder(
+        borderRadius: BorderRadius.circular(PiShape.lg),
+        side: BorderSide(color: colors.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.add, size: 18, color: colors.primary),
+              const SizedBox(width: 8),
+              Text(
+                '手动添加设备',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: colors.primary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
-  if (local.year == now.year) return '${local.month}月${local.day}日';
-  return '${local.year}/${two(local.month)}/${two(local.day)}';
 }
 
-/// 空态:插画 + 衬线标题 + 说明。深色底版本。
-class _Placeholder extends StatelessWidget {
-  const _Placeholder({required this.title, required this.body});
+/// roster 为空时的首装空态:插画 + 衬线标题 + 主行动。
+class _EmptyRoster extends StatelessWidget {
+  const _EmptyRoster({required this.onAdd});
 
-  final String title;
-  final String body;
+  final VoidCallback onAdd;
 
   @override
   Widget build(BuildContext context) {
@@ -596,23 +524,27 @@ class _Placeholder extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // 矢量装饰替代插画 PNG:PNG 自带象牙纸底,深色页面上是一块灰方块。
-              // CustomPaint 天然透明,还能跟着主题色走。
               const EditorialOrnament(size: 132),
               const SizedBox(height: 22),
               Text(
-                title,
+                '还没有设备',
                 textAlign: TextAlign.center,
                 style: AppType.displayTitle(size: 22, color: colors.onSurface),
               ),
               const SizedBox(height: 10),
               Text(
-                body,
+                '在电脑上启动 bridge,\n同一局域网的设备会自动出现在这里。',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: colors.onSurfaceVariant,
                   height: 1.6,
                 ),
+              ),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: onAdd,
+                icon: const Icon(Icons.add),
+                label: const Text('手动添加设备'),
               ),
             ],
           ),
@@ -620,17 +552,4 @@ class _Placeholder extends StatelessWidget {
       ),
     );
   }
-}
-
-/// 窗口在列表里显示的标题。
-///
-/// 优先用会话名;pi 只在你显式命名时才写 `session_info.name`,所以大多数时候
-/// 是 null,这时退回目录名 —— 那才是用户脑子里区分窗口的方式。
-/// 绝不显示 `hostname:pid` 这种 sourceId,它对人没有意义。
-String windowTitleFor({required String? cwd, required String? sessionName}) {
-  final name = sessionName?.trim();
-  if (name != null && name.isNotEmpty) return name;
-  final dir = cwd?.split('/').where((part) => part.isNotEmpty).lastOrNull;
-  if (dir != null && dir.isNotEmpty) return dir;
-  return 'pi 窗口';
 }
