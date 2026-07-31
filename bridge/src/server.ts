@@ -2829,6 +2829,7 @@ const server = http.createServer((req, res) => {
       JSON.stringify({
         ok: true,
         hubId: sources.hubId,
+        name: config.p2p.deviceId,
         mobileClients: mobileClients.size,
         desktopSources: sources.list().filter((source) => source.kind === "desktop" && source.connected).length,
         cwd: currentCwd,
@@ -3150,6 +3151,7 @@ const stopAnnounce =
         port: config.port,
         hubId: sources.hubId,
         protocolVersion: HUB_PROTOCOL_VERSION,
+        name: config.p2p.deviceId,
       });
 
 // P2P(打洞)远程通道:作为 WebRTC host 挂到信令服,手机叫进来后在

@@ -99,9 +99,9 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
   void _openSessions(DeviceProfile device) {
     // 抽屉里要先关抽屉再 push,否则返回时落回抽屉下的页面,抽屉还开着。
     if (widget.inDrawer) Navigator.of(context).pop();
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => DeviceSessionsPage(device: device)));
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => DeviceSessionsPage(device: device)),
+    );
     // 点哪台,聊天页就指向哪台。
     ref.read(deviceManagerProvider.notifier).setActive(device.id);
   }
@@ -136,11 +136,9 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
   Widget _body(DeviceManagerState manager) {
     final colors = Theme.of(context).colorScheme;
 
-    if (manager.loaded && manager.devices.isEmpty) {
-      return _EmptyRoster(onAdd: () => _editDevice());
-    }
-
     // 发现区:已经在 roster 里(按 hubId 或地址命中)的不重复列。
+    // 必须在空 roster 判断前计算:首次使用时 roster 本来就是空的,
+    // 不能因此把已经发现的设备卡提前遮掉。
     final discovered = [
       for (final d in manager.discovered)
         if (!manager.devices.any(
@@ -150,6 +148,13 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
         ))
           d,
     ];
+
+    if (manager.loaded &&
+        manager.devices.isEmpty &&
+        discovered.isEmpty &&
+        !manager.isScanning) {
+      return _EmptyRoster(onAdd: () => _editDevice());
+    }
 
     return ListView(
       // 内容不足一屏时也要能下拉(下拉刷新是唯一全页刷新手势)。

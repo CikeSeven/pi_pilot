@@ -25,14 +25,23 @@ abstract class LanDiscovery {
   Future<void> rescan();
 
   /// 按平台选实现:
-  /// - Android / iOS / macOS:系统 NSD(bonsoir 插件);
-  /// - Windows / Linux:子网扫描(bonsoir 无这两个平台的实现);
+  /// - Android / iOS:系统 NSD(bonsoir) + Wi-Fi `/health` 单次兜底扫描;
+  /// - macOS:系统 NSD(bonsoir);
+  /// - Windows / Linux:子网扫描;
   /// - Web:空实现(浏览器无 mDNS,/health 扫描会被 CORS 拦)。
   static LanDiscovery platform({int scanPort = 9377}) {
     if (kIsWeb) return NoopLanDiscovery();
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
       case TargetPlatform.iOS:
+        return CompositeLanDiscovery([
+          BonsoirLanDiscovery(),
+          SubnetScanLanDiscovery(
+            port: scanPort,
+            wifiOnly: true,
+            interval: null,
+          ),
+        ]);
       case TargetPlatform.macOS:
         return BonsoirLanDiscovery();
       default:
@@ -54,6 +63,75 @@ class NoopLanDiscovery implements LanDiscovery {
 
   @override
   Future<void> rescan() async {}
+}
+
+/// 合并多个发现源。前面的 source 优先保留其名称和 TXT 元数据。
+class CompositeLanDiscovery implements LanDiscovery {
+  CompositeLanDiscovery(this._delegates);
+
+  final List<LanDiscovery> _delegates;
+  final _controller = StreamController<List<DiscoveredDevice>>.broadcast();
+  final Map<LanDiscovery, List<DiscoveredDevice>> _snapshots = {};
+  final List<StreamSubscription<List<DiscoveredDevice>>> _subscriptions = [];
+  bool _started = false;
+
+  @override
+  Stream<List<DiscoveredDevice>> get devices => _controller.stream;
+
+  @override
+  Future<void> start() async {
+    if (_started) return;
+    _started = true;
+    for (final delegate in _delegates) {
+      _subscriptions.add(
+        delegate.devices.listen((devices) {
+          _snapshots[delegate] = devices;
+          _emit();
+        }),
+      );
+    }
+    await Future.wait([
+      for (final delegate in _delegates) _run(delegate.start),
+    ]);
+  }
+
+  @override
+  Future<void> rescan() async {
+    await Future.wait([
+      for (final delegate in _delegates) _run(delegate.rescan),
+    ]);
+  }
+
+  @override
+  Future<void> stop() async {
+    _started = false;
+    await Future.wait([
+      for (final subscription in _subscriptions) subscription.cancel(),
+    ]);
+    _subscriptions.clear();
+    _snapshots.clear();
+    await Future.wait([for (final delegate in _delegates) _run(delegate.stop)]);
+  }
+
+  Future<void> _run(Future<void> Function() operation) async {
+    try {
+      await operation();
+    } catch (error, stackTrace) {
+      debugPrint('LAN discovery delegate unavailable: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
+
+  void _emit() {
+    if (_controller.isClosed) return;
+    final merged = <String, DiscoveredDevice>{};
+    for (final delegate in _delegates) {
+      for (final device in _snapshots[delegate] ?? const <DiscoveredDevice>[]) {
+        merged.putIfAbsent(device.dedupeKey, () => device);
+      }
+    }
+    _controller.add(merged.values.toList(growable: false));
+  }
 }
 
 /// mDNS 发现:监听 `_pipilot._tcp`,resolve 后从 TXT 取 hubId。
@@ -106,7 +184,11 @@ class BonsoirLanDiscovery implements LanDiscovery {
         service?.resolve(_discovery!.serviceResolver);
       case BonsoirDiscoveryEventType.discoveryServiceResolved:
         if (service is! ResolvedBonsoirService) return;
-        final host = service.host;
+        // bonjour-service 会把宿主机所有 Docker/VPN 地址也放进 A 记录,
+        // Android NSD 可能随机解析到不可达地址。新版 Bridge 在 TXT 中明确
+        // 广播物理 LAN IPv4;旧版没有该字段时仍回退系统解析结果。
+        final host =
+            _advertisedLanIpv4(service.attributes['ipv4']) ?? service.host;
         if (host == null || host.isEmpty || service.port <= 0) return;
         final device = DiscoveredDevice(
           hubId: service.attributes['hubId'] ?? '',
@@ -142,6 +224,20 @@ class BonsoirLanDiscovery implements LanDiscovery {
   }
 }
 
+String? _advertisedLanIpv4(String? value) {
+  if (value == null) return null;
+  final address = InternetAddress.tryParse(value.trim());
+  if (address == null || address.type != InternetAddressType.IPv4) return null;
+  final octets = address.rawAddress;
+  final first = octets[0];
+  final second = octets[1];
+  final isPrivate =
+      first == 10 ||
+      (first == 172 && second >= 16 && second <= 31) ||
+      (first == 192 && second == 168);
+  return isPrivate ? address.address : null;
+}
+
 /// 子网扫描兜底:枚举本机所在私网 /24,并发探测 `http://{ip}:9377/health`。
 ///
 /// `/health` 无鉴权但只暴露 hubId/cwd 等非机密信息,正好够认出一台 bridge。
@@ -150,26 +246,36 @@ class SubnetScanLanDiscovery implements LanDiscovery {
   SubnetScanLanDiscovery({
     this.port = 9377,
     this.interval = const Duration(seconds: 30),
+    this.wifiOnly = false,
   });
 
   final int port;
 
-  /// 重扫周期。设备上下线最多滞后一个周期,换来 254 台探测不打满网络。
-  final Duration interval;
+  /// null 表示只在 start/rescan 时扫描,适合移动端省电。
+  final Duration? interval;
+
+  /// 仅扫描 Wi-Fi 网络接口,避免移动端误扫蜂窝/VPN 私网段。
+  final bool wifiOnly;
 
   final _controller = StreamController<List<DiscoveredDevice>>.broadcast();
   Timer? _timer;
   bool _scanning = false;
   bool _stopped = false;
+  bool _started = false;
 
   @override
   Stream<List<DiscoveredDevice>> get devices => _controller.stream;
 
   @override
   Future<void> start() async {
+    if (_started) return;
+    _started = true;
     _stopped = false;
     unawaited(_scanOnce());
-    _timer = Timer.periodic(interval, (_) => unawaited(_scanOnce()));
+    final interval = this.interval;
+    if (interval != null) {
+      _timer = Timer.periodic(interval, (_) => unawaited(_scanOnce()));
+    }
   }
 
   Future<void> _scanOnce() async {
@@ -202,6 +308,9 @@ class SubnetScanLanDiscovery implements LanDiscovery {
         includeLinkLocal: false,
       );
       for (final iface in interfaces) {
+        if (wifiOnly && !_isWifiInterface(iface.name)) {
+          continue;
+        }
         for (final addr in iface.addresses) {
           if (addr.isLoopback) continue;
           final parts = addr.address.split('.');
@@ -209,7 +318,8 @@ class SubnetScanLanDiscovery implements LanDiscovery {
           final first = int.tryParse(parts[0]) ?? 0;
           final second = int.tryParse(parts[1]) ?? 0;
           // 只扫私网段,公网网卡不碰。
-          final isPrivate = first == 10 ||
+          final isPrivate =
+              first == 10 ||
               (first == 172 && second >= 16 && second <= 31) ||
               (first == 192 && second == 168);
           if (isPrivate) prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
@@ -247,27 +357,30 @@ class SubnetScanLanDiscovery implements LanDiscovery {
       final request = await client.get(host, port, '/health').timeout(timeout);
       final response = await request.close().timeout(timeout);
       if (response.statusCode != 200) return null;
-      final body = await response.transform(utf8.decoder).join().timeout(
-        timeout,
-      );
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(timeout);
       final json = jsonDecode(body);
       if (json is! Map || json['ok'] != true) return null;
       final hubId = json['hubId'] as String? ?? '';
       // 没有 hubId 的 200 不是 bridge(可能是别的 HTTP 服务)。
       if (hubId.isEmpty) return null;
       final cwd = json['cwd'] as String? ?? '';
-      return DiscoveredDevice(
+      final rawName = json['name'];
+      final configuredName = rawName is String ? rawName.trim() : '';
+      final device = DiscoveredDevice(
         hubId: hubId,
-        // /health 不带友好名,拿 cwd 末段顶上,用户添加时可改。
-        name: cwd.isNotEmpty
-            ? cwd
-                  .split(Platform.pathSeparator)
-                  .where((s) => s.isNotEmpty)
-                  .last
+        // 新版 /health 返回 P2P 配置中的设备名;旧版回退 cwd 末段。
+        name: configuredName.isNotEmpty
+            ? configuredName
+            : cwd.isNotEmpty
+            ? cwd.split(Platform.pathSeparator).where((s) => s.isNotEmpty).last
             : host,
         host: host,
         port: port,
       );
+      return device;
     } catch (_) {
       return null;
     }
@@ -282,8 +395,19 @@ class SubnetScanLanDiscovery implements LanDiscovery {
 
   @override
   Future<void> stop() async {
+    _started = false;
     _stopped = true;
     _timer?.cancel();
     _timer = null;
   }
+}
+
+bool _isWifiInterface(String name) {
+  final normalized = name.toLowerCase();
+  return normalized.startsWith('wlan') ||
+      normalized.startsWith('wl') ||
+      normalized == 'en0' ||
+      normalized == 'en1' ||
+      normalized.contains('wi-fi') ||
+      normalized.contains('wifi');
 }

@@ -97,6 +97,7 @@ test("Source Hub isolates clients and fences desktop mutations", async () => {
       PIPILOT_PORT: String(port),
       PIPILOT_TOKEN: "mobile-test-token",
       PIPILOT_DESKTOP_TOKEN: "desktop-test-token",
+      PIPILOT_P2P_DEVICE_ID: "test-device",
       PIPILOT_HEADLESS_AUTO_START: "false",
       PI_CWD: bridgeRoot,
     },
@@ -107,6 +108,10 @@ test("Source Hub isolates clients and fences desktop mutations", async () => {
   const peers: Peer[] = [];
   try {
     await waitForHealth(port, child);
+    const health = (await (
+      await fetch(`http://127.0.0.1:${port}/health`)
+    ).json()) as Record<string, unknown>;
+    assert.equal(health.name, "test-device");
     const desktop = await open(
       `ws://127.0.0.1:${port}/desktop?token=desktop-test-token`,
     );
