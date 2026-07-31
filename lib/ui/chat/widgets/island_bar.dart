@@ -93,9 +93,11 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     return state.selectedSource?.label ?? 'PiPilot';
   }
 
-  /// 工作状态:streaming 时从最后一个 item 推导模型在干什么。
-  /// 收起态显示「思考中 · 12s」,比会话名更有价值。
+  /// 工作状态:优先用桌面 working-activity 插件推过来的实时状态
+  /// (TUI Working 行同源,等待首 token/思考/工具执行都有明确文案,
+  /// 还自带「· 总30s」这类节奏);插件没跑时回落到本地推导。
   String? _workStatus(PiState state) {
+    if (state.activityStatus != null) return state.activityStatus;
     if (!state.isStreaming) return null;
     if (state.isCompacting) return '压缩中';
     if (state.items.isEmpty) return '生成中';
@@ -249,7 +251,8 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
             // 生成中:运行时长(替代迷你停止键——
             // 中断入口已经有两处:展开态的中断按钮、输入框的停止键,
             // 收起态再放一个就是第三处重复。改成运行时长更有信息价值。
-            if (state.isStreaming) ...[
+            // 插件状态自带节奏(「· 总30s」),不再重复显示本地计时。
+            if (state.isStreaming && state.activityStatus == null) ...[
               const SizedBox(width: 8),
               const _StreamTimer(),
             ],

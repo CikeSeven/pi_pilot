@@ -734,6 +734,16 @@ export class DesktopRelay {
     this.sendEvent(event);
   }
 
+  /**
+   * working-activity 插件(TUI Working 行)的纯文本状态镜像。
+   *
+   * 走 pi.events 总线进来,不属于某个具体会话 ctx —— 状态行是「这个 pi
+   * 正在干什么」的全局信息,手机灵动岛直接显示,和桌面 Working 行同源。
+   */
+  sendActivityStatus(text: string | null): void {
+    this.sendEvent({ type: "working_activity", text });
+  }
+
   emitMessageUpdate<T extends { message?: unknown }>(
     event: T,
     ctx: ExtensionContext,

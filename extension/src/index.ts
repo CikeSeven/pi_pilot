@@ -115,6 +115,18 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   // 插件自己也同样卡在等人敲键盘。
   pi.on("tool_call", async (event, ctx) => await relay?.interceptAsk(event, ctx));
 
+  // working-activity 插件(TUI Working 行)的纯文本状态实时镜像到手机。
+  // 插件每个 render 分支把纯文本状态 emit 到 pi.events 总线,这里转发给
+  // bridge 广播 —— 手机灵动岛显示的和桌面 Working 行是同一份内容,
+  // 不再是手机端自己从 items 推导的二手状态。
+  pi.events.on("working-activity:status", (data) => {
+    const text =
+      data && typeof data === "object"
+        ? ((data as { text?: string | null }).text ?? null)
+        : null;
+    relay?.sendActivityStatus(text);
+  });
+
   registerNavCommands(pi, navCache, (result, ctx) => {
     relay?.emitNavResult(result, ctx);
   });
