@@ -376,10 +376,14 @@ LanDiscovery 发现 hubId=H 出现在 host=H2(H2≠H1)
 2. ✅ `lib/core/device_models.dart` — 纯模型 + JSON,零依赖
 3. ✅ `SettingsRepository` roster CRUD + 迁移
 4. ✅ 设备页两级 UI + 添加/编辑 sheet(DeviceManager 占位骨架,数据走 mock/单设备)
-5. ⬜ DeviceManager 正式版 + `pi_session.dart` family 化 + UI 消费点机械替换
-6. ⬜ `lib/core/lan_discovery.dart`(bonsoir + 子网扫描)+ 平台权限配置
-7. ⬜ bridge `announce.ts` + config
-8. ⬜ sync_store deviceId 列迁移 + notification 扇出
-9. ⬜ 端到端:两台 bridge(一台 LAN 一台 P2P)同时在线、切换、DHCP 自愈
+5. ✅ DeviceManager 正式版 + `pi_session.dart` family 化 + UI 消费点机械替换
+6. ✅ `lib/core/lan_discovery.dart`(bonsoir + 子网扫描)+ 平台权限配置
+7. ✅ bridge `announce.ts` + server 接线(bonjour-service,回环监听时不宣告)
+8. ✅ sync_store op_log device_key 列迁移 + 非活跃设备通知扇出(device_alerts.dart)
+9. ⬜ 端到端:两台 bridge(一台 LAN 一台 P2P)同时在线、切换、DHCP 自愈 —— **需要真机**
 
-本次交付 = 1–4(方案 + 模型/存储骨架 + UI 代码);5–9 为后续迭代。
+本次交付 = 1–4(方案 + 模型/存储骨架 + UI 代码);5–8 已由迭代 2–4 完成
+(分支 feat/multi-device-state / -discovery / -alerts);9 需要真机环境验证。
+
+已知留尾(v1 不含):非活跃设备断线提醒、多设备 FGS 常驻文案聚合、
+native watcher 只管活跃设备。
