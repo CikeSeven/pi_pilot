@@ -108,6 +108,12 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   int? _pendingJumpRow;
   final _jumpKey = GlobalKey();
 
+  /// 滚动进度(0~1),滚动时逐帧更新,驱动轨道游标连续滑动。
+  ///
+  /// 必须是 listenable:滚动本身不触发 ChatBody rebuild,
+  /// 游标如果吃 build 里现算的值,会停在滚动前的位置不动。
+  final _scrollProgress = ValueNotifier<double>(0);
+
   void _showRail() {
     _railHideTimer?.cancel();
     if (!_railVisible) setState(() => _railVisible = true);
@@ -208,6 +214,15 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   void _onScroll() {
     _showRail();
     _scheduleRailHide();
+    if (_scroll.hasClients) {
+      final position = _scroll.position;
+      final extent = position.hasContentDimensions
+          ? position.maxScrollExtent
+          : 0;
+      _scrollProgress.value = extent > 0
+          ? (position.pixels / extent).clamp(0.0, 1.0)
+          : 0;
+    }
     if (_autoLoading || !_scroll.hasClients) return;
     final position = _scroll.position;
     final state = ref.read(piSessionProvider);
@@ -420,6 +435,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   @override
   void dispose() {
     _railHideTimer?.cancel();
+    _scrollProgress.dispose();
     _input.dispose();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
@@ -674,15 +690,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   child: MessageNavRail(
                     visible: _railVisible || _railInteracting,
                     anchors: _navAnchors,
-                    currentRow:
-                        _scroll.hasClients &&
-                            _scroll.position.hasContentDimensions &&
-                            _scroll.position.maxScrollExtent > 0
-                        ? (_scroll.position.pixels /
-                                  _scroll.position.maxScrollExtent *
-                                  (_rows.length - 1))
-                              .round()
-                        : -1,
+                    progress: _scrollProgress,
                     onJump: _jumpToRow,
                     onInteractionChanged: (interacting) {
                       _railInteracting = interacting;
