@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -72,7 +74,8 @@ class _DevicesBody extends ConsumerStatefulWidget {
 }
 
 class _DevicesBodyState extends ConsumerState<_DevicesBody> {
-  /// 打开添加/编辑 sheet 并落库。新设备保存后直接进它的会话页。
+  /// 打开添加/编辑 sheet 并落库。保存后**留在列表页**:连接结果直接
+  /// 显示在设备卡上,连上了用户自己点进去——不再未经成功就跳转。
   Future<void> _editDevice({
     DeviceProfile? existing,
     DiscoveredDevice? discovered,
@@ -83,15 +86,69 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
       discovered: discovered,
     );
     if (result == null || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
     final notifier = ref.read(deviceManagerProvider.notifier);
-    if (result.deleted) {
-      if (existing != null) await notifier.removeDevice(existing.id);
-      return;
+    final device = result.device;
+    try {
+      if (result.deleted) {
+        if (existing != null) {
+          await notifier.removeDevice(existing.id);
+          if (mounted) {
+            messenger.showSnackBar(const SnackBar(content: Text('设备已删除')));
+          }
+        }
+        return;
+      }
+      if (device == null) return;
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 30),
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text('正在保存并连接 ${device.name}…')),
+            ],
+          ),
+        ),
+      );
+      await notifier.upsertDevice(device);
+      if (!mounted) return;
+      final saved = ref
+          .read(deviceManagerProvider)
+          .devices
+          .any((item) => item.id == device.id);
+      if (!saved) {
+        throw StateError('保存完成后设备列表未更新');
+      }
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(_isEdit(existing) ? '设备已保存，正在重新连接' : '设备已保存，正在连接'),
+        ),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Device save failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (!mounted) return;
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(content: Text('保存设备失败：${_deviceSaveError(error)}')),
+      );
     }
-    final device = result.device!;
-    await notifier.upsertDevice(device);
-    if (!mounted || _isEdit(existing)) return;
-    _openSessions(device);
+  }
+
+  String _deviceSaveError(Object error) {
+    final message = error.toString().replaceFirst(
+      RegExp(r'^\w*(?:Error|Exception):\s*'),
+      '',
+    );
+    return message.isEmpty ? '请重试' : message;
   }
 
   bool _isEdit(DeviceProfile? existing) => existing != null;
@@ -165,8 +222,11 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
           _RosterDeviceCard(
             device: device,
             isActive: device.id == manager.activeDeviceId,
-            onTap: () => _openSessions(device),
-            onLongPress: () => _editDevice(existing: device),
+            onOpen: () => _openSessions(device),
+            onEdit: () => _editDevice(existing: device),
+            onRetry: () => unawaited(
+              ref.read(deviceManagerProvider.notifier).connectDevice(device),
+            ),
           ),
           const SizedBox(height: 10),
         ],
@@ -305,16 +365,17 @@ class _Header extends StatelessWidget {
 
 /// 已添加设备卡:**当前设备陶土橙实心**,其余深色抬升面 + 描边。
 ///
-/// 与旧 _DeviceCard(现 _WindowCard)同一套视觉语言:
-/// 方正印章图标、monoLabel 副标、流式 spinner、「当前」chip。
-/// 长按进编辑;短按进这台设备的会话页。
+/// 连接结果直接长在卡片上:连接中转圈、失败显示原因并把右侧换成
+/// 重试按钮、成功才出现 chevron/「当前」标。**只有在线能点进会话页**;
+/// 未连接/失败/连接中点卡片弹出编辑弹窗改连接信息。
 /// 状态来自这台设备自己的 family 实例。
 class _RosterDeviceCard extends ConsumerWidget {
   const _RosterDeviceCard({
     required this.device,
     required this.isActive,
-    required this.onTap,
-    required this.onLongPress,
+    required this.onOpen,
+    required this.onEdit,
+    required this.onRetry,
   });
 
   final DeviceProfile device;
@@ -323,8 +384,14 @@ class _RosterDeviceCard extends ConsumerWidget {
   /// 在线 ≠ 当前,当前设备掉线时也保持当前标。
   final bool isActive;
 
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
+  /// 在线时点卡片:进入这台设备的会话页。
+  final VoidCallback onOpen;
+
+  /// 不在线时点卡片(或长按):弹编辑弹窗改连接信息。
+  final VoidCallback onEdit;
+
+  /// 右侧重试按钮(不在线且不处于连接中时显示)。
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -334,6 +401,7 @@ class _RosterDeviceCard extends ConsumerWidget {
 
     final online = conn.status == PiConnStatus.connected;
     final connecting = conn.status == PiConnStatus.connecting;
+    final failed = conn.status == PiConnStatus.failed;
     final streaming = online && conn.sessions.any((item) => item.streaming);
     final windowCount = online
         ? conn.sources.where((s) => s.isDesktop && s.connected).length
@@ -346,12 +414,14 @@ class _RosterDeviceCard extends ConsumerWidget {
         ? colors.onPrimary.withValues(alpha: 0.78)
         : colors.onSurfaceVariant;
 
-    // 副标:在线 → 通道 + 窗口数;连接中 → 提示;离线 → 传输偏好。
+    // 副标:在线 → 通道 + 窗口数;连接中 → 提示;失败 → 原因;
+    // 从未连上 → 传输偏好 + 点按提示。
     final subtitle = switch ((online, connecting, streaming)) {
       (true, _, true) => '正在生成…',
       (true, _, false) => '${device.transportLabel} · $windowCount 个窗口',
       (_, true, _) => '连接中…',
-      _ => device.transportLabel,
+      _ when failed => conn.error ?? '连接失败,点按修改配置',
+      _ => '${device.transportLabel} · 点按配置连接',
     };
 
     return Material(
@@ -364,8 +434,9 @@ class _RosterDeviceCard extends ConsumerWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: onTap,
-        onLongPress: onLongPress,
+        // 只有连接成功才进会话页;其余状态点卡片 = 改连接信息。
+        onTap: online ? onOpen : onEdit,
+        onLongPress: onEdit,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 15, 16, 15),
           child: Row(
@@ -402,17 +473,31 @@ class _RosterDeviceCard extends ConsumerWidget {
                       subtitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppType.monoLabel(color: fgMuted),
+                      style: AppType.monoLabel(
+                        color: failed && !isActive ? colors.error : fgMuted,
+                      ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: 10),
-              if (streaming || connecting)
+              if (connecting || streaming)
                 SizedBox(
                   width: 18,
                   height: 18,
                   child: CircularProgressIndicator(strokeWidth: 2.2, color: fg),
+                )
+              else if (!online)
+                // 离线/失败:右侧换成重试按钮,失败时用错误色强调。
+                IconButton(
+                  onPressed: onRetry,
+                  tooltip: '重试连接',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(
+                    Icons.refresh,
+                    size: 20,
+                    color: isActive ? fg : (failed ? colors.error : fgMuted),
+                  ),
                 )
               else if (isActive)
                 Container(
