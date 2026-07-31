@@ -18,9 +18,7 @@ import '../theme/typography.dart';
 /// (删除通过 [DeviceEditSheetResult.deleted] 标记)。
 class DeviceEditSheetResult {
   const DeviceEditSheetResult.saved(this.device) : deleted = false;
-  const DeviceEditSheetResult.deleted()
-    : deleted = true,
-      device = null;
+  const DeviceEditSheetResult.deleted() : deleted = true, device = null;
 
   final DeviceProfile? device;
   final bool deleted;
@@ -108,8 +106,16 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
       return;
     }
     final port = int.tryParse(_port.text.trim()) ?? 9377;
-    if (_token.text.trim().isEmpty) {
+    final token = _token.text.trim();
+    if (token.isEmpty) {
       setState(() => _error = 'Token 不能为空——发现只解决「找得到」,鉴权仍要 token');
+      return;
+    }
+    // 防呆:密码框遮住内容,把别的东西(报错文本、地址…)粘进去用户根本
+    // 看不见,存下来就是「鉴权被拒」。真 token 不含空白和全角字符,
+    // 出现即拦下让用户重粘。
+    if (RegExp(r'[\s\u4e00-\u9fff：]').hasMatch(token)) {
+      setState(() => _error = 'Token 含有空格或中文——多半是把别的内容粘进了密码框,请清空后重新粘贴');
       return;
     }
     final wantsP2p = _transport != DeviceTransport.lan;
@@ -129,12 +135,10 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
           : _name.text.trim(),
       host: parsed.host,
       port: parsed.port ?? port,
-      token: _token.text.trim(),
+      token: token,
       transport: _transport,
       // 填全了才存;残缺的三要素等于没配(避免「以为有回落其实没有」)。
-      p2pRendezvous: wantsP2p && p2pComplete
-          ? _rendezvous.text.trim()
-          : null,
+      p2pRendezvous: wantsP2p && p2pComplete ? _rendezvous.text.trim() : null,
       p2pDeviceId: wantsP2p && p2pComplete ? _p2pDeviceId.text.trim() : null,
       p2pSecret: wantsP2p && p2pComplete ? _secret.text.trim() : null,
       lastHubId: widget.existing?.lastHubId ?? widget.discovered?.hubId,
@@ -152,10 +156,7 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
     final colors = theme.colorScheme;
 
     return Container(
-      decoration: ShapeDecoration(
-        color: colors.surface,
-        shape: PiShape.sheet,
-      ),
+      decoration: ShapeDecoration(color: colors.surface, shape: PiShape.sheet),
       clipBehavior: Clip.antiAlias,
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
@@ -268,11 +269,7 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
                 icon: Icons.hub_outlined,
               ),
               const SizedBox(height: 12),
-              _field(
-                _p2pDeviceId,
-                label: '设备名(信令服上)',
-                icon: Icons.memory,
-              ),
+              _field(_p2pDeviceId, label: '设备名(信令服上)', icon: Icons.memory),
               const SizedBox(height: 12),
               _field(_secret, label: '配对密钥', icon: Icons.lock_outline),
             ],
@@ -280,9 +277,7 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
               const SizedBox(height: 14),
               Text(
                 _error!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colors.error,
-                ),
+                style: theme.textTheme.bodySmall?.copyWith(color: colors.error),
               ),
             ],
             const SizedBox(height: 20),
