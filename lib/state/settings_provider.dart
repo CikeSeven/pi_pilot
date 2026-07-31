@@ -30,6 +30,8 @@ class AppSettings {
     this.p2pSecret = '',
     this.clientId = '',
     this.loaded = false,
+    this.chatFontScale = 1.0,
+    this.chatLineHeight = 1.45,
   });
 
   final String host;
@@ -78,6 +80,13 @@ class AppSettings {
   /// 去重请求,不必等旧租约 TTL。首次启动生成并持久化。
   final String clientId;
 
+  /// 聊天正文字号缩放(1.0 = 跟随主题默认)。只影响消息正文,
+  /// 不动工具卡/代码块等结构元素 —— 它们有自己的紧凑排版。
+  final double chatFontScale;
+
+  /// 聊天正文行高倍数(相对字号)。
+  final double chatLineHeight;
+
   /// 是否已完成首次从磁盘的加载(用于触发自动连接)。
   final bool loaded;
 
@@ -112,6 +121,8 @@ class AppSettings {
     String? p2pSecret,
     String? clientId,
     bool? loaded,
+    double? chatFontScale,
+    double? chatLineHeight,
   }) {
     return AppSettings(
       host: host ?? this.host,
@@ -136,6 +147,8 @@ class AppSettings {
       p2pSecret: p2pSecret ?? this.p2pSecret,
       clientId: clientId ?? this.clientId,
       loaded: loaded ?? this.loaded,
+      chatFontScale: chatFontScale ?? this.chatFontScale,
+      chatLineHeight: chatLineHeight ?? this.chatLineHeight,
     );
   }
 }
@@ -143,6 +156,25 @@ class AppSettings {
 final settingsProvider = NotifierProvider<SettingsNotifier, AppSettings>(
   SettingsNotifier.new,
 );
+
+/// 聊天正文样式:主题 bodyLarge 为基准 × 用户字号缩放,行高用用户倍数。
+///
+/// 气泡(流式/完成)、markdown、流式光标的高度计算统一从这里取 ——
+/// 改设置时所有阅读面一起变,也不会出现「流式时字大、渲染完成后字小」
+/// 的跳变(以前流式用 bodyLarge、完成后 markdown 用 bodyMedium)。
+TextStyle chatBodyStyle(
+  BuildContext context,
+  AppSettings settings, {
+  Color? color,
+}) {
+  final base =
+      Theme.of(context).textTheme.bodyLarge ?? const TextStyle(fontSize: 16);
+  return base.copyWith(
+    fontSize: (base.fontSize ?? 16) * settings.chatFontScale,
+    height: settings.chatLineHeight,
+    color: color,
+  );
+}
 
 class SettingsNotifier extends Notifier<AppSettings> {
   final SettingsRepository _repo = SettingsRepository();
@@ -180,6 +212,8 @@ class SettingsNotifier extends Notifier<AppSettings> {
       p2pDeviceId: data.p2pDeviceId,
       p2pSecret: data.p2pSecret,
       clientId: data.clientId ?? '',
+      chatFontScale: data.chatFontScale,
+      chatLineHeight: data.chatLineHeight,
       loaded: true,
     );
   }
@@ -256,6 +290,22 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setAccent(AppAccent accent) async {
     state = state.copyWith(accent: accent);
     await _repo.saveAccent(accent.name);
+  }
+
+  /// 聊天排版(字号缩放/行高)。两个值打包持久化,避免两次写盘之间
+  /// 出现「字号已保存、行高还是旧值」的中间态。
+  Future<void> setChatTypography({
+    double? fontScale,
+    double? lineHeight,
+  }) async {
+    state = state.copyWith(
+      chatFontScale: fontScale,
+      chatLineHeight: lineHeight,
+    );
+    await _repo.saveChatTypography(
+      fontScale: state.chatFontScale,
+      lineHeight: state.chatLineHeight,
+    );
   }
 
   /// ICE 模式缓存:上次打洞成功用 direct 还是 relay(按 deviceId)。

@@ -191,9 +191,9 @@ class _ComposerState extends State<Composer> {
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: colors.shadow.withValues(alpha: 0.06),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
+                      color: colors.shadow.withValues(alpha: 0.04),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
                     ),
                   ],
                 ),
@@ -233,27 +233,34 @@ class _ComposerState extends State<Composer> {
                         ),
                       ),
                       // 第二行:模型选择胶囊 + 上下文环 + 发送键
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          const ModelPicker(),
-                          const SizedBox(width: 8),
-                          const _ContextRing(),
-                          const Spacer(),
-                          _SendButton(
-                            showStop: showStop,
-                            enabled: sendEnabled,
-                            onTap: () {
-                              if (showStop) {
-                                HapticFeedback.mediumImpact();
-                                widget.onAbort!();
-                              } else {
-                                HapticFeedback.lightImpact();
-                                widget.onSend();
-                              }
-                            },
-                          ),
-                        ],
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          // 模型面板展开宽 = Row 宽 − 上下文环(30) − 间距(8)
+                          // − 发送键(48) − 余量(4)。不定宽 240:小屏溢出。
+                          final pickerMax = constraints.maxWidth - 90;
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              ModelPicker(maxExpandedWidth: pickerMax),
+                              const SizedBox(width: 8),
+                              const _ContextRing(),
+                              const Spacer(),
+                              _SendButton(
+                                showStop: showStop,
+                                enabled: sendEnabled,
+                                onTap: () {
+                                  if (showStop) {
+                                    HapticFeedback.mediumImpact();
+                                    widget.onAbort!();
+                                  } else {
+                                    HapticFeedback.lightImpact();
+                                    widget.onSend();
+                                  }
+                                },
+                              ),
+                            ],
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -273,10 +280,14 @@ enum _PickerView { models, thinking }
 /// 模型选择胶囊:**液态玻璃,点一下像灵动岛一样变长变宽**。
 ///
 /// 收起态:小胶囊显示当前模型名(132×32)。
-/// 展开态:列表卡(240×内容),从胶囊位置向上生长,
+/// 展开态:列表卡(≤240×内容),从胶囊位置向上生长,
 /// 列出 `getAvailableModels()` 返回的全部模型,选一个即切换并收起。
 class ModelPicker extends ConsumerStatefulWidget {
-  const ModelPicker({super.key});
+  const ModelPicker({super.key, this.maxExpandedWidth = 240});
+
+  /// 展开时的最大宽度。调用方按 Row 剩余空间传入(卡内宽 − 上下文环
+  /// − 发送键),防止 240 定宽在小屏上溢出 RIGHT OVERFLOWED。
+  final double maxExpandedWidth;
 
   @override
   ConsumerState<ModelPicker> createState() => _ModelPickerState();
@@ -387,10 +398,12 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
         ? '$currentName · ${_levelLabel(thinking)}'
         : currentName;
 
+    // 展开宽:理想 240,但不超过调用方给的可用宽(小屏防溢出)。
+    final expandedWidth = widget.maxExpandedWidth.clamp(160.0, 240.0);
     return AnimatedContainer(
       duration: const Duration(milliseconds: 320),
       curve: Curves.easeInOutCubic,
-      width: _expanded ? 240 : 132,
+      width: _expanded ? expandedWidth : 132,
       height: _expanded ? _expandedHeight : 32,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(

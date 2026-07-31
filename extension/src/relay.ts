@@ -734,6 +734,16 @@ export class DesktopRelay {
     this.sendEvent(event);
   }
 
+  /**
+   * working-activity 插件(TUI Working 行)的纯文本状态镜像。
+   *
+   * 走 pi.events 总线进来,不属于某个具体会话 ctx —— 状态行是「这个 pi
+   * 正在干什么」的全局信息,手机灵动岛直接显示,和桌面 Working 行同源。
+   */
+  sendActivityStatus(text: string | null): void {
+    this.sendEvent({ type: "working_activity", text });
+  }
+
   emitMessageUpdate<T extends { message?: unknown }>(
     event: T,
     ctx: ExtensionContext,
@@ -817,7 +827,13 @@ export class DesktopRelay {
       this.reconnectAttempt = 0;
       this.registered = false;
       this.newEpoch();
-      this.sendRegistration();
+      try {
+        this.sendRegistration();
+      } catch (err) {
+        this.setStatus(
+          `PiPilot: registration failed (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
     });
     socket.on("message", (data) => this.handleHubMessage(data.toString()));
     socket.on("close", () => {
@@ -1181,7 +1197,29 @@ export class DesktopRelay {
     const ctx = this.liveCtx();
     if (!ctx) return undefined;
     const branch = ctx.sessionManager.getBranch();
-    let entries = cloneForWire(branch, MAX_CAPTURE_BYTES) as unknown as JsonObject[];
+    // branch 本身可能超过 MAX_CAPTURE_BYTES(64MB),直接 clone 会抛出未捕获
+    // 异常导致 pi 退出。逐步截断最老的消息再重试;截断时设置 snapshotTruncated
+    // 让客户端知道历史不完整。
+    let entries: JsonObject[];
+    let branchTruncated = false;
+    {
+      let working = branch;
+      for (;;) {
+        try {
+          entries = cloneForWire(working, MAX_CAPTURE_BYTES) as unknown as JsonObject[];
+          break;
+        } catch {
+          if (working.length <= 1) {
+            entries = [];
+            branchTruncated = true;
+            break;
+          }
+          const removeCount = Math.max(1, Math.floor(working.length / 4));
+          working = working.slice(removeCount);
+          branchTruncated = true;
+        }
+      }
+    }
     const models = ctx.modelRegistry.getAvailable().map((model) => serializeModel(model));
     const contextUsage = ctx.getContextUsage();
     const state: JsonObject = {
@@ -1201,6 +1239,7 @@ export class DesktopRelay {
       pendingMessageCount: ctx.hasPendingMessages() ? 1 : 0,
       contextUsage: contextUsage ?? null,
     };
+    if (branchTruncated) state.snapshotTruncated = true;
 
     let stats: JsonObject | undefined;
     try {

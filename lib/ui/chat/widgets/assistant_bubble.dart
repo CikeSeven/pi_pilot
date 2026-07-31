@@ -2,32 +2,26 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
+import '../../../state/settings_provider.dart';
 import '../../theme/motion.dart';
-import '../../theme/paper.dart';
-import '../../theme/squircle.dart';
-import '../../theme/shapes.dart';
-import '../../theme/typography.dart';
 import 'markdown_body.dart';
 import 'message_actions_sheet.dart';
 import 'streaming_cursor.dart';
 import 'thinking_block.dart';
 import 'typing_indicator.dart';
 
-/// 助手消息:**编辑式署名行 + 描边奶油纸卡**。
+/// 助手消息:**无框裸排正文**(Claude/ChatGPT 风格)。
 ///
-/// Editorial Retro 改版。旧版是「完全裸排」——正文直接铺在页面上,靠留白
-/// 与用户消息分段。那在纯色底上成立,但新的纸底 + 陶土橙用户卡之下,
-/// 裸排的 AI 正文显得没有承载、和工具卡也失去了并列关系。
+/// 正文不套卡片、没有署名行——文字直接排在屏幕背景上。卡片框和
+/// 「PI · 回应」标头会让每段回复都像「便签纸」,读长文时视线被反复
+/// 打断;裸排才是「在和人对话」。代码块/引用等内部元素仍保留自己的
+/// 井底,那是内容层级的一部分。思考块收在胶囊里,点开才展开。
 ///
-/// 现在的结构(对齐参考图):
+/// 结构:
 /// ```
-/// ✦ PI · 回应            ← 编辑式署名行(衬线小标 + 细线延伸)
-/// ┌──────────────────┐
-/// │ 正文 / Markdown   │   ← 描边奶油卡,零阴影
-/// └──────────────────┘
+/// (思考胶囊)
+/// 正文 / Markdown         ← 无框裸排,直接铺在背景上
 /// ```
-/// 卡片承载正文而不是裸排,理由:一屏里 AI 回应、工具卡、用户纸条
-/// 三者需要同一套「纸片放在桌面上」的语言,裸排会让 AI 回应掉出这套系统。
 class AssistantBubble extends ConsumerWidget {
   const AssistantBubble({super.key, required this.item});
 
@@ -37,6 +31,7 @@ class AssistantBubble extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final settings = ref.watch(settingsProvider);
     final streaming = !item.complete;
 
     // 空回复不渲染:AI 直接调用工具时会产生一个 text 和 thinking 都空的
@@ -46,9 +41,7 @@ class AssistantBubble extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final bodyStyle = theme.textTheme.bodyLarge?.copyWith(
-      color: colors.onSurface,
-    );
+    final bodyStyle = chatBodyStyle(context, settings, color: colors.onSurface);
 
     final Widget body;
     if (item.text.isEmpty && streaming) {
@@ -56,24 +49,32 @@ class AssistantBubble extends ConsumerWidget {
     } else if (streaming) {
       // 流式期:纯文本(零解析开销) + 末尾闪烁竖线光标。
       //
-      // 光标作为独立 WidgetSpan 而不是拼接 '▍' 字符:字符拼接会跟着文本
-      // 末尾位置一起跳、也不会闪。StrutStyle 锁行高,光标不撑高当前行。
+      // 光标对齐用 middle(行框内垂直居中)而不是 baseline:
+      // baseline 对齐是「光标底部贴正文 baseline」,18px 高的光标从
+      // baseline 向上冒,比大写字母还高出一截,多行时像顶进上一行。
+      // middle 对齐让光标在行框内居中,前后再加一个 hair space,
+      // 既不贴最后一个字,也不撑高当前行(strut 已锁行高)。
+      // 光标高度跟正文行高走(~72%),字号/行距设置变了它也变。
+      final linePx =
+          (bodyStyle.fontSize ?? 16) * (bodyStyle.height ?? 1.45);
       body = SelectableText.rich(
         TextSpan(
           text: item.text,
           style: bodyStyle,
           children: [
+            const TextSpan(text: '\u200A'),
             WidgetSpan(
-              alignment: PlaceholderAlignment.baseline,
-              baseline: TextBaseline.alphabetic,
-              child: StreamingCursor(color: colors.primary),
+              alignment: PlaceholderAlignment.middle,
+              child: StreamingCursor(
+                color: colors.primary,
+                height: linePx * 0.72,
+              ),
             ),
           ],
         ),
         // 行高锁定在正文字阶上 —— 光标不撑高当前行。
-        // 字号/行高都从 bodyLarge 取,不手写数字。
         strutStyle: StrutStyle.fromTextStyle(
-          bodyStyle ?? const TextStyle(),
+          bodyStyle,
           forceStrutHeight: true,
         ),
       );
@@ -92,122 +93,37 @@ class AssistantBubble extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 署名行只在有正文时显示:纯思考(无正文卡)不需要署名。
-            if (item.text.isNotEmpty || streaming) ...[
-              _Byline(streaming: streaming),
-              const SizedBox(height: 8),
-            ],
-            // 思考块在卡外:它是「过程」,正文卡是「结论」,不该混在一张纸上。
+            // 思考块:生成中是深卡+波形,完成后收成「思考了 Xs」单行。
             if (item.thinking.isNotEmpty) ...[
-              ThinkingBlock(thinking: item.thinking, streaming: streaming),
-              const SizedBox(height: 8),
+              ThinkingBlock(
+                thinking: item.thinking,
+                streaming: streaming,
+                duration: item.thinkingDuration,
+              ),
+              // 胶囊与正文的间距:2+2+2 = 6px,紧凑不空廈。
+              const SizedBox(height: 2),
             ],
-            // 正文纸卡:只在有内容或正在生成时渲染。
-            // text 为空且非 streaming = AI 纯思考/纯工具调用,不画空壳。
+            // 正文:无框纯文字(Claude/ChatGPT 风格)——文字直接排在
+            // 屏幕背景上,不套卡片。卡片框会让每段回复都像「便签纸」，
+            // 读长文时视线被边框反复打断;裸排才有「在和人对话」的感觉。
+            // 代码块/引用等内部元素仍保留自己的井底,那是内容的一部分。
             if (item.text.isNotEmpty || streaming)
-              Material(
-                color: colors.surfaceContainerLow,
-                shape: SquircleBorder(
-                  borderRadius: BorderRadius.circular(PiShape.md),
-                  side: BorderSide(color: colors.outlineVariant),
-                  smoothing: PiShape.smoothing,
+              Padding(
+                // 左右 6px 呼吸:正文比署名行稍稍内缩,形成版式层次。
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6,
+                  vertical: 2,
                 ),
-                elevation: 1,
-                clipBehavior: Clip.antiAlias,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-                  child: AnimatedSwitcher(
-                    duration: PiMotion.quick,
-                    switchInCurve: PiMotion.enter,
-                    child: KeyedSubtree(key: ValueKey(streaming), child: body),
-                  ),
+                child: AnimatedSwitcher(
+                  duration: PiMotion.quick,
+                  switchInCurve: PiMotion.enter,
+                  child: KeyedSubtree(key: ValueKey(streaming), child: body),
                 ),
               ),
             if (item.isErrored) const _AssistantErrorBadge(),
           ],
         ),
       ),
-    );
-  }
-}
-
-/// AI 回应的编辑式署名行:`✦ PI ———————`。
-///
-/// 参考图里每段 AI 回答上方都有这样一行小标 + 细线,是「杂志栏目」语言。
-/// 生成中时星芒换成脉冲点,让状态在署名行就能读到。
-class _Byline extends StatefulWidget {
-  const _Byline({required this.streaming});
-
-  final bool streaming;
-
-  @override
-  State<_Byline> createState() => _BylineState();
-}
-
-class _BylineState extends State<_Byline> with SingleTickerProviderStateMixin {
-  // 生成中时图标缓慢呼吸,「正在想」的律动。
-  late final AnimationController _pulse = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1600),
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.streaming) _pulse.repeat(reverse: true);
-  }
-
-  @override
-  void didUpdateWidget(_Byline old) {
-    super.didUpdateWidget(old);
-    // 生成结束:停住呼吸(停在自然位);重新生成:再启动。
-    if (widget.streaming && !old.streaming) {
-      _pulse.repeat(reverse: true);
-    } else if (!widget.streaming && old.streaming) {
-      _pulse.stop();
-      _pulse.value = 0;
-    }
-  }
-
-  @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final fg = colors.primary;
-    return Row(
-      children: [
-        // 图标:生成中时是 blur_on 并缓慢呼吸;完成时是 auto_awesome。
-        // 不用 AnimatedSwitcher —— 它与无限循环的 AnimatedBuilder 嵌套会让
-        // element 树混乱。这里用单一 AnimatedBuilder,在 builder 内部按状态
-        // 换 iconData 和缩放,结构最简、不会报错。
-        AnimatedBuilder(
-          animation: _pulse,
-          builder: (context, _) {
-            // 生成中:缩放随呼吸走(0.75↔1.1);完成:固定 1.0。
-            final s = widget.streaming ? 0.75 + 0.35 * _pulse.value : 1.0;
-            return Transform.scale(
-              scale: s,
-              child: Icon(
-                widget.streaming ? Icons.blur_on : Icons.auto_awesome,
-                size: 13,
-                color: fg,
-              ),
-            );
-          },
-        ),
-        const SizedBox(width: 7),
-        Text(
-          widget.streaming ? 'PI · 正在回应' : 'PI · 回应',
-          style: AppType.eyebrow(color: fg),
-        ),
-        const SizedBox(width: 12),
-        Expanded(child: EditorialRule(color: colors.outlineVariant)),
-      ],
     );
   }
 }

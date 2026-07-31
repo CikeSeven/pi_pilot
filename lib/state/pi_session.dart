@@ -49,6 +49,14 @@ class AssistantItem extends ChatItem {
   bool complete = false;
   DateTime? time;
 
+  /// 思考开始时刻(流式中第一次见 thinking 非空时记)。
+  DateTime? thinkingStart;
+
+  /// 思考累计时长。每次 thinking 更新顺手算一次,thinking 停止增长后
+  /// 自然停在最终值 —— 不用找「思考结束」的精确时机。
+  /// 历史回放是一下子拿到全文,duration ≈ 0,UI 显示「已思考」不带秒数。
+  Duration thinkingDuration = Duration.zero;
+
   /// pi 的 message.stopReason:stop/length/toolUse/error/aborted。
   /// null 表示未知(历史回放可能缺失)。仅 error/aborted 需要向用户标记。
   String? stopReason;
@@ -495,6 +503,7 @@ class PiState {
     this.transientNotice,
     this.backgroundFinishTick = 0,
     this.backgroundFinishName,
+    this.activityStatus,
   });
 
   factory PiState.initial() => const PiState(
@@ -558,6 +567,10 @@ class PiState {
   /// 一次性提示(横幅),由 `_LivenessBanner` 渲染,用户点掉后调
   /// `dismissNotice()` 清空。
   final String? transientNotice;
+
+  /// 桌面 working-activity 插件推过来的实时状态行(TUI Working 行同源)。
+  /// 非空时灵动岛直接显示它,不再用本地从 items 推导的二手状态。
+  final String? activityStatus;
 
   /// 后台会话刚刚跑完:tick 自增用于触发监听,name 是会话显示名。
   /// (通知要不要真的弹由 NotificationController 按前后台状态决定。)
@@ -657,6 +670,7 @@ class PiState {
     String? transientNotice,
     int? backgroundFinishTick,
     String? backgroundFinishName,
+    String? activityStatus,
     int? rttMs,
     UiRequest? pendingUiRequest,
     AskRequest? pendingAsk,
@@ -671,6 +685,7 @@ class PiState {
     bool clearUiRequest = false,
     bool clearAsk = false,
     bool clearNotice = false,
+    bool clearActivity = false,
   }) {
     return PiState(
       status: status ?? this.status,
@@ -712,6 +727,9 @@ class PiState {
       transientNotice: clearNotice
           ? null
           : (transientNotice ?? this.transientNotice),
+      activityStatus: clearSource || clearActivity
+          ? null
+          : (activityStatus ?? this.activityStatus),
       backgroundFinishTick: backgroundFinishTick ?? this.backgroundFinishTick,
       backgroundFinishName: backgroundFinishName ?? this.backgroundFinishName,
       rttMs: rttMs ?? this.rttMs,
@@ -3951,6 +3969,14 @@ class PiSessionNotifier extends Notifier<PiState> {
           steeringQueue: _stringList(event['steering']),
           followUpQueue: _stringList(event['followUp']),
         );
+      // 桌面 working-activity 插件的 Working 行镜像:手机灵动岛直接显示。
+      case 'working_activity':
+        final text = event['text'] as String?;
+        if (text == null || text.isEmpty) {
+          state = state.copyWith(clearActivity: true);
+        } else {
+          state = state.copyWith(activityStatus: text);
+        }
       // pi 内部事件流用 compaction_start/compaction_end,而桌面 relay 的
       // emitBoundary 转发的是扩展钩子事件 session_before_compact/session_compact。
       // 两套名字都要认 —— 只认前者的话,桌面压缩时 app 一条提示都收不到。
@@ -4203,6 +4229,13 @@ class PiSessionNotifier extends Notifier<PiState> {
     final (text, thinking) = _textAndThinking(message['content']);
     bubble.text = text;
     bubble.thinking = thinking;
+    // 思考时长:第一次见非空记起点,之后每次更新顺手累计。
+    if (thinking.isNotEmpty) {
+      bubble.thinkingStart ??= DateTime.now();
+      bubble.thinkingDuration = DateTime.now().difference(
+        bubble.thinkingStart!,
+      );
+    }
     // 流式 error delta:reason 为 aborted/error。message_end 可能随后到
     // 也可能在断层里丢掉,这里先标记并提示,避免错误被吞。
     final delta = event['assistantMessageEvent'];
@@ -4892,15 +4925,17 @@ class PiSessionNotifier extends Notifier<PiState> {
     return '${raw.length} 个问题';
   }
 
-  /// 单行摘要的长度上限。换行也一并压掉 —— 副行只有一行的位置。
-  static String _clip(String value, [int max = 120]) {
+  /// 参数摘要的长度上限。换行压成空格(多行脚本变单行逻辑流)。
+  /// 300:当年截 120 是怕撑爆头部单行 Row;现在副行独立一行+自然换行,
+  /// 长路径/常见命令要显示完整。真·长脚本(heredoc)仍截断,展开看输出。
+  static String _clip(String value, [int max = 300]) {
     final flat = value.replaceAll(RegExp(r'\s+'), ' ').trim();
     return flat.length > max ? '${flat.substring(0, max)}…' : flat;
   }
 
   /// 测试入口:截断规则决定工具卡会不会撑爆,值得钉住。
   @visibleForTesting
-  static String debugClip(String value, [int max = 120]) => _clip(value, max);
+  static String debugClip(String value, [int max = 300]) => _clip(value, max);
 
   /// 测试入口:副行摘要是问卷卡上唯一的一行状态文字,
   /// 回落到通用分支就会变成一坨 Dart Map 的 toString。

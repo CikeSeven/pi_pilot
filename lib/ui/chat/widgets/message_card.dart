@@ -87,45 +87,51 @@ class MessageCard extends StatelessWidget {
                 final trailingMaxWidth = constraints.hasBoundedWidth
                     ? constraints.maxWidth * _trailingWidthFraction
                     : double.infinity;
-                return Row(
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (avatar case final widget?) ...[
-                      widget,
-                      const SizedBox(width: 12),
-                    ],
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (title case final widget?)
-                            DefaultTextStyle.merge(
-                              style: titleStyle,
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                              child: widget,
-                            ),
-                          if (subtitle case final widget?)
-                            DefaultTextStyle.merge(
-                              style: titleStyle.copyWith(
-                                color: titleStyle.color?.withValues(
-                                  alpha: 0.75,
-                                ),
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                              child: widget,
-                            ),
+                    Row(
+                      children: [
+                        if (avatar case final widget?) ...[
+                          widget,
+                          const SizedBox(width: 12),
                         ],
-                      ),
+                        Expanded(
+                          child: title != null
+                              ? DefaultTextStyle.merge(
+                                  style: titleStyle,
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                  child: title!,
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                        if (trailing case final widget?) ...[
+                          const SizedBox(width: 8),
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: trailingMaxWidth,
+                            ),
+                            child: widget,
+                          ),
+                        ],
+                      ],
                     ),
-                    if (trailing case final widget?) ...[
-                      const SizedBox(width: 8),
-                      ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: trailingMaxWidth),
-                        child: widget,
+                    // 参数摘要独立一行、横跨整张卡:之前它和标题同列,
+                    // 被 avatar 和状态位左右夹掉 ~120dp,长路径/命令全截断。
+                    // 不限行数:路径/命令强制显示完整,卡片高一点无所谓 ——
+                    // 看得全比挤成一行然后 ellipsis 强。
+                    if (subtitle case final widget?)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: DefaultTextStyle.merge(
+                          style: titleStyle.copyWith(
+                            color: titleStyle.color?.withValues(alpha: 0.75),
+                          ),
+                          child: widget,
+                        ),
                       ),
-                    ],
                   ],
                 );
               },

@@ -37,6 +37,16 @@ class ToolCard extends ConsumerStatefulWidget {
 class _ToolCardState extends ConsumerState<ToolCard> {
   late bool _expanded = !widget.item.done;
 
+  @override
+  void didUpdateWidget(ToolCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 工具执行完成:自动收起。AnimatedSize 会丝滑折叠,
+    // 用户之后仍可手动点开查看输出。
+    if (!oldWidget.item.done && widget.item.done && _expanded) {
+      setState(() => _expanded = false);
+    }
+  }
+
   IconData get _icon => switch (widget.item.name) {
     'bash' => Icons.terminal,
     'read' => Icons.visibility_outlined,
@@ -141,16 +151,16 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             const SizedBox(width: 4),
             AnimatedRotation(
               turns: expanded ? 0.5 : 0,
-              duration: PiMotion.quick,
-              curve: PiMotion.enter,
+              duration: PiMotion.collapse,
+              curve: PiMotion.collapseCurve,
               child: Icon(Icons.expand_more, size: 18, color: headerFg),
             ),
           ],
         ],
       ),
       child: AnimatedSize(
-        duration: PiMotion.quick,
-        curve: PiMotion.enter,
+        duration: PiMotion.collapse,
+        curve: PiMotion.collapseCurve,
         alignment: Alignment.topCenter,
         child: !expanded || !hasBody
             ? const SizedBox(width: double.infinity)
@@ -189,14 +199,23 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             _ => 1,
           },
           maxHeight: _kOutputMaxHeight,
+          embedded: true,
         );
       case 'edit':
         if (looksLikeUnifiedDiff(item.output)) {
-          return DiffView(diffText: item.output, maxHeight: _kOutputMaxHeight);
+          return DiffView(
+            diffText: item.output,
+            maxHeight: _kOutputMaxHeight,
+            embedded: true,
+          );
         }
         final diff = _diffFromArgs(item);
         if (diff != null) {
-          return DiffView(lines: diff, maxHeight: _kOutputMaxHeight);
+          return DiffView(
+            lines: diff,
+            maxHeight: _kOutputMaxHeight,
+            embedded: true,
+          );
         }
       case 'write':
         final content = _writeContent(item);
@@ -205,6 +224,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             code: content,
             language: path is String ? languageForPath(path) : null,
             maxHeight: _kOutputMaxHeight,
+            embedded: true,
           );
         }
     }
@@ -275,17 +295,13 @@ class _ToolCardState extends ConsumerState<ToolCard> {
 }
 
 /// 默认输出井:mono + ANSI 解析,固定井底保证前景对比度与主题无关。
+/// 不画边框/背景——工具卡片本身已有外壳,再套一层就是「框中框」。
 Widget _outputWell(BuildContext context, String text) {
   final piColors = PiColors.of(context);
   return Container(
     width: double.infinity,
     constraints: const BoxConstraints(maxHeight: _kOutputMaxHeight),
     padding: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: piColors.codeWellBg,
-      borderRadius: BorderRadius.circular(PiShape.sm),
-      border: Border.all(color: piColors.codeWellBorder),
-    ),
     child: SingleChildScrollView(
       child: AnsiText(
         text: text,

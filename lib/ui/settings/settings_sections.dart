@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/notification_service.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
+import '../theme/shapes.dart';
 import 'settings_widgets.dart';
 
 /// 设置的 5 个子页。
@@ -53,8 +54,128 @@ class AppearancePage extends ConsumerWidget {
               ),
             ),
           ),
+          const SizedBox(height: 12),
+          // 聊天排版:字号/行距用户可调,预览卡实时反映。
+          const _ChatTypographyCard(),
         ],
       ),
+    );
+  }
+}
+
+/// 聊天排版卡:字号缩放 + 行距滑杆,上方一段实时预览。
+class _ChatTypographyCard extends ConsumerWidget {
+  const _ChatTypographyCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+    final colors = Theme.of(context).colorScheme;
+    final previewStyle = chatBodyStyle(context, settings);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('聊天排版', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 12),
+            // 实时预览:边框围出一小段对话样张,调滑杆立刻看得到效果。
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: colors.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(PiShape.md),
+              ),
+              child: Text(
+                '好的,我来处理。先查一下这个报错的原因,'
+                '然后给补丁跑一轮验证,确认无回归后再交付。',
+                style: previewStyle,
+              ),
+            ),
+            const SizedBox(height: 16),
+            _SliderRow(
+              label: '字号',
+              value: settings.chatFontScale,
+              min: 0.85,
+              max: 1.40,
+              divisions: 11,
+              display: '${(settings.chatFontScale * 100).round()}%',
+              onChanged: (v) => notifier.setChatTypography(fontScale: v),
+            ),
+            _SliderRow(
+              label: '行距',
+              value: settings.chatLineHeight,
+              min: 1.25,
+              max: 2.00,
+              divisions: 15,
+              display: settings.chatLineHeight.toStringAsFixed(2),
+              onChanged: (v) => notifier.setChatTypography(lineHeight: v),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => notifier.setChatTypography(
+                  fontScale: 1.0,
+                  lineHeight: 1.45,
+                ),
+                child: const Text('重置默认'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SliderRow extends StatelessWidget {
+  const _SliderRow({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.display,
+    required this.onChanged,
+  });
+
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final String display;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 40,
+          child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+        ),
+        Expanded(
+          child: Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(
+          width: 52,
+          child: Text(
+            display,
+            textAlign: TextAlign.end,
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+        ),
+      ],
     );
   }
 }

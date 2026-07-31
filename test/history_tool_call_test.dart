@@ -33,10 +33,11 @@ void main() {
     });
 
     test('_clip 对所有分支都截断,不只是 JSON 兜底', () {
-      // 以前 command/path 原样返回,只有 JSON 兜底截 120 —— 这是溢出的上游
-      expect(PiSessionNotifier.debugClip('a' * 300).length, 121); // 120 + '…'
+      // 上限 300:副行独立一行+自然换行后,长路径/常见命令要显示完整。
+      expect(PiSessionNotifier.debugClip('a' * 400).length, 301); // 300 + '…'
+      expect(PiSessionNotifier.debugClip('a' * 300).length, 300); // 恰好不截
       expect(PiSessionNotifier.debugClip('ls -la'), 'ls -la');
-      // 换行压成空格(副行只有一行)
+      // 换行压成空格(多行脚本变单行逻辑流)
       expect(PiSessionNotifier.debugClip('pwd\nls\n  mkdir'), 'pwd ls mkdir');
     });
   });

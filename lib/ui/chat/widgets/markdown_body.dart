@@ -1,27 +1,35 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
+import '../../../state/settings_provider.dart';
 import '../../theme/semantic_colors.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
 import 'code_block.dart';
 
 /// 助手消息的 Markdown 渲染(围栏代码块交给 CodeBlock)。
-class PiMarkdown extends StatelessWidget {
+class PiMarkdown extends ConsumerWidget {
   const PiMarkdown({super.key, required this.text});
 
   final String text;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final piColors = PiColors.of(context);
+    // 正文样式与气泡/流式态同源:主题 bodyLarge × 用户字号/行距设置。
+    // 不用 bodyMedium —— 否则流式(纯文本 bodyLarge)到完成后(markdown)
+    // 会有一跳的字号变化。
+    final bodyStyle = chatBodyStyle(
+      context,
+      ref.watch(settingsProvider),
+      color: theme.colorScheme.onSurface,
+    );
     return SelectionArea(
       child: GptMarkdown(
         text,
-        style: theme.textTheme.bodyMedium?.copyWith(
-          color: theme.colorScheme.onSurface,
-        ),
+        style: bodyStyle,
         codeBuilder: (context, name, code, closed) =>
             // 围栏信息串可能带属性(```json title="…"),只取第一个 token
             CodeBlock(

@@ -126,6 +126,7 @@ class CodeBlock extends StatefulWidget {
     this.showLineNumbers = false,
     this.firstLineNumber = 1,
     this.maxHeight,
+    this.embedded = false,
   });
 
   final String code;
@@ -133,6 +134,10 @@ class CodeBlock extends StatefulWidget {
   final bool showLineNumbers;
   final int firstLineNumber;
   final double? maxHeight;
+
+  /// 嵌入在工具卡片内部时:去掉边框、背景、语言标签行,只留代码内容。
+  /// 工具卡片本身已有边框和背景,再套一层就是「框中框」。
+  final bool embedded;
 
   @override
   State<CodeBlock> createState() => _CodeBlockState();
@@ -214,6 +219,9 @@ class _CodeBlockState extends State<CodeBlock> {
         child: SingleChildScrollView(child: body),
       );
     }
+
+    // 嵌入模式:工具卡片内部,不画边框/背景/标签行,直接出代码。
+    if (widget.embedded) return body;
 
     return Container(
       width: double.infinity,

@@ -6,14 +6,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
 import '../sessions/devices_page.dart';
+import '../theme/motion.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
 import 'widgets/chat_item_view.dart';
 import 'widgets/composer.dart';
+import 'widgets/message_nav_rail.dart';
 import 'widgets/message_timestamp.dart';
 import 'widgets/quick_panel.dart';
 import 'widgets/scroll_to_bottom_button.dart';
+import 'widgets/tool_group_card.dart';
 import 'widgets/ui_request_card.dart';
 
 /// 对话主体。**不再自带 `Scaffold`** —— 那一层上移到了 `AppShell`,
@@ -57,6 +60,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   Map<String, int> _indexByKey = const {};
   List<bool> _timestampFlagCache = const [];
 
+  /// 渲染行:由 items 派生,连续的 ≥2 个 ToolItem 聚合成一个工具组行。
+  /// 窗口/下标/时间戳全都按行维度计算。
+  List<_ChatRow> _rows = const [];
+
   /// 会话切换后待执行的「跳到底部」。
   ///
   /// 加载完的落点必须是最新消息 —— 长会话停在第一条,用户要滑很久。
@@ -84,19 +91,166 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   /// 自动加载的重入阁:一次滚动里 position 会反复通知。
   bool _autoLoading = false;
 
+  // -- 消息导航轨道 --------------------------------------------------------
+
+  /// 用户消息锚点(行下标 + 预览),由 _syncDerived 顺手收集。
+  List<NavAnchor> _navAnchors = const [];
+
+  /// 轨道显隐:滚动时弹出,静置 [_railHideDelay] 后自动缩回;
+  /// 轨道被触摸期间(_railInteracting)挂起隐藏。
+  bool _railVisible = false;
+  bool _railInteracting = false;
+  Timer? _railHideTimer;
+  static const _railHideDelay = Duration(seconds: 2);
+
+  /// 待精修的跳转目标行:itemBuilder 会给它挂 [_jumpKey],
+  /// 构建出来以后 ensureVisible 校正粗跳的估算误差。
+  int? _pendingJumpRow;
+  final _jumpKey = GlobalKey();
+
+  /// 滚动进度(0~1),滚动时逐帧更新,驱动轨道游标连续滑动。
+  ///
+  /// 必须是 listenable:滚动本身不触发 ChatBody rebuild,
+  /// 游标如果吃 build 里现算的值,会停在滚动前的位置不动。
+  final _scrollProgress = ValueNotifier<double>(0);
+
+  /// 滚动位置 → 锚点序号比例(0~1)。
+  ///
+  /// 不做「像素比例 = 进度」—— 那样峰值位置和第几条消息对不上。
+  /// 先把像素比例换算成行号,再在相邻锚点之间按行号线性插序号:
+  /// 视口正在看第 i 条消息,进度就严格落在第 i 个大节点上;
+  /// 两条消息之间连续插值,既严格匹配又不阶跃。
+  double _anchorFocusT() {
+    final rows = _rows.length;
+    final anchors = _navAnchors;
+    if (rows <= 1 || anchors.isEmpty) return 0;
+    if (!_scroll.hasClients) return _scrollProgress.value;
+    final position = _scroll.position;
+    final extent = position.hasContentDimensions ? position.maxScrollExtent : 0;
+    if (extent <= 0) return 0;
+    final rowF = (position.pixels / extent) * (rows - 1);
+    if (rowF <= anchors.first.rowIndex) return 0;
+    if (rowF >= anchors.last.rowIndex) return 1;
+    for (var j = 0; j + 1 < anchors.length; j++) {
+      final a = anchors[j].rowIndex.toDouble();
+      final b = anchors[j + 1].rowIndex.toDouble();
+      if (rowF <= b) {
+        final local = ((rowF - a) / (b - a)).clamp(0.0, 1.0);
+        return (j + local) / (anchors.length - 1);
+      }
+    }
+    return 1;
+  }
+
+  void _showRail() {
+    _railHideTimer?.cancel();
+    if (!_railVisible) setState(() => _railVisible = true);
+  }
+
+  void _scheduleRailHide() {
+    _railHideTimer?.cancel();
+    _railHideTimer = Timer(_railHideDelay, () {
+      if (!_railInteracting && mounted) {
+        setState(() => _railVisible = false);
+      }
+    });
+  }
+
+  /// 跳到某一行:先扩窗口让目标可被构建,再按比例粗跳,
+  /// 最后靠 ensureVisible 链精修(估算误差在长会话里会很大)。
+  void _jumpToRow(int rowIndex) {
+    if (rowIndex < 0 || rowIndex >= _rows.length) return;
+    _showRail();
+    // 目标在窗口之上:窗口是尾部锚定的,必须扩到覆盖目标。
+    // 一次性成本,和「加载更早」翻到顶等价。
+    final window = ChatWindow.of(
+      total: _rows.length,
+      windowSize: _windowSize,
+      hasPendingUiRequest: ref.read(piSessionProvider).pendingUiRequest != null,
+      hasRemoteEarlier: ref.read(piSessionProvider).hasMoreHistory,
+    );
+    if (rowIndex < window.offset) {
+      setState(() {
+        _windowSize = _rows.length - rowIndex + _windowStep;
+      });
+    }
+    _pendingJumpRow = rowIndex;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final position = _scroll.position;
+      final ratio = _rows.length <= 1 ? 0.0 : rowIndex / (_rows.length - 1);
+      _scroll.jumpTo(
+        (position.maxScrollExtent * ratio).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        ),
+      );
+      _refineJump(8);
+    });
+  }
+
+  /// 粗跳之后等目标行构建出来,ensureVisible 精修。
+  ///
+  /// 两个坑都是真踩过的:
+  /// - 完成后**必须 setState 卸载挂点**:_jumpKey 是复用的,旧 KeyedSubtree
+  ///   还挂在树上时下一次跳转会给新目标挂同一个 GlobalKey,直接红屏。
+  /// - 单次 jumpTo 的估算是基于旧 extent 的,窗口扩展后偏差很大;
+  ///   所以每帧没等到目标就按**最新** extent 重新逼近一次。
+  void _refineJump(int remaining) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pendingJumpRow == null) return;
+      final ctx = _jumpKey.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: PiMotion.entrance,
+          curve: PiMotion.std,
+          alignment: 0.08,
+        );
+        setState(() => _pendingJumpRow = null);
+        return;
+      }
+      if (remaining <= 0) {
+        setState(() => _pendingJumpRow = null);
+        return;
+      }
+      if (_scroll.hasClients) {
+        final position = _scroll.position;
+        final ratio = _rows.length <= 1
+            ? 0.0
+            : _pendingJumpRow! / (_rows.length - 1);
+        final target = (position.maxScrollExtent * ratio).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        );
+        if ((position.pixels - target).abs() > 8) {
+          _scroll.jumpTo(target);
+        }
+      }
+      _refineJump(remaining - 1);
+    });
+  }
+
   @override
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
   }
 
-  /// 接近顶部就自动往前补。
+  /// 接近顶部就自动往前补。滚动也是导航轨道的显隐信号:
+  /// 一滚就弹出,停下来 [_railHideDelay] 后自动缩回。
   void _onScroll() {
+    _showRail();
+    _scheduleRailHide();
+    if (_scroll.hasClients) {
+      _scrollProgress.value = _anchorFocusT();
+    }
     if (_autoLoading || !_scroll.hasClients) return;
     final position = _scroll.position;
     final state = ref.read(piSessionProvider);
+    _syncDerived(state); // 滚动在 build 之间触发,先保证 rows 已同步
     final window = ChatWindow.of(
-      total: state.items.length,
+      total: _rows.length,
       windowSize: _windowSize,
       hasPendingUiRequest: state.pendingUiRequest != null,
       hasRemoteEarlier: state.hasMoreHistory,
@@ -186,18 +340,110 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     _derivedRevision = state.revision;
     final items = state.items;
 
+    // 派生渲染行。**按轮分段**(UserItem 开头),完成轮与进行轮两种布局:
+    //
+    // - 进行轮(streaming/有 running 工具):工具原位连续聚合 ——
+    //   实时进度要看得见,位置和实际执行顺序一致。
+    // - 完成轮:重排 —— 正文片段按顺序连着排,这轮的所有工具聚成
+    //   一个胶囊挪到最终回复下面。工具不再打断阅读,对话流干净。
+    final rows = <_ChatRow>[];
     final index = <String, int>{};
-    final flags = List<bool>.filled(items.length, false);
+    final rowTimes = <DateTime?>[];
+
+    void addRow(_ChatRow row, DateTime? time, List<ChatItem> keys) {
+      final ri = rows.length;
+      rows.add(row);
+      rowTimes.add(time);
+      for (final k in keys) {
+        index[k.key] = ri;
+      }
+    }
+
+    void buildSegment(int start, int end, {required bool isLast}) {
+      if (start >= end) return;
+
+      // 空 AssistantItem(纯工具调用回合产生)不产生行,也不打断工具收集。
+      bool isEmptyAssistant(ChatItem i) =>
+          i is AssistantItem &&
+          i.complete &&
+          i.text.isEmpty &&
+          i.thinking.isEmpty;
+
+      final events = <ChatItem>[];
+      final tools = <ToolItem>[];
+      for (var i = start; i < end; i++) {
+        final item = items[i];
+        if (item is ToolItem) {
+          tools.add(item);
+        } else if (!isEmptyAssistant(item)) {
+          events.add(item);
+        }
+      }
+
+      final hasStreaming = events.any((i) => i is AssistantItem && !i.complete);
+      final hasRunning = tools.any((t) => !t.done);
+      final complete = !isLast || (!hasStreaming && !hasRunning);
+
+      if (complete) {
+        // 完成轮:正文/bash/系统项按原顺序,工具组收尾。
+        for (final item in events) {
+          addRow(_SingleRow(item), timeOf(item), [item]);
+        }
+        if (tools.isNotEmpty) {
+          addRow(_ToolGroupRow(List.unmodifiable(tools)), null, tools);
+        }
+        return;
+      }
+
+      // 进行轮:按原始顺序流式扫描,连续工具原位聚合成组。
+      var pending = <ToolItem>[];
+      void flushPending() {
+        if (pending.isEmpty) return;
+        addRow(_ToolGroupRow(List.unmodifiable(pending)), null, pending);
+        pending = [];
+      }
+
+      for (var i = start; i < end; i++) {
+        final item = items[i];
+        if (item is ToolItem) {
+          pending.add(item);
+        } else if (!isEmptyAssistant(item)) {
+          flushPending();
+          addRow(_SingleRow(item), timeOf(item), [item]);
+        }
+      }
+      flushPending();
+    }
+
+    var segStart = 0;
+    for (var i = 1; i < items.length; i++) {
+      if (items[i] is UserItem) {
+        buildSegment(segStart, i, isLast: false);
+        segStart = i;
+      }
+    }
+    buildSegment(segStart, items.length, isLast: true);
+
+    // 时间戳标志按行算:工具行/组行无时间(null 跳过),
+    // 和原来按 items 算的语义一致 —— 时间戳只看 user/assistant。
+    final flags = List<bool>.filled(rows.length, false);
     DateTime? prev;
-    for (var i = 0; i < items.length; i++) {
-      index[items[i].key] = i;
-      final time = timeOf(items[i]);
+    for (var i = 0; i < rows.length; i++) {
+      final time = rowTimes[i];
       if (time == null) continue;
       flags[i] = shouldShowTimestamp(prev, time);
       prev = time;
     }
+
+    _rows = rows;
     _indexByKey = index;
     _timestampFlagCache = flags;
+    // 导航轨道锚点:每行用户消息一个刻度。
+    _navAnchors = [
+      for (var i = 0; i < rows.length; i++)
+        if (rows[i] case _SingleRow(item: final UserItem u))
+          NavAnchor(rowIndex: i, preview: u.text, time: u.time),
+    ];
   }
 
   void _syncComposerHeight() {
@@ -210,6 +456,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
 
   @override
   void dispose() {
+    _railHideTimer?.cancel();
+    _scrollProgress.dispose();
     _input.dispose();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
@@ -329,9 +577,9 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       _jumpToBottomSoon(sessionToken);
     }
 
-    // 只渲染尾部窗口。offset 是窗口首项在完整列表里的下标。
+    // 只渲染尾部窗口。offset 是窗口首行在完整行表里的下标。
     final window = ChatWindow.of(
-      total: state.items.length,
+      total: _rows.length,
       windowSize: _windowSize,
       hasPendingUiRequest: state.pendingUiRequest != null,
       hasRemoteEarlier: state.hasMoreHistory,
@@ -358,6 +606,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
               else if (state.items.isEmpty)
                 const _EmptyHint()
               else
+                // 导航走左侧的 MessageNavRail(刻度=用户消息),
+                // 系统 Scrollbar 撤掉 —— 两者功能重叠,双侧各一条太吵。
                 ListView.builder(
                   controller: _scroll,
                   // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
@@ -380,6 +630,17 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     if (key is! ValueKey<String>) return null;
                     final full = _indexByKey[key.value];
                     if (full == null) return null;
+                    // 只认「行的主 key」(单行的 item key,或组第一个工具的 key)。
+                    // 组内其余工具的 key 也映射到组行 —— 重排时多个不同 key
+                    // 解析到同一 slot,viewport 会试图把两个 keyed child 放进
+                    // 同一位置,直接红屏(viewport.dart '!_doingMountOrUpdate')。
+                    // 返回 null 让旧 child 按无 key 正常回收即可。
+                    final row = _rows[full];
+                    final primaryKey = switch (row) {
+                      _SingleRow(item: final item) => item.key,
+                      _ToolGroupRow(tools: final tools) => tools.first.key,
+                    };
+                    if (key.value != primaryKey) return null;
                     return window.slotOf(full);
                   },
                   itemBuilder: (context, index) {
@@ -398,15 +659,35 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                       );
                     }
                     final full = window.itemIndexOf(index);
-                    final item = state.items[full];
-                    final view = ChatItemView(
-                      key: ValueKey(item.key),
-                      item: item,
-                    );
+                    final row = _rows[full];
+                    var view = switch (row) {
+                      _SingleRow(item: final item) => ChatItemView(
+                        key: ValueKey(item.key),
+                        item: item,
+                      ),
+                      _ToolGroupRow(tools: final tools) => ToolGroupCard(
+                        // key 用首个工具的 key:streaming 中新工具入组时
+                        // key 稳定,widget 复用只是 tools 变长。
+                        key: ValueKey(tools.first.key),
+                        tools: tools,
+                      ),
+                    };
+                    // 导航轨道的跳转目标:挂上 GlobalKey,构建出来以后
+                    // _refineJump 用 ensureVisible 校正粗跳的估算误差。
+                    if (full == _pendingJumpRow) {
+                      view = KeyedSubtree(key: _jumpKey, child: view);
+                    }
                     if (!timestampFlags[full]) return view;
+                    // 时间戳只会挂在有时间的行(user/assistant);
+                    // 工具组行无时间,flag 一定是 false,走不到这里。
+                    final rowTime = switch (row) {
+                      _SingleRow(item: final item) => timeOf(item),
+                      _ToolGroupRow() => null,
+                    };
+                    if (rowTime == null) return view;
                     return Column(
                       children: [
-                        MessageTimestamp(time: timeOf(item)!),
+                        MessageTimestamp(time: rowTime),
                         view,
                       ],
                     );
@@ -420,6 +701,27 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   child: ScrollToBottomButton(
                     controller: _scroll,
                     revision: state.revision,
+                  ),
+                ),
+              // 消息导航轨道:刻度=用户消息,滚动时左侧弹出。
+              if (state.hasSession && _navAnchors.length >= 2)
+                Positioned(
+                  left: 0,
+                  top: widget.topPadding + 32,
+                  bottom: listBottomInset + 24,
+                  child: MessageNavRail(
+                    visible: _railVisible || _railInteracting,
+                    anchors: _navAnchors,
+                    progress: _scrollProgress,
+                    onJump: _jumpToRow,
+                    onInteractionChanged: (interacting) {
+                      _railInteracting = interacting;
+                      if (interacting) {
+                        _railHideTimer?.cancel();
+                      } else {
+                        _scheduleRailHide();
+                      }
+                    },
                   ),
                 ),
               // 顶部渐变遮罩:灵动岛不遮一整栏,内容滚到顶部时渐隐。
@@ -454,7 +756,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                 left: 0,
                 right: 0,
                 bottom: _composerHeight,
-                height: 40,
+                height: 28,
                 child: IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
@@ -465,12 +767,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                           Theme.of(
                             context,
                           ).colorScheme.surface.withValues(alpha: 0),
-                          Theme.of(
-                            context,
-                          ).colorScheme.surface.withValues(alpha: 0.6),
                           Theme.of(context).colorScheme.surface,
                         ],
-                        stops: const [0.0, 0.4, 1.0],
                       ),
                     ),
                   ),
@@ -802,6 +1100,24 @@ bool shouldAutoLoadEarlier({
   // 那种情况下本来也滚不动,交给指示行自己可点。
   if (maxScrollExtent <= 0) return false;
   return pixels <= threshold;
+}
+
+/// 消息列表的渲染行:由 ChatItem 列表派生。
+///
+/// 连续的 ≥2 个 ToolItem 聚合成一个 [_ToolGroupRow],其余每项一行。
+/// 窗口/下标/时间戳全按行维度计算,不再直接用 items 下标。
+sealed class _ChatRow {
+  const _ChatRow();
+}
+
+class _SingleRow extends _ChatRow {
+  const _SingleRow(this.item);
+  final ChatItem item;
+}
+
+class _ToolGroupRow extends _ChatRow {
+  const _ToolGroupRow(this.tools);
+  final List<ToolItem> tools;
 }
 
 /// 消息列表的尾部窗口下标运算。
