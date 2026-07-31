@@ -37,6 +37,16 @@ class ToolCard extends ConsumerStatefulWidget {
 class _ToolCardState extends ConsumerState<ToolCard> {
   late bool _expanded = !widget.item.done;
 
+  @override
+  void didUpdateWidget(ToolCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 工具执行完成:自动收起。AnimatedSize 会丝滑折叠,
+    // 用户之后仍可手动点开查看输出。
+    if (!oldWidget.item.done && widget.item.done && _expanded) {
+      setState(() => _expanded = false);
+    }
+  }
+
   IconData get _icon => switch (widget.item.name) {
     'bash' => Icons.terminal,
     'read' => Icons.visibility_outlined,
@@ -141,16 +151,16 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             const SizedBox(width: 4),
             AnimatedRotation(
               turns: expanded ? 0.5 : 0,
-              duration: PiMotion.quick,
-              curve: PiMotion.enter,
+              duration: PiMotion.collapse,
+              curve: PiMotion.collapseCurve,
               child: Icon(Icons.expand_more, size: 18, color: headerFg),
             ),
           ],
         ],
       ),
       child: AnimatedSize(
-        duration: PiMotion.quick,
-        curve: PiMotion.enter,
+        duration: PiMotion.collapse,
+        curve: PiMotion.collapseCurve,
         alignment: Alignment.topCenter,
         child: !expanded || !hasBody
             ? const SizedBox(width: double.infinity)

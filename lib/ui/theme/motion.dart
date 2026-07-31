@@ -13,4 +13,10 @@ abstract final class PiMotion {
   static const enter = Easing.emphasizedDecelerate;
   static const exit = Easing.emphasizedAccelerate;
   static const std = Easing.standard;
+
+  /// 思考块/工具卡的折叠展开:300ms + 缓入缓出三次曲线。
+  /// 比 quick(150ms)慢一拍——折叠是大块内容的高度变化,
+  /// 太快会显得「啪」一下,慢一点才有丝滑的呼吸感。
+  static const collapse = Durations.medium2; // 300ms
+  static const collapseCurve = Curves.easeInOutCubic;
 }

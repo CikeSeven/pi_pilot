@@ -14,6 +14,7 @@ import 'widgets/composer.dart';
 import 'widgets/message_timestamp.dart';
 import 'widgets/quick_panel.dart';
 import 'widgets/scroll_to_bottom_button.dart';
+import 'widgets/tool_group_card.dart';
 import 'widgets/ui_request_card.dart';
 
 /// 对话主体。**不再自带 `Scaffold`** —— 那一层上移到了 `AppShell`,
@@ -57,6 +58,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   Map<String, int> _indexByKey = const {};
   List<bool> _timestampFlagCache = const [];
 
+  /// 渲染行:由 items 派生,连续的 ≥2 个 ToolItem 聚合成一个工具组行。
+  /// 窗口/下标/时间戳全都按行维度计算。
+  List<_ChatRow> _rows = const [];
+
   /// 会话切换后待执行的「跳到底部」。
   ///
   /// 加载完的落点必须是最新消息 —— 长会话停在第一条,用户要滑很久。
@@ -95,8 +100,9 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     if (_autoLoading || !_scroll.hasClients) return;
     final position = _scroll.position;
     final state = ref.read(piSessionProvider);
+    _syncDerived(state); // 滚动在 build 之间触发,先保证 rows 已同步
     final window = ChatWindow.of(
-      total: state.items.length,
+      total: _rows.length,
       windowSize: _windowSize,
       hasPendingUiRequest: state.pendingUiRequest != null,
       hasRemoteEarlier: state.hasMoreHistory,
@@ -186,16 +192,104 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     _derivedRevision = state.revision;
     final items = state.items;
 
+    // 派生渲染行。**按轮分段**(UserItem 开头),完成轮与进行轮两种布局:
+    //
+    // - 进行轮(streaming/有 running 工具):工具原位连续聚合 ——
+    //   实时进度要看得见,位置和实际执行顺序一致。
+    // - 完成轮:重排 —— 正文片段按顺序连着排,这轮的所有工具聚成
+    //   一个胶囊挪到最终回复下面。工具不再打断阅读,对话流干净。
+    final rows = <_ChatRow>[];
     final index = <String, int>{};
-    final flags = List<bool>.filled(items.length, false);
+    final rowTimes = <DateTime?>[];
+
+    void addRow(_ChatRow row, DateTime? time, List<ChatItem> keys) {
+      final ri = rows.length;
+      rows.add(row);
+      rowTimes.add(time);
+      for (final k in keys) {
+        index[k.key] = ri;
+      }
+    }
+
+    void buildSegment(int start, int end, {required bool isLast}) {
+      if (start >= end) return;
+
+      // 空 AssistantItem(纯工具调用回合产生)不产生行,也不打断工具收集。
+      bool isEmptyAssistant(ChatItem i) =>
+          i is AssistantItem &&
+          i.complete &&
+          i.text.isEmpty &&
+          i.thinking.isEmpty;
+
+      final events = <ChatItem>[];
+      final tools = <ToolItem>[];
+      for (var i = start; i < end; i++) {
+        final item = items[i];
+        if (item is ToolItem) {
+          tools.add(item);
+        } else if (!isEmptyAssistant(item)) {
+          events.add(item);
+        }
+      }
+
+      final hasStreaming = events.any(
+        (i) => i is AssistantItem && !i.complete,
+      );
+      final hasRunning = tools.any((t) => !t.done);
+      final complete = !isLast || (!hasStreaming && !hasRunning);
+
+      if (complete) {
+        // 完成轮:正文/bash/系统项按原顺序,工具组收尾。
+        for (final item in events) {
+          addRow(_SingleRow(item), timeOf(item), [item]);
+        }
+        if (tools.isNotEmpty) {
+          addRow(_ToolGroupRow(List.unmodifiable(tools)), null, tools);
+        }
+        return;
+      }
+
+      // 进行轮:按原始顺序流式扫描,连续工具原位聚合成组。
+      var pending = <ToolItem>[];
+      void flushPending() {
+        if (pending.isEmpty) return;
+        addRow(_ToolGroupRow(List.unmodifiable(pending)), null, pending);
+        pending = [];
+      }
+
+      for (var i = start; i < end; i++) {
+        final item = items[i];
+        if (item is ToolItem) {
+          pending.add(item);
+        } else if (!isEmptyAssistant(item)) {
+          flushPending();
+          addRow(_SingleRow(item), timeOf(item), [item]);
+        }
+      }
+      flushPending();
+    }
+
+    var segStart = 0;
+    for (var i = 1; i < items.length; i++) {
+      if (items[i] is UserItem) {
+        buildSegment(segStart, i, isLast: false);
+        segStart = i;
+      }
+    }
+    buildSegment(segStart, items.length, isLast: true);
+
+    // 时间戳标志按行算:工具行/组行无时间(null 跳过),
+    // 和原来按 items 算的语义一致 —— 时间戳只看 user/assistant。
+    final flags = List<bool>.filled(rows.length, false);
     DateTime? prev;
-    for (var i = 0; i < items.length; i++) {
-      index[items[i].key] = i;
-      final time = timeOf(items[i]);
+    for (var i = 0; i < rows.length; i++) {
+      final time = rowTimes[i];
       if (time == null) continue;
       flags[i] = shouldShowTimestamp(prev, time);
       prev = time;
     }
+
+    _rows = rows;
     _indexByKey = index;
     _timestampFlagCache = flags;
   }
@@ -329,9 +423,9 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       _jumpToBottomSoon(sessionToken);
     }
 
-    // 只渲染尾部窗口。offset 是窗口首项在完整列表里的下标。
+    // 只渲染尾部窗口。offset 是窗口首行在完整行表里的下标。
     final window = ChatWindow.of(
-      total: state.items.length,
+      total: _rows.length,
       windowSize: _windowSize,
       hasPendingUiRequest: state.pendingUiRequest != null,
       hasRemoteEarlier: state.hasMoreHistory,
@@ -380,6 +474,17 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     if (key is! ValueKey<String>) return null;
                     final full = _indexByKey[key.value];
                     if (full == null) return null;
+                    // 只认「行的主 key」(单行的 item key,或组第一个工具的 key)。
+                    // 组内其余工具的 key 也映射到组行 —— 重排时多个不同 key
+                    // 解析到同一 slot,viewport 会试图把两个 keyed child 放进
+                    // 同一位置,直接红屏(viewport.dart '!_doingMountOrUpdate')。
+                    // 返回 null 让旧 child 按无 key 正常回收即可。
+                    final row = _rows[full];
+                    final primaryKey = switch (row) {
+                      _SingleRow(item: final item) => item.key,
+                      _ToolGroupRow(tools: final tools) => tools.first.key,
+                    };
+                    if (key.value != primaryKey) return null;
                     return window.slotOf(full);
                   },
                   itemBuilder: (context, index) {
@@ -398,17 +503,29 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                       );
                     }
                     final full = window.itemIndexOf(index);
-                    final item = state.items[full];
-                    final view = ChatItemView(
-                      key: ValueKey(item.key),
-                      item: item,
-                    );
+                    final row = _rows[full];
+                    final view = switch (row) {
+                      _SingleRow(item: final item) => ChatItemView(
+                        key: ValueKey(item.key),
+                        item: item,
+                      ),
+                      _ToolGroupRow(tools: final tools) => ToolGroupCard(
+                        // key 用首个工具的 key:streaming 中新工具入组时
+                        // key 稳定,widget 复用只是 tools 变长。
+                        key: ValueKey(tools.first.key),
+                        tools: tools,
+                      ),
+                    };
                     if (!timestampFlags[full]) return view;
+                    // 时间戳只会挂在有时间的行(user/assistant);
+                    // 工具组行无时间,flag 一定是 false,走不到这里。
+                    final rowTime = switch (row) {
+                      _SingleRow(item: final item) => timeOf(item),
+                      _ToolGroupRow() => null,
+                    };
+                    if (rowTime == null) return view;
                     return Column(
-                      children: [
-                        MessageTimestamp(time: timeOf(item)!),
-                        view,
-                      ],
+                      children: [MessageTimestamp(time: rowTime), view],
                     );
                   },
                 ),
@@ -793,6 +910,24 @@ bool shouldAutoLoadEarlier({
   // 那种情况下本来也滚不动,交给指示行自己可点。
   if (maxScrollExtent <= 0) return false;
   return pixels <= threshold;
+}
+
+/// 消息列表的渲染行:由 ChatItem 列表派生。
+///
+/// 连续的 ≥2 个 ToolItem 聚合成一个 [_ToolGroupRow],其余每项一行。
+/// 窗口/下标/时间戳全按行维度计算,不再直接用 items 下标。
+sealed class _ChatRow {
+  const _ChatRow();
+}
+
+class _SingleRow extends _ChatRow {
+  const _SingleRow(this.item);
+  final ChatItem item;
+}
+
+class _ToolGroupRow extends _ChatRow {
+  const _ToolGroupRow(this.tools);
+  final List<ToolItem> tools;
 }
 
 /// 消息列表的尾部窗口下标运算。

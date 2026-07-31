@@ -7,6 +7,7 @@ import '../../theme/shapes.dart';
 import '../../theme/squircle.dart';
 import '../../theme/typography.dart';
 import 'ansi_text.dart';
+import 'glass_pill.dart';
 
 /// 思考过程:**深炭纸卡 + 波形指示**。
 ///
@@ -24,10 +25,14 @@ class ThinkingBlock extends StatefulWidget {
     super.key,
     required this.thinking,
     required this.streaming,
+    this.duration = Duration.zero,
   });
 
   final String thinking;
   final bool streaming;
+
+  /// 思考累计时长(完成后显示「思考了 Xs」)。
+  final Duration duration;
 
   @override
   State<ThinkingBlock> createState() => _ThinkingBlockState();
@@ -37,7 +42,89 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
   late bool _expanded = widget.streaming;
 
   @override
+  void didUpdateWidget(ThinkingBlock oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 生成结束:自动收起。AnimatedSize 会丝滑折叠,
+    // 用户之后仍可手动点开回顾。
+    if (oldWidget.streaming && !widget.streaming && _expanded) {
+      setState(() => _expanded = false);
+    }
+  }
+
+  /// 摘要行的时长文案:「思考了 12s」;历史回放时长未知时退化为「已思考」。
+  String get _durationLabel {
+    final s = widget.duration.inSeconds;
+    if (s < 1) return '已思考';
+    final m = s ~/ 60;
+    if (m > 0) return '思考了 $m分${s % 60}秒';
+    return '思考了 ${s}s';
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // 生成中:完整深卡 + 波形,思考在流动要看得见。
+    if (widget.streaming) return _buildStreamingCard(context);
+    // 完成后:一行摘要,点开才展开深卡内容 —— 不占地方。
+    return _buildFinishedRow(context);
+  }
+
+  /// 完成态:液态玻璃胶囊 + 可展开的深卡内容。
+  Widget _buildFinishedRow(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final muted = colors.onSurfaceVariant;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 液态玻璃胶囊:和工具组折叠态共用 GlassPill,形态统一。
+        // vertical 2:相邻胶囊间距 = 2+4+4+2 = 12,不再空廈。
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          child: GlassPill(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.psychology_outlined, size: 15, color: muted),
+                const SizedBox(width: 7),
+                Flexible(
+                  child: Text(
+                    _durationLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: muted,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                AnimatedRotation(
+                  turns: _expanded ? 0.5 : 0,
+                  duration: PiMotion.collapse,
+                  curve: PiMotion.collapseCurve,
+                  child: Icon(Icons.expand_more, size: 15, color: muted),
+                ),
+              ],
+            ),
+          ),
+        ),
+        AnimatedSize(
+          duration: PiMotion.collapse,
+          curve: PiMotion.collapseCurve,
+          alignment: Alignment.topCenter,
+          child: !_expanded
+              ? const SizedBox(width: double.infinity)
+              : Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: _buildWell(context),
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// 生成中:完整深卡(标题行带波形 + 可折叠内容)。
+  Widget _buildStreamingCard(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
@@ -50,8 +137,6 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
     // 栏目名与波形的点缀色:两套都用提亮过的主色系
     final accent = isDark ? colors.primary : colors.inversePrimary;
 
-    // 用 Material + SquircleBorder,和 assistant_bubble/message_card 同一种圆角语言。
-    // 之前用 BoxDecoration(普通圆角),和其他卡的 squircle 视觉不一致。
     return Material(
       color: bg,
       shape: SquircleBorder(
@@ -70,21 +155,15 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
                 children: [
                   Icon(Icons.psychology_outlined, size: 15, color: accent),
                   const SizedBox(width: 9),
-                  Text(
-                    widget.streaming ? '思考过程 · 进行中' : '思考过程',
-                    style: AppType.eyebrow(color: accent),
-                  ),
+                  Text('思考过程 · 进行中', style: AppType.eyebrow(color: accent)),
                   const SizedBox(width: 12),
-                  // 生成中:波形动效。这是参考图明确要的「不要只有一个 loading」。
-                  if (widget.streaming)
-                    Expanded(child: _ThinkingWaveform(color: accent))
-                  else
-                    const Spacer(),
+                  // 生成中:波形动效。「不要只有一个 loading」。
+                  Expanded(child: _ThinkingWaveform(color: accent)),
                   const SizedBox(width: 8),
                   AnimatedRotation(
                     turns: _expanded ? 0.5 : 0,
-                    duration: PiMotion.quick,
-                    curve: PiMotion.enter,
+                    duration: PiMotion.collapse,
+                    curve: PiMotion.collapseCurve,
                     child: Icon(Icons.expand_more, size: 18, color: fgMuted),
                   ),
                 ],
@@ -92,33 +171,60 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
             ),
           ),
           AnimatedSize(
-            duration: PiMotion.quick,
-            curve: PiMotion.enter,
+            duration: PiMotion.collapse,
+            curve: PiMotion.collapseCurve,
             alignment: Alignment.topCenter,
             child: !_expanded
                 ? const SizedBox(width: double.infinity)
-                : Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          height: 1,
-                          margin: const EdgeInsets.only(bottom: 12),
-                          color: fgMuted.withValues(alpha: 0.22),
-                        ),
-                        SelectableText(
-                          // 全 app 唯一一个不走 ANSI 处理的文本出口,现在补上
-                          sanitizeThinking(widget.thinking),
-                          style: AppType.mono(
-                            size: 12,
-                            color: fg.withValues(alpha: 0.88),
-                            height: 1.6,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                : _buildWellContent(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 完成态展开后的深卡内容(带外壳)。
+  Widget _buildWell(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final bg = isDark ? colors.surfaceContainerHigh : colors.inverseSurface;
+    return Material(
+      color: bg,
+      shape: SquircleBorder(
+        borderRadius: BorderRadius.circular(PiShape.md),
+        smoothing: PiShape.smoothing,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: _buildWellContent(context),
+    );
+  }
+
+  /// 深卡里的正文:mono 小字 + 顶部分隔线。
+  Widget _buildWellContent(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final fg = isDark ? colors.onSurface : colors.onInverseSurface;
+    final fgMuted = fg.withValues(alpha: 0.72);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 1,
+            margin: const EdgeInsets.only(bottom: 12),
+            color: fgMuted.withValues(alpha: 0.22),
+          ),
+          SelectableText(
+            // 全 app 唯一一个不走 ANSI 处理的文本出口,现在补上
+            sanitizeThinking(widget.thinking),
+            style: AppType.mono(
+              size: 12,
+              color: fg.withValues(alpha: 0.88),
+              height: 1.6,
+            ),
           ),
         ],
       ),

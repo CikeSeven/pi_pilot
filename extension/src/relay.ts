@@ -817,7 +817,13 @@ export class DesktopRelay {
       this.reconnectAttempt = 0;
       this.registered = false;
       this.newEpoch();
-      this.sendRegistration();
+      try {
+        this.sendRegistration();
+      } catch (err) {
+        this.setStatus(
+          `PiPilot: registration failed (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
     });
     socket.on("message", (data) => this.handleHubMessage(data.toString()));
     socket.on("close", () => {
@@ -1181,7 +1187,29 @@ export class DesktopRelay {
     const ctx = this.liveCtx();
     if (!ctx) return undefined;
     const branch = ctx.sessionManager.getBranch();
-    let entries = cloneForWire(branch, MAX_CAPTURE_BYTES) as unknown as JsonObject[];
+    // branch 本身可能超过 MAX_CAPTURE_BYTES(64MB),直接 clone 会抛出未捕获
+    // 异常导致 pi 退出。逐步截断最老的消息再重试;截断时设置 snapshotTruncated
+    // 让客户端知道历史不完整。
+    let entries: JsonObject[];
+    let branchTruncated = false;
+    {
+      let working = branch;
+      for (;;) {
+        try {
+          entries = cloneForWire(working, MAX_CAPTURE_BYTES) as unknown as JsonObject[];
+          break;
+        } catch {
+          if (working.length <= 1) {
+            entries = [];
+            branchTruncated = true;
+            break;
+          }
+          const removeCount = Math.max(1, Math.floor(working.length / 4));
+          working = working.slice(removeCount);
+          branchTruncated = true;
+        }
+      }
+    }
     const models = ctx.modelRegistry.getAvailable().map((model) => serializeModel(model));
     const contextUsage = ctx.getContextUsage();
     const state: JsonObject = {
@@ -1201,6 +1229,7 @@ export class DesktopRelay {
       pendingMessageCount: ctx.hasPendingMessages() ? 1 : 0,
       contextUsage: contextUsage ?? null,
     };
+    if (branchTruncated) state.snapshotTruncated = true;
 
     let stats: JsonObject | undefined;
     try {
