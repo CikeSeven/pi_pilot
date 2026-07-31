@@ -55,9 +55,11 @@ class SettingsRepository {
   static const _kP2pRendezvous = 'p2p.rendezvous';
   static const _kP2pDeviceId = 'p2p.deviceId';
   static const _kP2pSecret = 'p2p.secret';
+
   /// 稳定客户端身份:重连后 bridge 据此即时接管租约/去重请求,
   /// 不必等旧租约 TTL 过期。首次启动生成并持久化。
   static const _kClientId = 'conn.clientId';
+
   /// 上次成功的 ICE 模式缓存前缀(p2p.icemode.{deviceId}):
   /// relay 网络的每次重连可省 7s direct 空等。
   static const _kP2pIceModePrefix = 'p2p.icemode.';
@@ -121,7 +123,9 @@ class SettingsRepository {
 
   /// 新增或按 id 覆盖一台设备。
   Future<void> upsertDevice(DeviceProfile device) async {
-    final devices = await loadDevices();
+    // loadDevices 在首次启动/损坏数据回退时可能返回 const 空列表；写操作
+    // 必须先复制成可变列表，否则首台设备会在 add() 处抛 UnsupportedError。
+    final devices = List<DeviceProfile>.of(await loadDevices());
     final index = devices.indexWhere((d) => d.id == device.id);
     if (index >= 0) {
       devices[index] = device;
@@ -132,7 +136,7 @@ class SettingsRepository {
   }
 
   Future<void> removeDevice(String deviceId) async {
-    final devices = await loadDevices();
+    final devices = List<DeviceProfile>.of(await loadDevices());
     devices.removeWhere((d) => d.id == deviceId);
     await saveDevices(devices);
     if (await loadActiveDeviceId() == deviceId) {
@@ -148,7 +152,7 @@ class SettingsRepository {
     required int port,
   }) async {
     if (hubId.isEmpty) return null;
-    final devices = await loadDevices();
+    final devices = List<DeviceProfile>.of(await loadDevices());
     final index = devices.indexWhere(
       (d) => d.lastHubId == hubId && (d.host != host || d.port != port),
     );
@@ -230,10 +234,10 @@ class SettingsRepository {
 
   static String _generateClientId() {
     final random = Random.secure();
-    final hex = List<int>
-        .generate(8, (_) => random.nextInt(256))
-        .map((value) => value.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final hex = List<int>.generate(
+      8,
+      (_) => random.nextInt(256),
+    ).map((value) => value.toRadixString(16).padLeft(2, '0')).join();
     return 'app-$hex';
   }
 
@@ -263,7 +267,8 @@ class SettingsRepository {
       accent: prefs.getString(_kAccent) ?? 'terracotta',
       preferredSessionId: prefs.getString(_kPreferredSessionId),
       p2pEnabled: prefs.getBool(_kP2pEnabled) ?? false,
-      p2pRendezvous: prefs.getString(_kP2pRendezvous) ?? kDefaultRendezvousAddress,
+      p2pRendezvous:
+          prefs.getString(_kP2pRendezvous) ?? kDefaultRendezvousAddress,
       p2pDeviceId: prefs.getString(_kP2pDeviceId) ?? '',
       p2pSecret: prefs.getString(_kP2pSecret) ?? '',
     );

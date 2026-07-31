@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/core/device_models.dart';
 import 'package:pi_pilot/core/settings_repository.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -16,6 +17,29 @@ void main() {
     expect(first.clientId, matches(RegExp(r'^app-[0-9a-f]{16}$')));
     final second = await repo.load();
     expect(second.clientId, first.clientId, reason: '重载必须读到同一个身份');
+  });
+
+  test('首次空 roster 可以添加并读回设备', () async {
+    final repo = SettingsRepository();
+    const device = DeviceProfile(
+      id: 'dev-first',
+      name: 'Test desktop',
+      host: '192.168.1.10',
+      port: 9377,
+      token: 'mobile-token',
+      transport: DeviceTransport.lan,
+      lastHubId: 'hub-first',
+    );
+
+    await repo.upsertDevice(device);
+
+    final devices = await repo.loadDevices();
+    expect(devices, hasLength(1));
+    expect(devices.single.id, device.id);
+    expect(devices.single.name, device.name);
+    expect(devices.single.host, device.host);
+    expect(devices.single.token, device.token);
+    expect(devices.single.lastHubId, device.lastHubId);
   });
 
   test('ICE 模式缓存:写入后可读,失败计数满 2 次作废', () async {
