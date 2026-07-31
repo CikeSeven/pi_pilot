@@ -31,6 +31,7 @@ class MessageNavRail extends StatefulWidget {
     required this.visible,
     required this.anchors,
     required this.currentRow,
+    required this.totalRows,
     required this.onJump,
     required this.onInteractionChanged,
   });
@@ -43,6 +44,12 @@ class MessageNavRail extends StatefulWidget {
 
   /// 视口估算位置对应的行下标(-1 未知),用来高亮最近刻度。
   final int currentRow;
+
+  /// 完整渲染行表长度。刻度按 rowIndex/(totalRows-1) 比例分布 ——
+  /// 刻度位置就是消息在列表里的真实相对位置,和滚动位置成线性关系。
+  ///(之前按「锚点序号」均布,消息分布不均时刻度和真实位置对不上,
+  /// 点/拖到的消息和视觉位置预期不一致;均布还把刻度摊开,间隙虚大。)
+  final int totalRows;
 
   /// 跳转请求:参数是目标行下标。窗口扩展/粗跳/精修由调用方负责。
   final ValueChanged<int> onJump;
@@ -112,13 +119,27 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 
   /// 手势 y → 最近的刻度下标。
+  ///
+  /// 与绘制同一套映射:y 比例 → 列表行号 → 最近锚点。
+  /// 锚点按 rowIndex 升序,线性扫描对几百条足够(手势更新才 60Hz)。
   int _indexAt(double y, double height) {
     final n = widget.anchors.length;
     if (n == 0) return 0;
     const pad = _RailPainter.vPad;
     final usable = (height - pad * 2).clamp(1.0, double.infinity);
     final t = ((y - pad) / usable).clamp(0.0, 1.0);
-    return (t * (n - 1)).round();
+    final denom = (widget.totalRows - 1).clamp(1, 1 << 30);
+    final targetRow = t * denom;
+    var best = 0;
+    var bestDist = double.infinity;
+    for (var i = 0; i < n; i++) {
+      final d = (widget.anchors[i].rowIndex - targetRow).abs();
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
   }
 
   void _startPreview(double y, double height) {
@@ -189,11 +210,17 @@ class _MessageNavRailState extends State<MessageNavRail>
                     CustomPaint(
                       size: Size(28, height),
                       painter: _RailPainter(
-                        count: widget.anchors.length,
+                        rowIndexes: [
+                          for (final a in widget.anchors) a.rowIndex,
+                        ],
+                        totalRows: widget.totalRows,
                         currentIndex: _currentIndex,
                         activeIndex: _activeIndex,
                         tickColor: colors.outlineVariant,
                         currentColor: colors.primary,
+                        trackColor: colors.outlineVariant.withValues(
+                          alpha: 0.35,
+                        ),
                       ),
                     ),
                     if (_activeIndex != null)
@@ -215,42 +242,60 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 }
 
-/// 刻度绘制:均匀分布的小横线;当前刻度加长,拖拽目标刻度中量。
+/// 刻度绘制:按消息在列表中的真实位置(rowIndex/totalRows)比例分布。
+///
+/// 过密时跳过重叠刻度(相邻 < 2.5px),但当前/拖拽刻度永远绘制。
+/// 轨道画一条淡竖线打底 —— 比例分布下消息稀疏区刻度必然稀,
+/// 没有基线会显得「断档」,有基线读起来才是「这条轨道上这里没消息」。
 class _RailPainter extends CustomPainter {
   _RailPainter({
-    required this.count,
+    required this.rowIndexes,
+    required this.totalRows,
     required this.currentIndex,
     required this.activeIndex,
     required this.tickColor,
     required this.currentColor,
+    required this.trackColor,
   });
 
   static const vPad = 6.0;
 
-  final int count;
+  /// 每个锚点的行下标(升序)。
+  final List<int> rowIndexes;
+  final int totalRows;
   final int currentIndex;
   final int? activeIndex;
   final Color tickColor;
   final Color currentColor;
+  final Color trackColor;
 
   @override
   void paint(Canvas canvas, Size size) {
+    final count = rowIndexes.length;
     if (count <= 0) return;
-    // 太密时抽样绘制(视觉),交互映射不受影响。
-    final maxTicks = ((size.height - vPad * 2) / 4).floor().clamp(1, count);
-    final step = (count / maxTicks).ceil();
-
     final paint = Paint()
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
     final usable = size.height - vPad * 2;
+    final denom = (totalRows - 1).clamp(1, 1 << 30);
 
-    for (var i = 0; i < count; i += step) {
-      final y = vPad + (count == 1 ? usable / 2 : usable * i / (count - 1));
-      final isCurrent =
-          i == currentIndex ||
-          (currentIndex >= 0 && (currentIndex - i).abs() < step);
+    // 轨道基线:淡竖线,刻度从它出发向右画。
+    canvas.drawLine(
+      const Offset(2, vPad),
+      Offset(2, size.height - vPad),
+      Paint()
+        ..color = trackColor
+        ..strokeWidth = 1,
+    );
+
+    var lastY = -10.0;
+    for (var i = 0; i < count; i++) {
+      final y = vPad + usable * rowIndexes[i] / denom;
+      final isCurrent = i == currentIndex;
       final isActive = i == activeIndex;
+      // 重叠刻度跳过绘制(交互映射不受影响),高亮刻度除外。
+      if (!isCurrent && !isActive && y - lastY < 2.5) continue;
+      lastY = y;
       final width = isCurrent
           ? 16.0
           : isActive
@@ -261,18 +306,19 @@ class _RailPainter extends CustomPainter {
           : isActive
           ? currentColor.withValues(alpha: 0.6)
           : tickColor;
-      // 刻度从热区左缘向右画
-      canvas.drawLine(Offset(2, y), Offset(2 + width, y), paint);
+      canvas.drawLine(Offset(3, y), Offset(3 + width, y), paint);
     }
   }
 
   @override
   bool shouldRepaint(_RailPainter old) =>
-      old.count != count ||
+      old.rowIndexes != rowIndexes ||
+      old.totalRows != totalRows ||
       old.currentIndex != currentIndex ||
       old.activeIndex != activeIndex ||
       old.tickColor != tickColor ||
-      old.currentColor != currentColor;
+      old.currentColor != currentColor ||
+      old.trackColor != trackColor;
 }
 
 /// 长按/拖动时浮出的消息预览卡。
