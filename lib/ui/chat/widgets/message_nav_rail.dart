@@ -306,7 +306,7 @@ class _MessageNavRailState extends State<MessageNavRail>
 /// 双排从基线向右伸出的横条,随「焦点位置」连续起伏。
 ///
 /// - 小节点均匀插在大节点之间,只负责让波形连续好看,不映射消息;
-/// - **增益分离**:焦点处大节点 8→18px 冒尖、小节点只 3.5→10px,
+/// - **增益分离**:焦点处大节点 5→12px 冒尖、小节点只 3→7px,
 ///   峰值差距拉开,「当前在哪条消息」一眼能看出来;
 /// - 包络 σ 收窄到一个大节点间隔内 —— 焦点在大节点上时,
 ///   两侧小节点只微微隆起,不会和峰值一样高;
@@ -344,8 +344,8 @@ class _RailPainter extends CustomPainter {
 
     // 轨道基线:极淡,克制。
     canvas.drawLine(
-      const Offset(3, vPad),
-      Offset(3, size.height - vPad),
+      const Offset(2, vPad),
+      Offset(2, size.height - vPad),
       Paint()
         ..color = trackColor
         ..strokeWidth = 1,
@@ -379,7 +379,7 @@ class _RailPainter extends CustomPainter {
         paint
           ..strokeWidth = 2.2 + 0.9 * influence
           ..color = Color.lerp(tickColor, focusColor, influence)!;
-        canvas.drawLine(Offset(4, y), Offset(4 + 8 + 10 * influence, y), paint);
+        canvas.drawLine(Offset(3, y), Offset(3 + 5 + 7 * influence, y), paint);
       } else {
         paint
           ..strokeWidth = 1.8 + 0.4 * influence
@@ -389,8 +389,8 @@ class _RailPainter extends CustomPainter {
             influence,
           )!;
         canvas.drawLine(
-          Offset(4, y),
-          Offset(4 + 3.5 + 6.5 * influence, y),
+          Offset(3, y),
+          Offset(3 + 3 + 4 * influence, y),
           paint,
         );
       }
