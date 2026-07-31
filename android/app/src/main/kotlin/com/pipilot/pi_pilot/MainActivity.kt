@@ -1,6 +1,8 @@
 package com.pipilot.pi_pilot
 
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -11,6 +13,7 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val systemChannel = "com.pipilot.pi_pilot/system"
+    private val lanNetworkChannel = "com.pipilot.pi_pilot/lan_network"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -76,6 +79,47 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, lanNetworkChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "bindWifiForLan" -> {
+                        try {
+                            result.success(bindWifiForLan())
+                        } catch (error: Exception) {
+                            result.error("wifi_bind_failed", error.message, null)
+                        }
+                    }
+                    "unbindNetwork" -> {
+                        try {
+                            result.success(unbindNetwork())
+                        } catch (error: Exception) {
+                            result.error("network_unbind_failed", error.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun bindWifiForLan(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+            ?: return false
+        val wifi = connectivity.allNetworks.firstOrNull { network ->
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            val linkAddresses = connectivity.getLinkProperties(network)?.linkAddresses
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                linkAddresses?.any { it.address is java.net.Inet4Address } == true
+        } ?: return false
+        return connectivity.bindProcessToNetwork(wifi)
+    }
+
+    private fun unbindNetwork(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+            ?: return false
+        return connectivity.bindProcessToNetwork(null)
     }
 
     private fun openNotificationSettings(channelId: String?) {

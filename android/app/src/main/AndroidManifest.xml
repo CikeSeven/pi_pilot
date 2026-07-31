@@ -7,6 +7,8 @@
          libjingle 的 network_thread 会 JNI 异常后 CHECK 失败直接 SIGABRT(闪退)。
          flutter_webrtc 自身 manifest 是空的,不会传递带入,必须我们声明。 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- bindProcessToNetwork 用于在 LAN 直连建链时选择 Wi-Fi 网络 -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <!-- Android 13+ 通知运行时权限(任务完成/扩展等待输入提醒) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- 前台服务保活 WebSocket:后台时也能实时收到 bridge 推送的完成事件 -->

@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/device_models.dart';
 import '../core/pi_connection.dart';
 import '../core/hub_channel.dart';
+import '../core/lan_network_binding.dart';
 import '../core/p2p_connector.dart';
 import '../core/sync_store.dart';
 import 'hub_models.dart';
@@ -2045,56 +2046,67 @@ class PiSessionNotifier extends Notifier<PiState> {
 
     // 局域网 WebSocket 与 P2P 配置相互独立。即使 P2P 已启用，直连仍需
     // 保留完整握手窗口；否则 bridge 冷启动或设备刚恢复网络时会在 5 秒被
-    // 误判失败，并提前落到 P2P。
+    // 误判失败，并提前落到 P2P。Android/Xiaomi 可能把 Wi-Fi 标成不可用，
+    // 所以整个建链阶段通过进程级网络门闩串行，并只在 LAN socket + hello
+    // 期间绑定 Wi-Fi；finally 解绑后才允许 P2P 信令建 socket。
     final p2p = _p2p;
-    // 传输偏好门控(DeviceTransport):仅 P2P 时直连整段跳过——
-    // 既省 12s 空等,也避免「局域网里恰好有服务占了同端口」时误连。
-    var hello = _transport == DeviceTransport.p2p
-        ? null
-        : await conn.connect(
-            host: creds.host,
-            port: creds.port,
-            token: creds.token,
-            clientId: creds.clientId,
-            capabilities: const [msgDeltaCapability],
-            timeout: const Duration(seconds: 12),
+    final transport = _transport;
+    final hello = await LanNetworkBinding.serializeOpen<Map<String, dynamic>?>(
+      () async {
+        if (!identical(_conn, conn)) return null;
+        Map<String, dynamic>? hello;
+        if (transport != DeviceTransport.p2p) {
+          hello = await LanNetworkBinding.withWifiBinding(
+            () => conn.connect(
+              host: creds.host,
+              port: creds.port,
+              token: creds.token,
+              clientId: creds.clientId,
+              capabilities: const [msgDeltaCapability],
+              timeout: const Duration(seconds: 12),
+            ),
           );
-    // 仅直连(lan)不回落:用户明确不要公网通道时,失败就如实失败。
-    if (hello == null &&
-        p2p != null &&
-        _transport != DeviceTransport.lan &&
-        identical(_conn, conn)) {
-      final settings = ref.read(settingsProvider.notifier);
-      final channel = await P2pConnector(onLog: _logP2p).connect(
-        rendezvousUrl: p2p.rendezvous,
-        deviceId: p2p.deviceId,
-        secret: p2p.secret,
-        modeCache: (
-          read: () async {
-            final mode = await settings.p2pIceMode(p2p.deviceId);
-            return switch (mode) {
-              'direct' => P2pIceMode.direct,
-              'relay' => P2pIceMode.relay,
-              _ => null,
-            };
-          },
-          onSuccess: (mode) => settings.setP2pIceMode(p2p.deviceId, mode.name),
-          onFailure: () => settings.failP2pIceMode(p2p.deviceId),
-        ),
-      );
-      if (channel != null) {
-        if (identical(_conn, conn)) {
-          hello = await conn.connectViaChannel(
-            channel,
-            token: creds.token,
-            clientId: creds.clientId,
-          );
-        } else {
-          // 打洞期间用户已断开/换了连接:通道不能漏,关掉。
-          await channel.close();
         }
-      }
-    }
+        // 仅直连(lan)不回落:用户明确不要公网通道时,失败就如实失败。
+        if (hello == null &&
+            p2p != null &&
+            transport != DeviceTransport.lan &&
+            identical(_conn, conn)) {
+          final settings = ref.read(settingsProvider.notifier);
+          final channel = await P2pConnector(onLog: _logP2p).connect(
+            rendezvousUrl: p2p.rendezvous,
+            deviceId: p2p.deviceId,
+            secret: p2p.secret,
+            modeCache: (
+              read: () async {
+                final mode = await settings.p2pIceMode(p2p.deviceId);
+                return switch (mode) {
+                  'direct' => P2pIceMode.direct,
+                  'relay' => P2pIceMode.relay,
+                  _ => null,
+                };
+              },
+              onSuccess: (mode) =>
+                  settings.setP2pIceMode(p2p.deviceId, mode.name),
+              onFailure: () => settings.failP2pIceMode(p2p.deviceId),
+            ),
+          );
+          if (channel != null) {
+            if (identical(_conn, conn)) {
+              hello = await conn.connectViaChannel(
+                channel,
+                token: creds.token,
+                clientId: creds.clientId,
+              );
+            } else {
+              // 打洞期间用户已断开/换了连接:通道不能漏,关掉。
+              await channel.close();
+            }
+          }
+        }
+        return hello;
+      },
+    );
     if (hello == null) return false;
 
     final version = hello['version'] as int? ?? 1;

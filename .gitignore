@@ -50,3 +50,4 @@ app.*.map.json
 
 # 本地工作区临时文件(截图/调试产物)
 .local/
+/bridge/data/
