@@ -71,7 +71,7 @@ class AppSettings {
   /// 家里电脑在信令服上的设备名。
   final String p2pDeviceId;
 
-  /// 配对密钥:与信令服 devices 表一致。挑战-应答校验,明文永不上行。
+  /// 配对密钥:与手机端设备名配对。通过 WSS hello 发送给信令服校验,仅保存房间摘要。
   final String p2pSecret;
 
   /// 稳定客户端身份(app-{16hex}):重连后 bridge 据此即时接管租约、

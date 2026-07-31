@@ -10,7 +10,7 @@ const PRINTABLE_ASCII_PATTERN = /^[\x21-\x7e]+$/;
  * The key is intentionally restricted to printable ASCII so length and
  * character classes are stable across Dart, Node, and JSON transports.
  */
-export function validatePairingKey(value: unknown): boolean {
+export function validatePairingKey(value: unknown): value is string {
   if (typeof value !== "string") return false;
   if (value.length < MIN_PAIRING_KEY_LENGTH || value.length > MAX_PAIRING_KEY_LENGTH) {
     return false;

@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { loadConfig, type RendezvousConfig } from "./config.js";
+import { validateDeviceId, validatePairingKey } from "./key_policy.js";
 
 const HELLO_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 30_000;
@@ -11,7 +12,6 @@ const MAX_MESSAGE_BYTES = 64 * 1024;
 
 interface Client {
   ws: WebSocket;
-  nonce: string;
   authed: boolean;
   alive: boolean;
   helloTimer: NodeJS.Timeout;
@@ -22,6 +22,7 @@ interface Client {
 
 interface Room {
   host?: Client;
+  pairingKeyHash?: Buffer;
   guests: Map<string, Client>;
 }
 
@@ -30,8 +31,8 @@ export interface RendezvousHandle {
   close: () => Promise<void>;
 }
 
-export function sha256Hex(text: string): string {
-  return crypto.createHash("sha256").update(text).digest("hex");
+export function pairingKeyHash(secret: string): Buffer {
+  return crypto.createHash("sha256").update(secret).digest();
 }
 
 export interface ClientIceServer {
@@ -62,9 +63,9 @@ export function buildClientIceServers(
 
 /**
  * 信令服:按 deviceId 分房间,一个 host(桌面 bridge)加多个 guest(手机)。
- * 只转发 signal 帧(SDP/ICE 候选),不解析、不落地;配对密钥用
- * sha256(nonce:secret) 挑战-应答校验,明文密钥永不上行。
- * TURN 凭据只在挑战通过后签发,会话数据仍由 DTLS 端到端加密。
+ * 只转发 signal 帧(SDP/ICE 候选),不解析、不落地。手机和 bridge 在 WSS
+ * hello 中携带相同的 pairing key;服务端校验 key 策略并只在房间内保存摘要,
+ * 不写入磁盘或日志。TURN 凭据只在握手通过后签发,会话数据仍由 DTLS 端到端加密。
  */
 export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
   const rooms = new Map<string, Room>();
@@ -122,15 +123,14 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
   }
 
   function onHello(client: Client, msg: Record<string, unknown>): void {
-    const deviceId = typeof msg.deviceId === "string" ? msg.deviceId : "";
-    const secret = config.devices[deviceId];
-    if (!secret) {
-      fail(client, "unknown_device");
+    const deviceId = msg.deviceId;
+    if (!validateDeviceId(deviceId)) {
+      fail(client, "bad_device_id");
       return;
     }
-    const expected = sha256Hex(`${client.nonce}:${secret}`);
-    if (msg.response !== expected) {
-      fail(client, "bad_secret");
+    const secret = msg.secret;
+    if (!validatePairingKey(secret)) {
+      fail(client, "weak_key");
       return;
     }
     const role = msg.role === "host" ? "host" : msg.role === "guest" ? "guest" : undefined;
@@ -138,13 +138,15 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
       fail(client, "bad_role");
       return;
     }
-    const room = roomOf(deviceId);
+    const keyHash = pairingKeyHash(secret);
     if (role === "host") {
+      const room = roomOf(deviceId);
       if (room.host) {
         fail(client, "device_id_in_use");
         return;
       }
       room.host = client;
+      room.pairingKeyHash = keyHash;
       client.role = role;
       client.deviceId = deviceId;
       client.authed = true;
@@ -152,8 +154,14 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
       send(client, { type: "ok", iceServers: buildClientIceServers(config) });
       return;
     }
-    if (!room.host) {
+
+    const room = rooms.get(deviceId);
+    if (!room?.host || !room.pairingKeyHash) {
       fail(client, "host_offline");
+      return;
+    }
+    if (!crypto.timingSafeEqual(room.pairingKeyHash, keyHash)) {
+      fail(client, "bad_key");
       return;
     }
     const peerId = crypto.randomBytes(6).toString("hex");
@@ -197,13 +205,12 @@ export function createRendezvous(config: RendezvousConfig): RendezvousHandle {
   wss.on("connection", (ws) => {
     const client: Client = {
       ws,
-      nonce: crypto.randomBytes(16).toString("hex"),
       authed: false,
       alive: true,
       helloTimer: setTimeout(() => ws.close(4002, "hello timeout"), HELLO_TIMEOUT_MS),
     };
     clients.add(client);
-    send(client, { type: "welcome", nonce: client.nonce, stunUrls: config.stunUrls ?? [] });
+    send(client, { type: "welcome", stunUrls: config.stunUrls ?? [] });
     ws.on("pong", () => {
       client.alive = true;
     });

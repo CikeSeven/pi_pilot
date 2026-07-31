@@ -42,18 +42,6 @@ class FakeRendezvous {
 }
 
 void main() {
-  group('pairingResponse', () {
-    test('与 Node 端 sha256(nonce:secret) 逐字节一致(跨语言固定向量)', () {
-      // echo -n 'abc123:s3cret' | sha256sum —— 与 rendezvous/bridge 的
-      // crypto.createHash("sha256").update(`${nonce}:${secret}`) 同一算法,
-      // 向量钉死防止两侧实现各自漂移。
-      expect(
-        pairingResponse('abc123', 's3cret'),
-        'a6dbade0ff185cba1fe2bfa32680dd79e3142835833c6d84f47e478a8212c0e7',
-      );
-    });
-  });
-
   group('信令地址安全', () {
     test('裸域名自动补 WSS,显式 scheme 保持原样', () {
       expect(
@@ -328,11 +316,7 @@ void main() {
       expect(channel, 'relay-wins');
       // 等 direct 那条迟到结果落地。
       await Future<void>.delayed(const Duration(milliseconds: 300));
-      expect(
-        disposed,
-        <String>['direct-late'],
-        reason: '迟到的赢家必须被 dispose 回收',
-      );
+      expect(disposed, <String>['direct-late'], reason: '迟到的赢家必须被 dispose 回收');
     });
 
     test('两路都失败才算整体失败', () async {
@@ -392,14 +376,13 @@ void main() {
   });
 
   group('GuestSignaling', () {
-    test('握手:welcome→hello(挑战应答)→ok,信令双向转发', () async {
+    test('握手:welcome→hello(设备名+Key)→ok,信令双向转发', () async {
       final server = FakeRendezvous();
       final url = await server.start();
       server.onConnect = (ws) {
         ws.add(
           jsonEncode({
             'type': 'welcome',
-            'nonce': 'abc123',
             'stunUrls': [
               'stun:stun.example.test:3478',
               'turn:relay.example.test:3478',
@@ -413,9 +396,9 @@ void main() {
         if (frame['type'] == 'hello') {
           expect(frame['role'], 'guest');
           expect(frame['deviceId'], 'dev1');
-          expect(frame['response'], pairingResponse('abc123', 's3cret'));
-          // 密钥本身绝不出现在线上帧里
-          expect(jsonEncode(frame).contains('s3cret'), isFalse);
+          expect(frame['secret'], 's3cret');
+          // hello 通过 WSS 传输 Key;伪服务只用于测试协议字段。
+          expect(jsonEncode(frame).contains('s3cret'), isTrue);
           ws.add(
             jsonEncode({
               'type': 'ok',
@@ -484,7 +467,7 @@ void main() {
       final server = FakeRendezvous();
       final url = await server.start();
       server.onConnect = (ws) {
-        ws.add(jsonEncode({'type': 'welcome', 'nonce': 'n'}));
+        ws.add(jsonEncode({'type': 'welcome'}));
       };
       server.onFrame = (ws, frame) {
         if (frame['type'] == 'hello') {

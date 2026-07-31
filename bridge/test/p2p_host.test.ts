@@ -35,6 +35,7 @@ import {
 } from "../src/p2p_host.js";
 
 type Frame = Record<string, any>;
+const TEST_PAIRING_KEY = "S3cret-Key-2026!";
 
 /// 测试内迷你信令服:实现与 rendezvous/ 相同的协议面
 /// (welcome/hello/ok/peer_joined/signal 转发/peer_left),
@@ -51,19 +52,14 @@ class MiniRendezvous {
   ) {
     this.wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
     this.wss.on("connection", (ws) => {
-      const nonce = crypto.randomBytes(8).toString("hex");
       let role: "host" | "guest" | undefined;
       let myPeerId: string | undefined;
-      ws.send(JSON.stringify({ type: "welcome", nonce }));
+      ws.send(JSON.stringify({ type: "welcome" }));
       ws.on("message", (data) => {
         const msg = JSON.parse(data.toString()) as Frame;
         if (msg.type === "hello") {
-          const expected = crypto
-            .createHash("sha256")
-            .update(`${nonce}:${this.secret}`)
-            .digest("hex");
-          if (msg.deviceId !== this.deviceId || msg.response !== expected) {
-            ws.send(JSON.stringify({ type: "error", reason: "bad_secret" }));
+          if (msg.deviceId !== this.deviceId || msg.secret !== this.secret) {
+            ws.send(JSON.stringify({ type: "error", reason: "bad_key" }));
             ws.close();
             return;
           }
@@ -219,13 +215,9 @@ class GuestPeer {
       ws.once("open", resolve);
       ws.once("error", reject);
     });
-    const welcome = await peer.waitWsFrame((f) => f.type === "welcome");
-    const response = crypto
-      .createHash("sha256")
-      .update(`${welcome.nonce as string}:${secret}`)
-      .digest("hex");
+    await peer.waitWsFrame((f) => f.type === "welcome");
     ws.send(
-      JSON.stringify({ type: "hello", role: "guest", deviceId, response }),
+      JSON.stringify({ type: "hello", role: "guest", deviceId, secret }),
     );
     const hello = await peer.waitWsFrame(
       (f) => f.type === "ok" || f.type === "error",
@@ -599,13 +591,13 @@ test("TURN REST 凭据在过期前一分钟刷新", () => {
 });
 
 test("远端只关闭 DataChannel 时 host 也释放对应 PeerConnection", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const logs: string[] = [];
   const host = new P2pHost({
     rendezvousUrl,
     deviceId: "test-dev",
-    secret: "s3cret",
+    secret: TEST_PAIRING_KEY,
     validateMobileToken: () => true,
     acceptMobile: () => {},
     log: (line) => logs.push(line),
@@ -615,7 +607,7 @@ test("远端只关闭 DataChannel 时 host 也释放对应 PeerConnection", asyn
 
   try {
     await rendezvous.waitForHost();
-    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     await guest.offer();
     await guest.waitChannelOpen();
     assert.equal(host.activePeerCount, 1);
@@ -641,14 +633,14 @@ test("远端只关闭 DataChannel 时 host 也释放对应 PeerConnection", asyn
 });
 
 test("peer_left 不杀已建链的 P2P 连接,通道仍可用", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const logs: string[] = [];
   let accepted: WebSocket | undefined;
   const host = new P2pHost({
     rendezvousUrl,
     deviceId: "test-dev",
-    secret: "s3cret",
+    secret: TEST_PAIRING_KEY,
     validateMobileToken: () => true,
     acceptMobile: (socket) => {
       accepted = socket;
@@ -674,7 +666,7 @@ test("peer_left 不杀已建链的 P2P 连接,通道仍可用", async () => {
 
   try {
     await rendezvous.waitForHost();
-    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     await guest.offer();
     await guest.waitChannelOpen();
     guest.channel.send(
@@ -713,13 +705,13 @@ test("peer_left 不杀已建链的 P2P 连接,通道仍可用", async () => {
 });
 
 test("建链未完成时 peer_left 仍清理对应 PeerConnection", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const logs: string[] = [];
   const host = new P2pHost({
     rendezvousUrl,
     deviceId: "test-dev",
-    secret: "s3cret",
+    secret: TEST_PAIRING_KEY,
     validateMobileToken: () => true,
     acceptMobile: () => {},
     log: (line) => logs.push(line),
@@ -770,10 +762,7 @@ test("建链未完成时 peer_left 仍清理对应 PeerConnection", async () => 
         type: "hello",
         role: "guest",
         deviceId: "test-dev",
-        response: crypto
-          .createHash("sha256")
-          .update(`${welcome.nonce as string}:s3cret`)
-          .digest("hex"),
+        secret: TEST_PAIRING_KEY,
       }),
     );
     await waitFrame("ok");
@@ -877,7 +866,7 @@ test("DataChannelSocket: 优先帧插到大消息剩余分片之前", async () =
 });
 
 test("手机经打洞 DataChannel 接入:1MB hub_sync 快照分片后完整抵达", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const port = await freePort();
   const bridgeRoot = path.resolve(import.meta.dirname, "..");
@@ -898,7 +887,7 @@ test("手机经打洞 DataChannel 接入:1MB hub_sync 快照分片后完整抵�
         PI_CWD: bridgeRoot,
         PIPILOT_P2P_RENDEZVOUS: rendezvousUrl,
         PIPILOT_P2P_DEVICE_ID: "test-dev",
-        PIPILOT_P2P_SECRET: "s3cret",
+        PIPILOT_P2P_SECRET: TEST_PAIRING_KEY,
       },
     },
   );
@@ -976,7 +965,7 @@ test("手机经打洞 DataChannel 接入:1MB hub_sync 快照分片后完整抵�
     await waitDesktop((frame) => frame.type === "desktop_registered");
 
     await rendezvous.waitForHost();
-    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     // candidate 故意先于 offer 上行,且从 SDP 中移除内嵌候选;
     // host 若不缓存 pre-offer candidate,这条连接无法建立。
     await guest.offer({
@@ -1052,7 +1041,7 @@ test("手机经打洞 DataChannel 接入:1MB hub_sync 快照分片后完整抵�
 });
 
 test("打洞通道上错误 token 被拒:bridge_error 后关闭", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const port = await freePort();
   const bridgeRoot = path.resolve(import.meta.dirname, "..");
@@ -1073,7 +1062,7 @@ test("打洞通道上错误 token 被拒:bridge_error 后关闭", async () => {
         PI_CWD: bridgeRoot,
         PIPILOT_P2P_RENDEZVOUS: rendezvousUrl,
         PIPILOT_P2P_DEVICE_ID: "test-dev",
-        PIPILOT_P2P_SECRET: "s3cret",
+        PIPILOT_P2P_SECRET: TEST_PAIRING_KEY,
       },
     },
   );
@@ -1083,7 +1072,7 @@ test("打洞通道上错误 token 被拒:bridge_error 后关闭", async () => {
   const guest = await (async () => {
     await waitForHealth(port, child);
     await rendezvous.waitForHost();
-    return GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    return GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
   })();
 
   try {
@@ -1353,13 +1342,13 @@ test("DataChannelSocket chunk-v2: 入站 NACK 触发留存重发,未知 transfer
 });
 
 test("offer 紧跟 candidate 时 host 按 peer 串行化信令,候选不丢", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const logs: string[] = [];
   const host = new P2pHost({
     rendezvousUrl,
     deviceId: "test-dev",
-    secret: "s3cret",
+    secret: TEST_PAIRING_KEY,
     validateMobileToken: () => true,
     acceptMobile: () => {},
     log: (line) => logs.push(line),
@@ -1369,7 +1358,7 @@ test("offer 紧跟 candidate 时 host 按 peer 串行化信令,候选不丢", as
 
   try {
     await rendezvous.waitForHost();
-    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     // SDP 内嵌候选被剥掉,连接只能靠 trickle 的 candidate 帧建立;
     // 且 candidate 紧跟 offer 同拍发出,落在 setRemoteDescription 的 await 窗口。
     // host 不串行化信令时,这条候选会在 remote description 就位前被投喂而丢失。
@@ -1491,13 +1480,13 @@ test("DataChannelSocket: bulk 队列按整条消息原子准入,拒绝不留半�
 });
 
 test("chunk-v2 状态按 owner 隔离:两个 clientId 各有独立留存/重组桶", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const logs: string[] = [];
   const host = new P2pHost({
     rendezvousUrl,
     deviceId: "test-dev",
-    secret: "s3cret",
+    secret: TEST_PAIRING_KEY,
     validateMobileToken: () => true,
     acceptMobile: () => {},
     log: (line) => logs.push(line),
@@ -1510,7 +1499,7 @@ test("chunk-v2 状态按 owner 隔离:两个 clientId 各有独立留存/重组�
     await rendezvous.waitForHost();
     assert.equal(host.ownerStoreCount, 0, "未接入时不应有状态桶");
 
-    a = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    a = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     await a.offer();
     await a.waitChannelOpen();
     a.channel.send(
@@ -1528,7 +1517,7 @@ test("chunk-v2 状态按 owner 隔离:两个 clientId 各有独立留存/重组�
     }
     assert.equal(host.ownerStoreCount, 1);
 
-    b = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    b = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     await b.offer();
     await b.waitChannelOpen();
     b.channel.send(
@@ -1566,7 +1555,7 @@ test("chunk-v2 状态按 owner 隔离:两个 clientId 各有独立留存/重组�
 });
 
 test("P2P 往前翻历史:单页落在 96KiB 预算内(不得用 WS 的 1MB 预算)", async () => {
-  const rendezvous = new MiniRendezvous("test-dev", "s3cret");
+  const rendezvous = new MiniRendezvous("test-dev", TEST_PAIRING_KEY);
   const rendezvousUrl = await rendezvous.url();
   const port = await freePort();
   const bridgeRoot = path.resolve(import.meta.dirname, "..");
@@ -1587,7 +1576,7 @@ test("P2P 往前翻历史:单页落在 96KiB 预算内(不得用 WS 的 1MB 预�
         PI_CWD: bridgeRoot,
         PIPILOT_P2P_RENDEZVOUS: rendezvousUrl,
         PIPILOT_P2P_DEVICE_ID: "test-dev",
-        PIPILOT_P2P_SECRET: "s3cret",
+        PIPILOT_P2P_SECRET: TEST_PAIRING_KEY,
       },
     },
   );
@@ -1666,7 +1655,7 @@ test("P2P 往前翻历史:单页落在 96KiB 预算内(不得用 WS 的 1MB 预�
     await waitDesktop((frame) => frame.type === "desktop_registered");
 
     await rendezvous.waitForHost();
-    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", "s3cret");
+    guest = await GuestPeer.connect(rendezvousUrl, "test-dev", TEST_PAIRING_KEY);
     await guest.offer();
     await guest.waitChannelOpen();
     guest.channel.send(
