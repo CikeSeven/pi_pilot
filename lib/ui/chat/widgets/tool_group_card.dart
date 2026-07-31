@@ -9,16 +9,18 @@ import '../../theme/typography.dart';
 import 'glass_pill.dart';
 import 'tool_card.dart';
 
-/// 连续工具调用的聚合胶囊:**液态玻璃小胶囊,一行摘要,点开才展开全部卡片**。
+/// 连续工具调用的聚合胶囊:**液态玻璃小胶囊,一行摘要,内容长在胶囊内部**。
 ///
 /// 长任务一次刷几十张工具卡会把对话流冲得七零八落 —— 正文才是主角,
 /// 工具调用是过程证据,默认收成一颗胶囊,要查证再点开。
 ///
 /// 胶囊内容:
 /// - 执行中:spinner +「正在执行 read…」(强制展开,实时进度不能藏);
-/// - 单工具:类别小图标 +「bash · export LC_ALL…」(信息不丢);
+/// - 单工具:类别小图标 +「bash · export LC_ALL…」,**展开时摘要行自己换成
+///   完整命令全文**(多行),展开区只有执行结果 —— 命令不重复写两遍;
 /// - 多工具:类别小图标 +「使用了 N 个工具」+ **迷你图标序列**
-///   (按调用顺序排,扫一眼就知道用了哪些、什么顺序 —— 时序不丢)。
+///   (按调用顺序排,扫一眼就知道用了哪些、什么顺序 —— 时序不丢),
+///   展开后每条带自己的身份行 —— 否则看不出结果是谁的。
 ///
 /// `statOnly` 纯统计模式:胶囊只报数量,不可点、无箭头、不展开。
 /// 用于轮尾统计行 —— 工具卡已在消息流原位,展开只是重复。
@@ -70,121 +72,146 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
     final leadCategory = PiToolAvatar.categoryForTool(tools.first.name);
     final (leadBg, leadFg) = PiToolAvatar.colorsFor(leadCategory, piColors);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 液态玻璃胶囊:和思考块折叠态共用 GlassPill,形态统一。
-        // vertical 2:相邻胶囊间距收紧,不空廈。
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          child: GlassPill(
-            onTap: statOnly
-                ? null
-                : () => setState(() => _expanded = !_expanded),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!statOnly && _anyRunning)
-                  SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: colors.primary,
-                    ),
-                  )
-                else
-                  // 领头的类别小印章:胶囊的「身份戳」。
-                  Container(
-                    width: 18,
-                    height: 18,
-                    decoration: BoxDecoration(
-                      color: leadBg,
-                      borderRadius: BorderRadius.circular(PiShape.sm),
-                    ),
-                    child: Icon(
-                      _iconFor(tools.first.name),
-                      size: 12,
-                      color: leadFg,
-                    ),
-                  ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    !statOnly && running != null
-                        ? '正在执行 $running…'
-                        : single
-                        ? _singleLabel(tools.first)
-                        : '使用了 ${tools.length} 个工具',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: !statOnly && _anyRunning
-                          ? colors.primary
-                          : colors.onSurfaceVariant,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                ),
-                // 迷你图标序列:按调用顺序排列,折叠也能看出顺序。
-                if ((statOnly || !_anyRunning) && !single)
-                  ..._miniIcons(piColors),
-                if (!statOnly) ...[
-                  const SizedBox(width: 6),
-                  AnimatedRotation(
-                    turns: expanded ? 0.5 : 0,
-                    duration: PiMotion.collapse,
-                    curve: PiMotion.collapseCurve,
-                    child: Icon(
-                      Icons.expand_more,
-                      size: 15,
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-        // 展开区:**直接**画每个工具的命令与执行结果。
-        //
-        // 以前这里为每个工具再套一张 ToolCard(自带 Card 外壳 + 自己的折叠态),
-        // 于是变成「胶囊点开 → 大卡片 → 再点一次才看到输出」三层。
-        // 现在胶囊是唯一的展开开关,点开就是内容。
-        //
-        // statOnly 时 expanded 恒为 false,这里始终渲染占位空盒 ——
+    // 胶囊**自己就是整张卡片**:摘要行和执行结果都在它内部。
+    //
+    // 以前展开区是胶囊的**兄弟节点**(外面包一个 Column),所以无论怎么改
+    // 它的边框背景,看上去都是「上面一颗胶囊、下面另一块东西」。
+    // vertical 2:相邻胶囊间距收紧,不空廈。
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: GlassPill(
+        onTap: statOnly ? null : () => setState(() => _expanded = !_expanded),
+        // statOnly 时 expanded 恒为 false → 传 null,胶囊保持一行 ——
         // 执行详情已在消息流原位,轮尾统计行不必重复一遍。
-        AnimatedSize(
-          duration: PiMotion.collapse,
-          curve: PiMotion.collapseCurve,
-          alignment: Alignment.topCenter,
-          child: !expanded
-              ? const SizedBox(width: double.infinity)
-              : Padding(
-                  padding: const EdgeInsets.fromLTRB(10, 2, 10, 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (var i = 0; i < tools.length; i++)
-                        _ToolDetail(
-                          key: ValueKey(tools[i].key),
-                          tool: tools[i],
-                          // 多工具时每条之间拉一根细线,分块清楚;
-                          // 第一条紧贴胶囊,不需要。
-                          showDivider: i > 0,
-                        ),
-                    ],
-                  ),
+        expandedChild: !expanded
+            ? null
+            // 外层不再叠水平 padding:展开区里各渲染件自带内边距
+            // (输出井 12、代码块/diff 14),再叠 12 就和摘要行的 12
+            // 错开一倍,输出看起来比标题缩进两层。
+            : single
+            ? _singleContent(tools.first)
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < tools.length; i++)
+                    _ToolDetail(
+                      key: ValueKey(tools[i].key),
+                      tool: tools[i],
+                      // 每条之间拉一根细线,分块清楚;
+                      // 第一条紧贴摘要行,不需要。
+                      showDivider: i > 0,
+                    ),
+                ],
+              ),
+        child: Row(
+          children: [
+            if (!statOnly && _anyRunning)
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: colors.primary,
                 ),
+              )
+            else
+              // 领头的类别小印章:胶囊的「身份戳」。
+              Container(
+                width: 18,
+                height: 18,
+                decoration: BoxDecoration(
+                  color: leadBg,
+                  borderRadius: BorderRadius.circular(PiShape.sm),
+                ),
+                child: Icon(
+                  _iconFor(tools.first.name),
+                  size: 12,
+                  color: leadFg,
+                ),
+              ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                !statOnly && running != null
+                    ? '正在执行 $running…'
+                    : single
+                    ? _singleLabel(tools.first)
+                    : '使用了 ${tools.length} 个工具',
+                // 展开后摘要行自己换成**完整命令全文**(多行不换行截断) ——
+                // 折叠时是单行 ellipsis。同一行文字从「截断版」变「完整版」,
+                // 展开区就不再需要重复写一遍命令。
+                maxLines: single && expanded ? null : 1,
+                overflow: single && expanded ? null : TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: !statOnly && _anyRunning
+                      ? colors.primary
+                      : colors.onSurfaceVariant,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
+            // 单工具完成且失败:摘要行补一个错误标记。
+            // 以前它住在展开区的身份行里,身份行删了以后单工具失败就没法
+            // 一眼看出来。(成功不加标 —— 安静是默认态。)
+            if (!statOnly &&
+                single &&
+                tools.first.done &&
+                tools.first.isError &&
+                !isAskAnswerOutput(tools.first)) ...[
+              const SizedBox(width: 6),
+              Icon(Icons.error_outline, size: 15, color: colors.error),
+            ],
+            // 迷你图标序列:按调用顺序排列,折叠也能看出顺序。
+            if ((statOnly || !_anyRunning) && !single) ..._miniIcons(piColors),
+            if (!statOnly) ...[
+              const SizedBox(width: 6),
+              AnimatedRotation(
+                turns: expanded ? 0.5 : 0,
+                duration: PiMotion.collapse,
+                curve: PiMotion.collapseCurve,
+                child: Icon(
+                  Icons.expand_more,
+                  size: 15,
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ],
         ),
-      ],
+      ),
     );
   }
 
-  /// 单工具胶囊:「bash · export LC_ALL…」—— 名称 + 参数摘要,信息不丢。
+  /// 单工具胶囊:「bash · export LC_ALL…」—— 名称 + **完整**命令。
+  ///
+  /// 折叠时 Text 自己会 ellipsis,视觉和以前一样;展开时同一行放开为多行,
+  /// 完整原文直接显出来。用 fullToolCommand 而不是 argsSummary:
+  /// 后者被 _clip 砍到 300 字符,长命令永远不能完整展示。
   String _singleLabel(ToolItem tool) {
-    if (tool.argsSummary.isEmpty) return tool.name;
-    return '${tool.name} · ${tool.argsSummary}';
+    final command = fullToolCommand(tool);
+    if (command == null) return tool.name;
+    return '${tool.name} · $command';
+  }
+
+  /// 单工具展开内容:**只有执行结果**。
+  ///
+  /// 命令不再在这里重复 —— 展开时摘要行(上面那行)自己已经换成完整全文,
+  /// 下面再写一遍就是画蛇添足。
+  Widget _singleContent(ToolItem tool) {
+    if (toolHasBody(tool)) return ToolExecutionContent(item: tool);
+    // 完成了但没有任何输出:展开不能是空的,给一句交代。
+    return Builder(
+      builder: (context) => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        child: Text(
+          '没有输出',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
   }
 
   /// 迷你图标序列:每个工具一枚 16px 小印章,按调用顺序排。
@@ -266,8 +293,9 @@ class _ToolDetail extends StatelessWidget {
           Divider(height: 17, thickness: 1, color: colors.outlineVariant),
         // 身份行:类别印章 + 工具名 + 状态位。不铺整行底色 ——
         // 胶囊已经担了分组的视觉外壳,这里再铺一条就又回到「卡中卡」。
+        // 水平 12:与摘要行的 12 对齐(外层不再叠 padding)。
         Padding(
-          padding: const EdgeInsets.only(top: 2, bottom: 2),
+          padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
           child: Row(
             children: [
               Container(
@@ -310,12 +338,13 @@ class _ToolDetail extends StatelessWidget {
             ],
           ),
         ),
-        // 参数/命令横跨整行。不限行数:路径、命令看得全比挤成一行再 ellipsis 强。
-        if (tool.argsSummary.isNotEmpty)
+        // **完整**命令/路径:不限行数,看得全比截断强。
+        // 输出井/代码块自带 12/14 内边距,与本行的 12 基本对齐。
+        if (fullToolCommand(tool) case final command?)
           Padding(
-            padding: const EdgeInsets.only(bottom: 2),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 2),
             child: Text(
-              tool.argsSummary,
+              command,
               style: AppType.monoLabel(color: colors.onSurfaceVariant),
             ),
           ),
@@ -323,4 +352,21 @@ class _ToolDetail extends StatelessWidget {
       ],
     );
   }
+}
+
+/// 展开区展示的**完整**命令/路径。
+///
+/// 胶囊摘要行是单行截断的 `argsSummary` —— 它还被 `_clip` 砍到 300 字符,
+/// 长命令光看摘要行根本看不全。展开必须把原文摆出来:bash 取 `args.command`,
+/// 文件类工具取 `args.path`,都不截断;其余工具退回 `argsSummary`。
+String? fullToolCommand(ToolItem tool) {
+  final args = tool.args;
+  if (args != null) {
+    final command = args['command'];
+    if (command is String && command.isNotEmpty) return command;
+    final path = args['path'];
+    if (path is String && path.isNotEmpty) return path;
+  }
+  if (tool.argsSummary.isNotEmpty) return tool.argsSummary;
+  return null;
 }

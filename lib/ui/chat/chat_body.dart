@@ -342,10 +342,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
 
     // 派生渲染行。**按轮分段**(UserItem 开头),完成轮与进行轮统一布局:
     //
-    // - 工具原位:连续工具聚成一颗胶囊,位置和实际执行顺序一致,
-    //   实时进度看得见;不再把工具挪到轮尾重排(会弄丢上下文位置)。
+    // - 工具原位:**每个工具各自一颗胶囊**,位置和实际执行顺序一致,
+    //   实时进度看得见;连续调用不再合并 —— 每条都能单独展开看命令和结果。
     // - 轮尾追加一颗**纯统计**胶囊(「使用了 N 个工具」+ 迷你图标),
-    //   不可点、不展开 —— 工具卡已在流里,展开只是重复。
+    //   不可点、不展开 —— 一轮几十次调用要有个总账,明细已在流里逐条列出。
     final rows = <_ChatRow>[];
     final index = <String, int>{};
     final rowTimes = <DateTime?>[];
@@ -369,26 +369,17 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
           i.text.isEmpty &&
           i.thinking.isEmpty;
 
-      // 按原始顺序流式扫描,连续工具原位聚合成组。
+      // 按原始顺序流式扫描,每个工具各自一行 —— 连续调用不合并。
       final allTools = <ToolItem>[];
-      var pending = <ToolItem>[];
-      void flushPending() {
-        if (pending.isEmpty) return;
-        addRow(_ToolGroupRow(List.unmodifiable(pending)), null, pending);
-        pending = [];
-      }
-
       for (var i = start; i < end; i++) {
         final item = items[i];
         if (item is ToolItem) {
           allTools.add(item);
-          pending.add(item);
+          addRow(_ToolGroupRow(List.unmodifiable([item])), null, [item]);
         } else if (!isEmptyAssistant(item)) {
-          flushPending();
           addRow(_SingleRow(item), timeOf(item), [item]);
         }
       }
-      flushPending();
 
       // 轮尾统计胶囊。不注册工具 key:那些 key 属于流里的原位工具行,
       // 重复注册会把滚动锚点从工具行抢过来。
@@ -1093,8 +1084,8 @@ bool shouldAutoLoadEarlier({
 
 /// 消息列表的渲染行:由 ChatItem 列表派生。
 ///
-/// 连续 ToolItem 原位聚合成 [_ToolGroupRow],其余每项一行;每轮末尾
-/// 追加一颗纯统计的 [_ToolStatRow]。窗口/下标/时间戳全按行维度计算,
+/// 每个 ToolItem 各自一行([_ToolGroupRow] 现在只装单个工具),其余每项一行;
+/// 每轮末尾追加一颗纯统计的 [_ToolStatRow]。窗口/下标/时间戳全按行维度计算,
 /// 不再直接用 items 下标。
 sealed class _ChatRow {
   const _ChatRow();

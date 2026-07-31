@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../common/overscroll_forwarder.dart';
 import '../../common/tokens.dart';
 import '../../theme/semantic_colors.dart';
 import '../../theme/typography.dart';
@@ -164,7 +165,8 @@ class DiffView extends StatelessWidget {
     if (maxHeight != null) {
       body = ConstrainedBox(
         constraints: BoxConstraints(maxHeight: maxHeight!),
-        child: SingleChildScrollView(child: body),
+        // 纵向滚到头后让路给外层消息列表。
+        child: OverscrollForwarder(child: SingleChildScrollView(child: body)),
       );
     }
     if (embedded) return body;

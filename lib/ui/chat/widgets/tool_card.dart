@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/pi_session.dart';
+import '../../common/overscroll_forwarder.dart';
 import '../../common/tool_avatar.dart';
 import '../../theme/motion.dart';
 import '../../theme/semantic_colors.dart';
@@ -340,10 +341,13 @@ Widget _outputWell(BuildContext context, String text) {
     width: double.infinity,
     constraints: const BoxConstraints(maxHeight: _kOutputMaxHeight),
     padding: const EdgeInsets.all(12),
-    child: SingleChildScrollView(
-      child: AnsiText(
-        text: text,
-        style: AppType.monoSmall(color: piColors.codeWellFg),
+    // 纵向滚动到头后继续拖,增量转交外层消息列表(OverscrollForwarder)。
+    child: OverscrollForwarder(
+      child: SingleChildScrollView(
+        child: AnsiText(
+          text: text,
+          style: AppType.monoSmall(color: piColors.codeWellFg),
+        ),
       ),
     ),
   );

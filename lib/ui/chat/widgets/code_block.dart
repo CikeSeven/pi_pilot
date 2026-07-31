@@ -21,6 +21,7 @@ import 'package:re_highlight/languages/yaml.dart';
 import 'package:re_highlight/re_highlight.dart';
 
 import '../../common/tokens.dart';
+import '../../common/overscroll_forwarder.dart';
 import '../../theme/highlight_theme.dart';
 import '../../theme/semantic_colors.dart';
 import '../../theme/typography.dart';
@@ -216,7 +217,8 @@ class _CodeBlockState extends State<CodeBlock> {
     if (widget.maxHeight != null) {
       body = ConstrainedBox(
         constraints: BoxConstraints(maxHeight: widget.maxHeight!),
-        child: SingleChildScrollView(child: body),
+        // 纵向滚到头后让路给外层消息列表。
+        child: OverscrollForwarder(child: SingleChildScrollView(child: body)),
       );
     }
 
