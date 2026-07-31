@@ -14,7 +14,12 @@ class NavAnchor {
   final DateTime? time;
 }
 
-/// 消息导航轨道:左侧边缘的刻度条,每个刻度对应一条用户消息。
+/// 消息导航轨道:屏幕左缘、**垂直居中**的一段刻度条,
+/// 每个刻度对应一条用户消息。
+///
+/// 形态(参考章节刻度轨):轨道不铺满全屏 —— 高度约为可用区的 55%
+/// (220~520dp 之间),居中停靠;刻度在轨道内**均匀密布**,
+/// 第 i 个刻度就是第 i 条用户消息,过密时抽样绘制。
 ///
 /// 交互:
 /// - **点击刻度** —— 直接跳转到对应消息;
@@ -24,14 +29,13 @@ class NavAnchor {
 /// - **显隐** —— 由外部 [visible] 驱动(滚动时弹出,静置自动缩回),
 ///   轨道被触摸期间外部应挂起自动隐藏。
 ///
-/// 视觉上是一条 28dp 宽的透明热区,刻度画在右内侧;预览卡浮在轨道右边。
+/// 触控热区随轨道一起缩在中间:左缘上下不再拦截消息区的滚动手势。
 class MessageNavRail extends StatefulWidget {
   const MessageNavRail({
     super.key,
     required this.visible,
     required this.anchors,
     required this.currentRow,
-    required this.totalRows,
     required this.onJump,
     required this.onInteractionChanged,
   });
@@ -44,12 +48,6 @@ class MessageNavRail extends StatefulWidget {
 
   /// 视口估算位置对应的行下标(-1 未知),用来高亮最近刻度。
   final int currentRow;
-
-  /// 完整渲染行表长度。刻度按 rowIndex/(totalRows-1) 比例分布 ——
-  /// 刻度位置就是消息在列表里的真实相对位置,和滚动位置成线性关系。
-  ///(之前按「锚点序号」均布,消息分布不均时刻度和真实位置对不上,
-  /// 点/拖到的消息和视觉位置预期不一致;均布还把刻度摊开,间隙虚大。)
-  final int totalRows;
 
   /// 跳转请求:参数是目标行下标。窗口扩展/粗跳/精修由调用方负责。
   final ValueChanged<int> onJump;
@@ -118,28 +116,14 @@ class _MessageNavRailState extends State<MessageNavRail>
     return best;
   }
 
-  /// 手势 y → 最近的刻度下标。
-  ///
-  /// 与绘制同一套映射:y 比例 → 列表行号 → 最近锚点。
-  /// 锚点按 rowIndex 升序,线性扫描对几百条足够(手势更新才 60Hz)。
+  /// 手势 y → 刻度下标:轨道内均匀分布,与绘制同一套映射。
   int _indexAt(double y, double height) {
     final n = widget.anchors.length;
     if (n == 0) return 0;
     const pad = _RailPainter.vPad;
     final usable = (height - pad * 2).clamp(1.0, double.infinity);
     final t = ((y - pad) / usable).clamp(0.0, 1.0);
-    final denom = (widget.totalRows - 1).clamp(1, 1 << 30);
-    final targetRow = t * denom;
-    var best = 0;
-    var bestDist = double.infinity;
-    for (var i = 0; i < n; i++) {
-      final d = (widget.anchors[i].rowIndex - targetRow).abs();
-      if (d < bestDist) {
-        bestDist = d;
-        best = i;
-      }
-    }
-    return best;
+    return (t * (n - 1)).round();
   }
 
   void _startPreview(double y, double height) {
@@ -180,58 +164,63 @@ class _MessageNavRailState extends State<MessageNavRail>
         ).animate(_slide),
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final height = constraints.maxHeight;
-            return GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTapUp: (d) {
-                final i = _indexAt(d.localPosition.dy, height);
-                if (i < widget.anchors.length) {
-                  widget.onJump(widget.anchors[i].rowIndex);
-                }
-              },
-              onVerticalDragStart: (d) =>
-                  _startPreview(d.localPosition.dy, height),
-              onVerticalDragUpdate: (d) =>
-                  _updatePreview(d.localPosition.dy, height),
-              onVerticalDragEnd: (_) => _endPreview(),
-              onVerticalDragCancel: _endPreview,
-              onLongPressStart: (d) =>
-                  _startPreview(d.localPosition.dy, height),
-              onLongPressMoveUpdate: (d) =>
-                  _updatePreview(d.localPosition.dy, height),
-              onLongPressEnd: (_) => _endPreview(),
-              onLongPressCancel: _endPreview,
-              child: SizedBox(
-                width: 28,
-                height: height,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    CustomPaint(
-                      size: Size(28, height),
-                      painter: _RailPainter(
-                        rowIndexes: [
-                          for (final a in widget.anchors) a.rowIndex,
-                        ],
-                        totalRows: widget.totalRows,
-                        currentIndex: _currentIndex,
-                        activeIndex: _activeIndex,
-                        tickColor: colors.outlineVariant,
-                        currentColor: colors.primary,
-                        trackColor: colors.outlineVariant.withValues(
-                          alpha: 0.35,
+            // 轨道缩在中间:高度 = 可用区 55%,夹在 220~520 之间。
+            // 刻度在里面均匀密布 —— 不铺满全屏。
+            final railHeight = (constraints.maxHeight * 0.55).clamp(
+              220.0,
+              520.0,
+            );
+            return Align(
+              alignment: Alignment.centerLeft,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapUp: (d) {
+                  final i = _indexAt(d.localPosition.dy, railHeight);
+                  if (i < widget.anchors.length) {
+                    widget.onJump(widget.anchors[i].rowIndex);
+                  }
+                },
+                onVerticalDragStart: (d) =>
+                    _startPreview(d.localPosition.dy, railHeight),
+                onVerticalDragUpdate: (d) =>
+                    _updatePreview(d.localPosition.dy, railHeight),
+                onVerticalDragEnd: (_) => _endPreview(),
+                onVerticalDragCancel: _endPreview,
+                onLongPressStart: (d) =>
+                    _startPreview(d.localPosition.dy, railHeight),
+                onLongPressMoveUpdate: (d) =>
+                    _updatePreview(d.localPosition.dy, railHeight),
+                onLongPressEnd: (_) => _endPreview(),
+                onLongPressCancel: _endPreview,
+                child: SizedBox(
+                  width: 28,
+                  height: railHeight,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      CustomPaint(
+                        size: Size(28, railHeight),
+                        painter: _RailPainter(
+                          count: widget.anchors.length,
+                          currentIndex: _currentIndex,
+                          activeIndex: _activeIndex,
+                          tickColor: colors.outlineVariant,
+                          currentColor: colors.primary,
+                          trackColor: colors.outlineVariant.withValues(
+                            alpha: 0.35,
+                          ),
                         ),
                       ),
-                    ),
-                    if (_activeIndex != null)
-                      Positioned(
-                        left: 32,
-                        top: (_previewY - 44).clamp(0.0, height - 88),
-                        child: _PreviewCard(
-                          anchor: widget.anchors[_activeIndex!],
+                      if (_activeIndex != null)
+                        Positioned(
+                          left: 32,
+                          top: (_previewY - 44).clamp(0.0, railHeight - 88),
+                          child: _PreviewCard(
+                            anchor: widget.anchors[_activeIndex!],
+                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             );
@@ -242,15 +231,14 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 }
 
-/// 刻度绘制:按消息在列表中的真实位置(rowIndex/totalRows)比例分布。
+/// 刻度绘制:轨道内均匀分布的小横线。
 ///
-/// 过密时跳过重叠刻度(相邻 < 2.5px),但当前/拖拽刻度永远绘制。
-/// 轨道画一条淡竖线打底 —— 比例分布下消息稀疏区刻度必然稀,
-/// 没有基线会显得「断档」,有基线读起来才是「这条轨道上这里没消息」。
+/// 过密(相邻 < 3px)时抽样绘制,当前/拖拽刻度永远绘制;
+/// 抽样只影响视觉,手势映射仍按全量序号。
+/// 一条淡竖线作轨道基线,稀疏时读起来是「轨道」而不是散点。
 class _RailPainter extends CustomPainter {
   _RailPainter({
-    required this.rowIndexes,
-    required this.totalRows,
+    required this.count,
     required this.currentIndex,
     required this.activeIndex,
     required this.tickColor,
@@ -260,9 +248,7 @@ class _RailPainter extends CustomPainter {
 
   static const vPad = 6.0;
 
-  /// 每个锚点的行下标(升序)。
-  final List<int> rowIndexes;
-  final int totalRows;
+  final int count;
   final int currentIndex;
   final int? activeIndex;
   final Color tickColor;
@@ -271,15 +257,13 @@ class _RailPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final count = rowIndexes.length;
     if (count <= 0) return;
     final paint = Paint()
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
     final usable = size.height - vPad * 2;
-    final denom = (totalRows - 1).clamp(1, 1 << 30);
 
-    // 轨道基线:淡竖线,刻度从它出发向右画。
+    // 轨道基线。
     canvas.drawLine(
       const Offset(2, vPad),
       Offset(2, size.height - vPad),
@@ -288,14 +272,18 @@ class _RailPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
-    var lastY = -10.0;
-    for (var i = 0; i < count; i++) {
-      final y = vPad + usable * rowIndexes[i] / denom;
-      final isCurrent = i == currentIndex;
+    // 均匀密布:3px 一个刻度,超出容量就抽样(视觉),交互不受影响。
+    final maxTicks = (usable / 3).floor().clamp(1, count);
+    final step = (count / maxTicks).ceil();
+
+    for (var i = 0; i < count; i += step) {
+      final y = count == 1
+          ? vPad + usable / 2
+          : vPad + usable * i / (count - 1);
+      final isCurrent =
+          i == currentIndex ||
+          (currentIndex >= 0 && (currentIndex - i).abs() < step);
       final isActive = i == activeIndex;
-      // 重叠刻度跳过绘制(交互映射不受影响),高亮刻度除外。
-      if (!isCurrent && !isActive && y - lastY < 2.5) continue;
-      lastY = y;
       final width = isCurrent
           ? 16.0
           : isActive
@@ -312,8 +300,7 @@ class _RailPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_RailPainter old) =>
-      old.rowIndexes != rowIndexes ||
-      old.totalRows != totalRows ||
+      old.count != count ||
       old.currentIndex != currentIndex ||
       old.activeIndex != activeIndex ||
       old.tickColor != tickColor ||

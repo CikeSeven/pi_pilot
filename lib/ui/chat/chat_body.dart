@@ -674,7 +674,6 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   child: MessageNavRail(
                     visible: _railVisible || _railInteracting,
                     anchors: _navAnchors,
-                    totalRows: _rows.length,
                     currentRow:
                         _scroll.hasClients &&
                             _scroll.position.hasContentDimensions &&
