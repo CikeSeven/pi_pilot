@@ -21,8 +21,7 @@ export '../core/pi_connection.dart' show PiConnStatus;
 export 'hub_models.dart';
 // 当前设备代理:让旧调用点(import 本文件)继续用 piSessionProvider 这个名字,
 // 语义从「唯一连接」变为「激活设备的连接」。
-export 'device_manager.dart'
-    show piSessionProvider, piSessionNotifierProvider;
+export 'device_manager.dart' show piSessionProvider, piSessionNotifierProvider;
 
 // ---------------------------------------------------------------------------
 // Chat items (mutable: the notifier mutates fields then bumps `revision`)
@@ -54,8 +53,12 @@ class AssistantItem extends ChatItem {
 
   /// 思考累计时长。每次 thinking 更新顺手算一次,thinking 停止增长后
   /// 自然停在最终值 —— 不用找「思考结束」的精确时机。
-  /// 历史回放是一下子拿到全文,duration ≈ 0,UI 显示「已思考」不带秒数。
+  /// 历史回放由 relay 的 thinkingDurationMs 精确补上(见 _ingestMessage)。
   Duration thinkingDuration = Duration.zero;
+
+  /// 上次见到的 thinking 长度:只在**增长**时推进 thinkingDuration,
+  /// 正文流式不会把时长越拖越长。
+  int thinkingLenSeen = 0;
 
   /// pi 的 message.stopReason:stop/length/toolUse/error/aborted。
   /// null 表示未知(历史回放可能缺失)。仅 error/aborted 需要向用户标记。
@@ -777,10 +780,7 @@ const int _leaseTtlMs = 8000;
 
 enum _OpenRoute { configured, lanOnly, p2pOnly }
 
-typedef _ConnectionScope = ({
-  int generation,
-  PiConnection connection,
-});
+typedef _ConnectionScope = ({int generation, PiConnection connection});
 
 class PiSessionNotifier extends Notifier<PiState> {
   /// family 注入:这台 notifier 负责的 roster 设备 id。
@@ -1104,11 +1104,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     // opId 幂等:发送前落 WAL,断线恢复后按 hub_op_status 对账,
     // 查不到的一律"结果未知"提示用户,绝不自动重放(防重复提交)。
     final opId = await _nextOpId();
-    final sent = _conn?.send({
-      ...frame,
-      ...meta,
-      'opId': ?opId,
-    }) ?? false;
+    final sent = _conn?.send({...frame, ...meta, 'opId': ?opId}) ?? false;
     if (sent && opId != null) {
       unawaited(
         _syncStore?.insertOp(
@@ -1166,10 +1162,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       } else if (resp != null) {
         await store.updateOpStatus(opId, 'unknown');
         if (!current()) return;
-        _addSystem(
-          '断线前的「${op['type']}」结果未知,请确认后手动重试',
-          SystemKind.error,
-        );
+        _addSystem('断线前的「${op['type']}」结果未知,请确认后手动重试', SystemKind.error);
         _write(state.copyWith());
       }
       // resp == null:桥没回,保持 pending,下次重连再对账。
@@ -1264,7 +1257,9 @@ class PiSessionNotifier extends Notifier<PiState> {
       for (final source in raw)
         if (source is Map) SourceInfo.fromMap(source),
     ];
-    _write(state.copyWith(sources: parsed, sessionPhase: SyncPhase.catalogReady));
+    _write(
+      state.copyWith(sources: parsed, sessionPhase: SyncPhase.catalogReady),
+    );
     return parsed;
   }
 
@@ -1429,8 +1424,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
 
     final resp = await _request('hub_select_source', {'sourceId': sourceId});
-    if (gen != _syncGeneration ||
-        !_connectionScopeCurrent(connectionScope)) {
+    if (gen != _syncGeneration || !_connectionScopeCurrent(connectionScope)) {
       return false;
     }
     if (resp?['success'] != true) {
@@ -1619,10 +1613,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   Future<void> _initializeAfterConnect(int generation) async {
     final connection = _conn;
     if (connection == null) return;
-    final connectionScope = (
-      generation: generation,
-      connection: connection,
-    );
+    final connectionScope = (generation: generation, connection: connection);
     if (!_connectionScopeCurrent(connectionScope)) return;
 
     _reconnectAttempt = 0;
@@ -1634,9 +1625,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       await _applyPreferences(connectionScope: connectionScope);
       return;
     }
-    final available = await _refreshSources(
-      connectionScope: connectionScope,
-    );
+    final available = await _refreshSources(connectionScope: connectionScope);
     if (!_connectionScopeCurrent(connectionScope)) return;
     final settings = ref.read(settingsProvider);
     final preferred = settings.preferredSourceId;
@@ -1673,9 +1662,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       healPreference = true;
     }
 
-    unawaited(
-      _refreshHubSessionsWithRetry(connectionScope: connectionScope),
-    );
+    unawaited(_refreshHubSessionsWithRetry(connectionScope: connectionScope));
     if (target != null) {
       await _selectSource(
         target.id,
@@ -2159,9 +2146,7 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// Re-apply persisted preferences (model / thinking / auto-retry) that pi
   /// does not itself restore for a fresh process.
-  Future<void> _applyPreferences({
-    _ConnectionScope? connectionScope,
-  }) async {
+  Future<void> _applyPreferences({_ConnectionScope? connectionScope}) async {
     if (!_connectionScopeCurrent(connectionScope)) return;
     final settings = ref.read(settingsProvider);
     final provider = settings.modelProvider;
@@ -2235,8 +2220,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     final tryLan = switch (route) {
       _OpenRoute.lanOnly => true,
       _OpenRoute.p2pOnly => false,
-      _OpenRoute.configured =>
-        transport != DeviceTransport.p2p && !stickyP2p,
+      _OpenRoute.configured => transport != DeviceTransport.p2p && !stickyP2p,
     };
     final tryP2p =
         p2p != null &&
@@ -2426,8 +2410,7 @@ class PiSessionNotifier extends Notifier<PiState> {
 
     if (generation != _connectionGeneration || !_shouldRecoverLan) return;
     final probeHubId = hello?['hubId'] as String?;
-    final wrongHub =
-        expectedHubId != null && probeHubId != expectedHubId;
+    final wrongHub = expectedHubId != null && probeHubId != expectedHubId;
     if (hello == null || wrongHub) {
       _scheduleLanRecovery(replace: true);
       if (state.status != PiConnStatus.connected &&
@@ -2970,9 +2953,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       if (resp?['success'] != true || data == null) {
         // 旧实现在这里静默 return:初次同步失败后只有 seq 缺口/epoch 变化
         // 才会再来一次 —— 链路差到事件也排在后面时,会话永远空白。
-        _logP2p(
-          'hub_sync failed(success=${resp?['success']}),schedule resync',
-        );
+        _logP2p('hub_sync failed(success=${resp?['success']}),schedule resync');
         state = state.copyWith(sessionPhase: SyncPhase.degraded);
         _scheduleSourceResync(reason: 'sync-failed');
         return;
@@ -3212,9 +3193,14 @@ class PiSessionNotifier extends Notifier<PiState> {
         // 覆盖后立刻修剪:pruneEntries 此前没有任何生产调用点,持久化历史
         // 实际上是无界的。20MB 量级会话累积几场就能吃光手机存储。
         unawaited(
-          store.replaceEntries(sourceKey, rows).then(
-            (_) => store.pruneEntries(sourceKey, SyncStore.maxPersistedEntries),
-          ),
+          store
+              .replaceEntries(sourceKey, rows)
+              .then(
+                (_) => store.pruneEntries(
+                  sourceKey,
+                  SyncStore.maxPersistedEntries,
+                ),
+              ),
         );
       }
     }
@@ -3526,7 +3512,9 @@ class PiSessionNotifier extends Notifier<PiState> {
       final total = now.difference(startedAt);
       if (total > _hardRequestTimeout) {
         _pending.remove(id);
-        _logP2p('rpc_hard_timeout{type:$type,id:$id,totalMs:${total.inMilliseconds}}');
+        _logP2p(
+          'rpc_hard_timeout{type:$type,id:$id,totalMs:${total.inMilliseconds}}',
+        );
         finish(null);
         return;
       }
@@ -3806,29 +3794,32 @@ class PiSessionNotifier extends Notifier<PiState> {
         _applyPiEvent(event);
         // entry 型事件与游标同一事务落盘:游标永不先于数据,
         // 进程在两步之间被杀也不会出现"游标超前于缓存"的静默丢段。
-        final appendedEntry =
-            event['type'] == 'entry_appended' ? event['entry'] : null;
+        final appendedEntry = event['type'] == 'entry_appended'
+            ? event['entry']
+            : null;
         final store = _syncStore;
         final sourceKey = _syncSourceKey;
         if (appendedEntry is Map && store != null && sourceKey != null) {
           unawaited(
-            store.commitEventWithCursor(
-              sourceKey: sourceKey,
-              entry: Map<String, dynamic>.from(appendedEntry),
-              entryId: appendedEntry['id'] as String?,
-              seq: seq,
-              epoch: epoch,
-              cursor: <String, dynamic>{
-                'v': 2,
-                'hubId': state.hubId,
-                'sourceId': sourceId,
-                'sourceEpoch': epoch,
-                'seq': seq,
-                'sessionId': state.sessionId,
-                'lastEntryId': _leafId,
-                'savedAt': DateTime.now().millisecondsSinceEpoch,
-              },
-            ).then((_) => _maybePruneEntries(store, sourceKey)),
+            store
+                .commitEventWithCursor(
+                  sourceKey: sourceKey,
+                  entry: Map<String, dynamic>.from(appendedEntry),
+                  entryId: appendedEntry['id'] as String?,
+                  seq: seq,
+                  epoch: epoch,
+                  cursor: <String, dynamic>{
+                    'v': 2,
+                    'hubId': state.hubId,
+                    'sourceId': sourceId,
+                    'sourceEpoch': epoch,
+                    'seq': seq,
+                    'sessionId': state.sessionId,
+                    'lastEntryId': _leafId,
+                    'savedAt': DateTime.now().millisecondsSinceEpoch,
+                  },
+                )
+                .then((_) => _maybePruneEntries(store, sourceKey)),
           );
         }
         unawaited(_saveHubCursor());
@@ -4151,6 +4142,12 @@ class PiSessionNotifier extends Notifier<PiState> {
           bubble.thinking = thinking;
           bubble.stopReason = stopReason;
           bubble.complete = true;
+          // relay 实测时长优先于手机现算(手机只能算自己连着的窗口)。
+          final relayMs = message['thinkingDurationMs'];
+          if (relayMs is num && relayMs > 0) {
+            bubble.thinkingDuration = Duration(milliseconds: relayMs.round());
+            bubble.thinkingLenSeen = thinking.length;
+          }
           _streamingAssistant = null;
           _noteAssistantError(item: bubble, stopReason: stopReason);
         } else {
@@ -4229,12 +4226,14 @@ class PiSessionNotifier extends Notifier<PiState> {
     final (text, thinking) = _textAndThinking(message['content']);
     bubble.text = text;
     bubble.thinking = thinking;
-    // 思考时长:第一次见非空记起点,之后每次更新顺手累计。
-    if (thinking.isNotEmpty) {
+    // 思考时长:只在 thinking **增长**时推进 —— 停下后定格,
+    // 正文生成时间不会被拖进「思考了 Xs」。
+    if (thinking.isNotEmpty && thinking.length != bubble.thinkingLenSeen) {
       bubble.thinkingStart ??= DateTime.now();
       bubble.thinkingDuration = DateTime.now().difference(
         bubble.thinkingStart!,
       );
+      bubble.thinkingLenSeen = thinking.length;
     }
     // 流式 error delta:reason 为 aborted/error。message_end 可能随后到
     // 也可能在断层里丢掉,这里先标记并提示,避免错误被吞。
@@ -4608,12 +4607,23 @@ class PiSessionNotifier extends Notifier<PiState> {
         final key = 'assistant:$ts';
         final (text, thinking) = _textAndThinking(message['content']);
         final stopReason = message['stopReason'] as String?;
+        // relay 在 pi 进程里按 delta 实测的思考时长(精确值)。
+        // 断线重连/锁屏后一次性到位的消息靠它补上,
+        // 否则手机只能显示「已思考」。
+        final relayMs = message['thinkingDurationMs'];
+        final relayDuration = relayMs is num && relayMs > 0
+            ? Duration(milliseconds: relayMs.round())
+            : null;
         final existing = _itemsByKey[key];
         if (existing is AssistantItem) {
           existing.text = text;
           existing.thinking = thinking;
           existing.stopReason = stopReason;
           existing.complete = true;
+          if (relayDuration != null) {
+            existing.thinkingDuration = relayDuration;
+            existing.thinkingLenSeen = thinking.length;
+          }
         } else if (_seenMsgKeys.add(key)) {
           final item = AssistantItem(key)
             ..text = text
@@ -4621,6 +4631,10 @@ class PiSessionNotifier extends Notifier<PiState> {
             ..stopReason = stopReason
             ..complete = true
             ..time = _timeFrom(ts);
+          if (relayDuration != null) {
+            item.thinkingDuration = relayDuration;
+            item.thinkingLenSeen = thinking.length;
+          }
           _addItem(item);
         }
         _noteAssistantError(
