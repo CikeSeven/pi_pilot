@@ -7,6 +7,7 @@ import '../theme/paper.dart';
 import '../theme/semantic_colors.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
+import '../shell/liquid_nav_bar.dart' show kLiquidNavBarHeight;
 import 'settings_sections.dart';
 import '../theme/squircle.dart';
 
@@ -81,7 +82,16 @@ class SettingsScreen extends ConsumerWidget {
         child: SafeArea(
           bottom: false,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 36),
+            // 底栏在设备/设置页常驻(AppShell),底部让位栏高 + 安全区。
+            // viewPadding 不被祖先 SafeArea 消费,拿到的是真实系统安全区。
+            padding: EdgeInsets.fromLTRB(
+              20,
+              20,
+              20,
+              MediaQuery.viewPaddingOf(context).bottom +
+                  kLiquidNavBarHeight +
+                  16,
+            ),
             children: [
               // 页头:衬线大标题 + 品牌印章,像刊物目录页的报头
               Row(

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/ui/chat/widgets/island_bar.dart';
 import 'package:pi_pilot/ui/settings/settings_screen.dart';
 import 'package:pi_pilot/ui/shell/app_shell.dart';
+import 'package:pi_pilot/ui/shell/liquid_nav_bar.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -79,17 +80,94 @@ void main() {
     );
   });
 
-  testWidgets('设置向右翻页可达(不再走抽屉页脚)', (tester) async {
+  testWidgets('右滑任意位置打开会话抽屉(不再限于左边缘)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
-    await tester.pump();
+    await settle(tester);
 
-    // 新外壳:三页 PageView(设置 | 会话 | 设备)。液态导航栏只在滚动时
-    // 现身,平时收起 —— 所以设置靠「把内容往右拖,翻到上一页」到达。
-    await tester.dragFrom(const Offset(400, 300), const Offset(300, 0));
+    // 屏幕中部向右拖:对话页是 PageView 第一页,右滑只会产生前缘过卷,
+    // 累计超过阈值即开抽屉(见 AppShell._onScrollNotification)。
+    await tester.dragFrom(const Offset(400, 300), const Offset(160, 0));
+    await settle(tester);
+
+    expect(find.byType(Drawer), findsOneWidget);
+  });
+
+  testWidgets('小幅右滑不误触抽屉(累计位移要过阈值)', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await settle(tester);
+
+    await tester.dragFrom(const Offset(400, 300), const Offset(40, 0));
+    await settle(tester);
+
+    expect(find.byType(Drawer), findsNothing);
+  });
+
+  testWidgets('上下滚动不误触抽屉(过卷监听按轴过滤)', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await settle(tester);
+
+    // 竖向拖拽滚动聊天列表:竖向过卷通知会被 axis == horizontal 过滤掉。
+    await tester.dragFrom(const Offset(400, 300), const Offset(0, -160));
+    await settle(tester);
+
+    expect(find.byType(Drawer), findsNothing);
+  });
+
+  testWidgets('设置向左连翻两页可达(不再走抽屉页脚)', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await settle(tester);
+
+    // 三页 PageView(对话 | 设备 | 设置)。对话页的液态导航平时收起,
+    // 设置靠「把内容往左拖,连翻两页」到达。用带显式速度的 fling,
+    // 隐式速度的 drag 在临界速度下会弹回,行为不确定。
+    await tester.flingFrom(const Offset(400, 300), const Offset(-300, 0), 1000);
+    await settle(tester);
+    await tester.flingFrom(const Offset(400, 300), const Offset(-300, 0), 1000);
     await settle(tester);
 
     expect(find.byType(SettingsScreen), findsOneWidget);
+  });
+
+  testWidgets('底栏只在对话页收起,设备/设置页常驻', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await settle(tester);
+
+    AnimatedOpacity navOpacity() => tester.widget<AnimatedOpacity>(
+      find.ancestor(
+        of: find.byType(LiquidNavBar),
+        matching: find.byType(AnimatedOpacity),
+      ),
+    );
+
+    // 对话页:不滑动时底栏收起(内容全屏优先)。
+    expect(navOpacity().opacity, 0.0);
+
+    // 翻到设备页:滑动停止后底栏仍常驻。
+    await tester.flingFrom(const Offset(400, 300), const Offset(-300, 0), 1000);
+    await settle(tester);
+    expect(navOpacity().opacity, 1.0);
+
+    // 再翻到设置页:同样常驻。
+    await tester.flingFrom(const Offset(400, 300), const Offset(-300, 0), 1000);
+    await settle(tester);
+    expect(find.byType(SettingsScreen), findsOneWidget);
+    expect(navOpacity().opacity, 1.0);
+
+    // 回到对话页:再次收起。
+    await tester.flingFrom(const Offset(400, 300), const Offset(300, 0), 1000);
+    await settle(tester);
+    await tester.flingFrom(const Offset(400, 300), const Offset(300, 0), 1000);
+    await settle(tester);
+    // PageView 弹簧在目标附近还要爬行一段才彻底收敛(page≈0.01 时
+    // isScrolling 仍为 true,底栏按设计保持显示)。多等一拍让滚动活动
+    // 真正结束,isScrolling 落 false 后底栏才淡出。
+    await tester.pump(const Duration(seconds: 2));
+    expect(navOpacity().opacity, 0.0);
   });
 
   testWidgets('会话页没有常驻顶栏,灵动岛浮在内容上', (tester) async {

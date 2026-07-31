@@ -10,6 +10,7 @@ import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/squircle.dart';
 import '../theme/typography.dart';
+import '../shell/liquid_nav_bar.dart' show kLiquidNavBarHeight;
 import 'device_edit_sheet.dart';
 import 'device_sessions_page.dart';
 
@@ -188,7 +189,14 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
     return ListView(
       // 内容不足一屏时也要能下拉(下拉刷新是唯一全页刷新手势)。
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+      // 底栏在设备/设置页常驻(AppShell),列表底部让位栏高 + 安全区。
+      // viewPadding 不被祖先 SafeArea 消费,拿到的是真实系统安全区。
+      padding: EdgeInsets.fromLTRB(
+        16,
+        4,
+        16,
+        MediaQuery.viewPaddingOf(context).bottom + kLiquidNavBarHeight + 16,
+      ),
       children: [
         for (final device in manager.devices) ...[
           _RosterDeviceCard(

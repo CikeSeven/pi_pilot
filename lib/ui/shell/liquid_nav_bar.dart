@@ -15,6 +15,9 @@ class NavTabSpec {
   final String label;
 }
 
+/// 底栏高度。设备/设置页底部留白也要用它,提成公共常量。
+const kLiquidNavBarHeight = 64.0;
+
 /// 底部导航:**水滴形变指示器**。
 ///
 /// 指示器固定 64×48 -- 必须比图标(22)+间距(3)+文字(16)=41px 高,
@@ -86,7 +89,7 @@ class _LiquidNavBarState extends State<LiquidNavBar>
     final n = widget.tabs.length;
 
     return SizedBox(
-      height: 64,
+      height: kLiquidNavBarHeight,
       child: LayoutBuilder(
         builder: (context, c) {
           final tabW = c.maxWidth / n;
@@ -124,7 +127,7 @@ class _LiquidNavBarState extends State<LiquidNavBar>
 
                   return Positioned(
                     left: x - w / 2,
-                    top: (64 - h) / 2,
+                    top: (kLiquidNavBarHeight - h) / 2,
                     child: Container(
                       width: w,
                       height: h,
@@ -199,7 +202,7 @@ class _NavTabButton extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: SizedBox(
-        height: 64,
+        height: kLiquidNavBarHeight,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
