@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../chat/chat_body.dart';
 import '../chat/widgets/island_bar.dart';
 import '../sessions/devices_page.dart';
+import '../sessions/sessions_drawer.dart';
 import '../settings/settings_screen.dart';
 import '../theme/motion.dart';
 import '../theme/paper.dart';
@@ -185,7 +186,7 @@ class _ChatTabState extends State<_ChatTab> {
         key: _scaffoldKey,
         backgroundColor: Colors.transparent,
         extendBodyBehindAppBar: true,
-        drawer: const DevicesDrawer(),
+        drawer: const SessionsDrawer(),
         // 左边缘 60px 内滑动开抽屉。其他区域让 PageView 处理横向手势。
         drawerEdgeDragWidth: 60,
         onDrawerChanged: (isOpen) {

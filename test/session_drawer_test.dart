@@ -40,17 +40,16 @@ void main() {
     expect(find.byType(Drawer), findsOneWidget);
   });
 
-  testWidgets('抽屉只列设备,不做会话创建与目录管理', (tester) async {
+  testWidgets('抽屉是会话列表,不做会话创建与目录管理', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();
 
     await openDrawer(tester);
 
-    // 「设备」标题在抽屉和「设备」tab 里各有一份(同一份 UI 两个外壳),
-    // 所以限定在 Drawer 子树里断言。
+    // 「会话」标题只在抽屉里(底栏 tab 不在 Drawer 子树),限定子树断言。
     expect(
-      find.descendant(of: find.byType(Drawer), matching: find.text('设备')),
+      find.descendant(of: find.byType(Drawer), matching: find.text('会话')),
       findsOneWidget,
     );
     // 抽屉里**不再**有「设置」入口 —— 底栏已经有「设置」tab,

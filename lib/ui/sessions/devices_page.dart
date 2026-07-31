@@ -20,10 +20,8 @@ import 'device_sessions_page.dart';
 /// - 第二级([DeviceSessionsPage])= 某台设备的会话列表(旧版设备页的正身,
 ///   pi 窗口 + 历史会话两段原样下沉)。
 ///
-/// 同一份 UI 有两个外壳:
-/// - [DevicesPage]  底部导航的「设备」tab,整页;
-/// - [DevicesDrawer] 会话页左滑出来的抽屉。
-/// 两者共用 [_DevicesBody],避免两处各写一遍列表。
+/// 设备页曾兼任会话页的左滑抽屉;底栏有了「设备」tab、抽屉改为
+/// 会话列表([SessionsDrawer])之后,这一页只剩底栏一个入口。
 ///
 /// 数据源:roster/激活设备来自 [deviceManagerProvider];每台设备的在线
 /// 状态/窗口数/流式标记来自它自己的 `piSessionFamilyProvider(device.id)`
@@ -38,36 +36,12 @@ class DevicesPage extends StatelessWidget {
     // 那就是「撕裂感」的真正来源。
     // 两用页面:既作底栏「设备」tab,也作 push 路由。
     // 自带 BackdropPaper 保证两种场景背景都正确(详见 SettingsScreen 注释)。
-    return const Scaffold(
-      body: BackdropPaper(child: _DevicesBody(inDrawer: false)),
-    );
-  }
-}
-
-/// 抽屉外壳。深炭底由 `drawerTheme` 给。
-class DevicesDrawer extends StatelessWidget {
-  const DevicesDrawer({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    // 抽屉从左侧滑出,贴着屏幕左边缘,所以左侧(上下)都是直角。
-    // 只有**右侧上方**圆角 —— 它是抽屉右上那个「开口的纸角」。
-    // 右下方必须直角:抽屉底部要贴住屏幕底,圆角会让底下透出主页造成
-    // 「悬空」的错觉(就是之前看着怪的那处)。
-    return const Drawer(
-      child: ClipRRect(
-        borderRadius: BorderRadius.only(topRight: Radius.circular(PiShape.lg)),
-        child: BackdropPaper(child: _DevicesBody(inDrawer: true)),
-      ),
-    );
+    return const Scaffold(body: BackdropPaper(child: _DevicesBody()));
   }
 }
 
 class _DevicesBody extends ConsumerStatefulWidget {
-  const _DevicesBody({required this.inDrawer});
-
-  /// 抽屉里点一台设备要先关抽屉;整页里不需要。
-  final bool inDrawer;
+  const _DevicesBody();
 
   @override
   ConsumerState<_DevicesBody> createState() => _DevicesBodyState();
@@ -154,8 +128,6 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
   bool _isEdit(DeviceProfile? existing) => existing != null;
 
   void _openSessions(DeviceProfile device) {
-    // 抽屉里要先关抽屉再 push,否则返回时落回抽屉下的页面,抽屉还开着。
-    if (widget.inDrawer) Navigator.of(context).pop();
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => DeviceSessionsPage(device: device)),
     );
