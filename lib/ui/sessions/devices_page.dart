@@ -13,9 +13,17 @@ import '../theme/squircle.dart';
 /// 「一张深色侧边抽屉、一台当前设备卡片、背景有淡淡的复古场景插图,
 /// 很有工作台的感觉」。
 ///
-/// 这里刻意*不*枚举 `~/.pi/agent/sessions/` 里的历史会话文件(沿用原设计决策)。
-/// 手机的职责只有一个:连到**已经开着的窗口**上去。电脑上多开一个 pi,
-/// 这里就多一行;关掉一个,这里就少一行。
+/// 分两段:**pi 窗口**(电脑上开着的)+ **历史会话**(只在磁盘上的)。
+///
+/// 原设计刻意*不*枚举 `~/.pi/agent/sessions/`,理由是「手机只负责连到已经开着
+/// 的窗口」。这条决策在这里被推翻,因为它让大会话对手机**永久不可达**:
+/// 本机最大的会话是 50.40MB / 9554 条,只在磁盘上,电脑端没开着它 ——
+/// 于是无论 bridge 侧把分页做得多快,用户在手机上都找不到入口打开它。
+/// bridge 早就把磁盘会话一起发过来了(`hub_list_sessions` 实测 63 个,
+/// 带 sizeBytes/timestamp/path),`openSession()` 也早就能唤醒它们 ——
+/// 缺的一直只是这段列表 UI。
+///
+/// 「电脑上多开一个 pi,这里就多一行」的原意在**第一段**里完整保留。
 ///
 /// 同一份 UI 有两个外壳:
 /// - [DevicesPage]  底部导航的「设备」tab,整页;
@@ -76,7 +84,37 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
   Future<void> _refresh() async {
     if (!mounted) return;
     if (ref.read(piSessionProvider).status != PiConnStatus.connected) return;
-    await ref.read(piSessionProvider.notifier).refreshSources();
+    final notifier = ref.read(piSessionProvider.notifier);
+    // 两个都要拉:refreshSources 只给「开着的窗口」,磁盘上的历史会话
+    // 只有 hub_list_sessions 才带回来(它连 sizeBytes/path 一起给)。
+    // 少拉后者,下面的「历史会话」段就永远是空的。
+    await notifier.refreshSources();
+    if (!mounted) return;
+    await notifier.refreshHubSessions();
+  }
+
+  /// 唤醒一个只在磁盘上的会话。bridge 会按需 spawn 一个无头 pi 并订阅它,
+  /// **从不 kill 任何进程**,所以电脑端正在生成时点这里也不会互相打断。
+  Future<void> _wake(HubSession session) async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (widget.inDrawer) Navigator.of(context).pop();
+    String? error;
+    var ok = false;
+    try {
+      ok = await ref.read(piSessionProvider.notifier).openSession(
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        // sessionPath 是懒唤醒的关键:descriptor 装不下它,
+        // 没有它 bridge 只能靠 sessionId 猜文件位置。
+        sessionPath: session.path,
+      );
+    } catch (failure) {
+      error = failure.toString();
+    }
+    if (ok) return;
+    final reason = error ?? ref.read(piSessionProvider).error ?? '唤醒这个会话失败';
+    if (!mounted) return;
+    messenger.showSnackBar(SnackBar(content: Text(reason)));
   }
 
   Future<void> _connect(SourceInfo source) async {
@@ -102,11 +140,36 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
     final state = ref.watch(piSessionProvider);
     final connected = state.status == PiConnStatus.connected;
 
-    // 只要电脑上开着的窗口。headless / 已断开的都不列。
+    // 第一段:电脑上开着的窗口。headless / 已断开的都不列。
     final windows = [
       for (final source in state.sources)
         if (source.isDesktop && source.connected) source,
     ];
+
+    // 第二段:不在电脑窗口里的会话 —— 磁盘上休眠的(dormant)和已经被唤醒、
+    // 活在 bridge 进程池里的(headless)都算。
+    //
+    // headless 必须一起收:否则点开一个历史会话、它变成 headless 之后,
+    // 窗口段(只收 isDesktop)和历史段(只收 dormant)都不要它,这一行就
+    // **凭空消失**,用户既看不出它在跑,也没法再回到它。
+    final shownSessionIds = {
+      for (final source in windows) source.sessionId,
+    }..removeWhere((id) => id == null);
+    final history = [
+      for (final session in state.sessions)
+        if (session.liveness != SessionLiveness.desktop &&
+            session.sessionId.isNotEmpty &&
+            !shownSessionIds.contains(session.sessionId))
+          session,
+    ]..sort((a, b) {
+      // timestamp 是 ISO8601,字符串降序即时间降序。缺失的排最后。
+      final left = a.timestamp ?? '';
+      final right = b.timestamp ?? '';
+      if (left.isEmpty && right.isEmpty) return 0;
+      if (left.isEmpty) return 1;
+      if (right.isEmpty) return -1;
+      return right.compareTo(left);
+    });
 
     return Stack(
       children: [
@@ -122,7 +185,7 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
                 connected: connected,
                 onRefresh: connected ? _refresh : null,
               ),
-              Expanded(child: _body(state, connected, windows)),
+              Expanded(child: _body(state, connected, windows, history)),
               // 抽屉页脚原本有个「设置」入口。撤掉了:底栏已经有「设置」tab,
               // 同一个目的地给两个入口只会让人犹豫点哪个。
             ],
@@ -132,28 +195,67 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
     );
   }
 
-  Widget _body(PiState state, bool connected, List<SourceInfo> windows) {
+  Widget _body(
+    PiState state,
+    bool connected,
+    List<SourceInfo> windows,
+    List<HubSession> history,
+  ) {
     if (!connected) {
       return const _Placeholder(
         title: '尚未连接',
         body: '在设置里填写 bridge 地址,\n就能看到电脑上开着的 pi 窗口。',
       );
     }
-    if (windows.isEmpty) {
+    if (windows.isEmpty && history.isEmpty) {
       return const _Placeholder(
         title: '电脑上没有打开的 pi',
         body: '在电脑上开一个 pi 窗口,\n它会自动出现在这里。',
       );
     }
-    return ListView.separated(
+
+    final colors = Theme.of(context).colorScheme;
+    return ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-      itemCount: windows.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 10),
-      itemBuilder: (_, index) => _DeviceCard(
-        source: windows[index],
-        state: state,
-        onTap: () => _connect(windows[index]),
-      ),
+      children: [
+        if (windows.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 4, 4, 14),
+            child: Text(
+              '电脑上没有打开的 pi。下面是磁盘上的会话,点一下即时唤醒。',
+              style: AppType.serifItalic(
+                size: 13.5,
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        for (final source in windows) ...[
+          _DeviceCard(
+            source: source,
+            state: state,
+            onTap: () => _connect(source),
+          ),
+          const SizedBox(height: 10),
+        ],
+        if (history.isNotEmpty) ...[
+          Padding(
+            padding: EdgeInsets.fromLTRB(4, windows.isEmpty ? 0 : 14, 4, 12),
+            child: Eyebrow(
+              text: '会话 · ${history.length}',
+              color: colors.onSurfaceVariant,
+              withRule: true,
+            ),
+          ),
+          for (final session in history) ...[
+            _HistoryCard(
+              session: session,
+              isCurrent: session.sourceId == state.selectedSourceId,
+              onTap: () => _wake(session),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ],
+      ],
     );
   }
 }
@@ -339,6 +441,141 @@ class _DeviceCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 历史会话卡:只在磁盘上的会话,点一下即时唤醒。
+///
+/// 视觉上刻意比 [_DeviceCard] 轻一档(描边卡 + 虚线感图标),因为它还不是
+/// 一个活着的窗口 —— 避免和「当前」那张陶土橙实心卡抢视觉重心。
+class _HistoryCard extends StatelessWidget {
+  const _HistoryCard({
+    required this.session,
+    required this.isCurrent,
+    required this.onTap,
+  });
+
+  final HubSession session;
+  final bool isCurrent;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final fg = colors.onSurface;
+    final fgMuted = colors.onSurfaceVariant;
+    // headless = 已经在 bridge 上跑着;dormant = 只在磁盘上,点了才唤醒。
+    final running = session.liveness == SessionLiveness.headless;
+
+    // 副标题把「多大 · 什么时候」摆出来:大会话唤醒要花几秒,
+    // 让人点之前就知道自己在打开一个多大的东西。
+    final size = session.sizeBytes;
+    final dir = session.cwd;
+    final parts = <String>[
+      if (running) '运行中',
+      if (size != null && size > 0) formatSessionSize(size),
+      ?formatSessionTime(session.timestamp),
+      if (dir != null && dir.isNotEmpty)
+        dir.split('/').where((part) => part.isNotEmpty).lastOrNull ?? dir,
+    ];
+
+    return Material(
+      color: colors.surfaceContainerLowest,
+      shape: SquircleBorder(
+        borderRadius: BorderRadius.circular(PiShape.lg),
+        side: BorderSide(color: colors.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: isCurrent ? null : onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 13, 16, 13),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: fgMuted.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(PiShape.sm),
+                  border: Border.all(color: colors.outlineVariant),
+                ),
+                child: Icon(
+                  running ? Icons.dns_outlined : Icons.history,
+                  size: 18,
+                  color: running ? colors.primary : fgMuted,
+                ),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      windowTitleFor(
+                        cwd: session.cwd,
+                        sessionName: session.name,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleSmall?.copyWith(color: fg),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      parts.isEmpty ? '只在磁盘上' : parts.join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppType.monoLabel(color: fgMuted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              if (isCurrent)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: colors.primary.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(PiShape.sm),
+                  ),
+                  child: Text('当前', style: AppType.eyebrow(color: colors.primary)),
+                )
+              else
+                Icon(Icons.play_arrow_rounded, size: 20, color: colors.primary),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 会话文件大小的人类可读形式。大会话是这个产品的常态(本机最大 50.40MB),
+/// 所以到 MB 就够,不做 GB 档。
+String formatSessionSize(int bytes) {
+  if (bytes < 1024) return '${bytes}B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)}KB';
+  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}MB';
+}
+
+/// 会话时间戳的短形式:今天只给时刻,更早给日期。
+/// 解析失败返回 null —— 宁可不显示,也不显示一串 ISO8601 给人看。
+String? formatSessionTime(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  final parsed = DateTime.tryParse(raw);
+  if (parsed == null) return null;
+  final local = parsed.toLocal();
+  final now = DateTime.now();
+  String two(int value) => value.toString().padLeft(2, '0');
+  if (local.year == now.year && local.month == now.month && local.day == now.day) {
+    return '今天 ${two(local.hour)}:${two(local.minute)}';
+  }
+  if (local.year == now.year) return '${local.month}月${local.day}日';
+  return '${local.year}/${two(local.month)}/${two(local.day)}';
 }
 
 /// 空态:插画 + 衬线标题 + 说明。深色底版本。
