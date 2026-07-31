@@ -22,16 +22,25 @@ import 'device_sessions_page.dart' show windowTitleFor;
 /// - 磁盘上的休眠会话不属于这里,它们在设备的会话列表页里;
 /// - 没有窗口的设备整组隐藏,不留空标题。
 class SessionsDrawer extends StatelessWidget {
-  const SessionsDrawer({super.key});
+  const SessionsDrawer({super.key, required this.onClose});
+
+  /// 关闭抽屉。
+  ///
+  /// 抽屉不再由 `Scaffold.drawer` 托管(那样拿不到跟手的中间态,见
+  /// `AppShell` 里的 `DrawerDragRecognizer`),而是 `_ChatTab` 自己按进度
+  /// 渲染的一层面板 —— 所以关闭走回调,不能再 `Navigator.pop`。
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
     // 与旧抽屉同一副骨架:右上「开口的纸角」圆角,右下必须直角
     // 贴住屏幕底,否则底下透出主页会有「悬空」的错觉。
-    return const Drawer(
+    return Drawer(
       child: ClipRRect(
-        borderRadius: BorderRadius.only(topRight: Radius.circular(PiShape.lg)),
-        child: BackdropPaper(child: _DrawerBody()),
+        borderRadius: const BorderRadius.only(
+          topRight: Radius.circular(PiShape.lg),
+        ),
+        child: BackdropPaper(child: _DrawerBody(onClose: onClose)),
       ),
     );
   }
@@ -51,7 +60,9 @@ class _WindowGroup {
 }
 
 class _DrawerBody extends ConsumerWidget {
-  const _DrawerBody();
+  const _DrawerBody({required this.onClose});
+
+  final VoidCallback onClose;
 
   void _openWindow(
     BuildContext context,
@@ -65,7 +76,7 @@ class _DrawerBody extends ConsumerWidget {
         isCurrentDevice && source.id == group.state.selectedSourceId;
 
     // 先关抽屉:切设备/选源都在后台完成,不让用户等。
-    Navigator.of(context).pop();
+    onClose();
     if (isCurrentWindow) return;
     if (!isCurrentDevice) {
       unawaited(

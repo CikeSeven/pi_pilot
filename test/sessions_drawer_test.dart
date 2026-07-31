@@ -91,6 +91,9 @@ void main() {
 
   final harness = <String, _FakeSession>{};
 
+  /// 抽屉是否已被关闭(onClose 回调翻转)。每个用例前重置。
+  var closed = false;
+
   Widget wrap({
     required DeviceManagerState manager,
     required Map<String, PiState> sessions,
@@ -106,7 +109,17 @@ void main() {
     ],
     child: MaterialApp(
       theme: buildLightTheme(),
-      home: const Scaffold(drawer: SessionsDrawer(), body: SizedBox()),
+      // 抽屉不再由 `Scaffold.drawer` 托管(那样拿不到跟手的中间态,见
+      // AppShell 里的 DrawerDragRecognizer),而是按进度自渲染的一层面板。
+      // 所以这里直接渲染抽屉本体,关闭走 onClose 回调 —— 关掉就从树里移除,
+      // 「抽屉已关闭」仍可用 find.byType(Drawer) 为空来断言。
+      home: Scaffold(
+        body: StatefulBuilder(
+          builder: (context, setState) => closed
+              ? const SizedBox()
+              : SessionsDrawer(onClose: () => setState(() => closed = true)),
+        ),
+      ),
     ),
   );
 
@@ -116,8 +129,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
   }
 
+  /// 抽屉现在是直接渲染的,不需要「打开」动作 —— 只等一帧让它稳定。
   Future<void> openDrawer(WidgetTester tester) async {
-    tester.state<ScaffoldState>(find.byType(Scaffold)).openDrawer();
     await settle(tester);
   }
 
@@ -130,6 +143,7 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     harness.clear();
+    closed = false;
   });
 
   testWidgets('按设备分组列出开着的窗口,设备名做分割线', (tester) async {

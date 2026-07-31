@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/ui/sessions/sessions_drawer.dart';
 import 'package:pi_pilot/ui/shell/app_shell.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Material 的 `Drawer` 不注册任何返回键拦截(drawer.dart 里没有 PopScope),
-/// 所以抽屉开着时返回键会直接落到根路由上 —— 表现是一下退到桌面,抽屉白开。
+/// 抽屉开着时返回键必须只关抽屉,不能一下退到桌面。
 ///
 /// `NavigatorState.maybePop` 的返回值正好区分这两种结局:
 /// - `true`  → 被 PopScope 拦下并自行处理(这里是关抽屉)
 /// - `false` → 冒泡给系统,根路由上就是退出到桌面
+///
+/// 抽屉现在不由 `Scaffold.drawer` 托管,而是 `_ChatTab` 按进度自渲染的一层
+/// 面板(这样同一根手指的右滑/左滑才能连续驱动同一个进度值,见
+/// `DrawerDragRecognizer`)。所以这里用真实手势拉开它,拦截判据仍是 maybePop。
 ///
 /// 注意:新外壳(灵动岛/液态导航)有常驻动画,`pumpAndSettle` 会超时,
 /// 所以这里一律用固定时长 pump。
@@ -31,9 +35,15 @@ void main() {
     return popped;
   }
 
-  /// 开抽屉并等动画跑完(同样不能 pumpAndSettle)。
+  /// 右滑把抽屉拉开并等落位动画跑完(同样不能 pumpAndSettle)。
   Future<void> openDrawer(WidgetTester tester) async {
-    tester.state<ScaffoldState>(findDrawerScaffold()).openDrawer();
+    final gesture = await tester.startGesture(const Offset(200, 400));
+    // 分步移动更接近真机采样;总位移要足够大,松手后才落到全开。
+    for (var i = 0; i < 4; i++) {
+      await gesture.moveBy(const Offset(60, 0));
+      await tester.pump();
+    }
+    await gesture.up();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
   }
@@ -42,23 +52,22 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
 
     await openDrawer(tester);
-    expect(find.byType(Drawer), findsOneWidget);
+    expect(find.byType(SessionsDrawer), findsOneWidget);
 
     // 返回被拦下(true = 没有冒泡给系统),抽屉关掉
     expect(await pressBack(tester), isTrue);
-    expect(find.byType(Drawer), findsNothing);
-    expect(
-      tester.state<ScaffoldState>(findDrawerScaffold()).isDrawerOpen,
-      isFalse,
-    );
+    // 进度归零后抽屉整体从树里移除。
+    expect(find.byType(SessionsDrawer), findsNothing);
   });
 
   testWidgets('抽屉关掉之后再按返回才冒泡给系统(退出到桌面)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
 
     await openDrawer(tester);
 
@@ -75,12 +84,3 @@ void main() {
     expect(await pressBack(tester), isFalse);
   });
 }
-
-/// 定位**带抽屉的那个** `Scaffold`。
-///
-/// 底部导航改版后树里有多个 Scaffold:AppShell 外层一个(挂底栏),
-/// `IndexedStack` 里每个 tab 各一个。`find.byType(Scaffold)` 会命中多个
-/// 并抛 "Too many elements",所以按「有没有 drawer」把会话页那个挑出来。
-Finder findDrawerScaffold() => find.byWidgetPredicate(
-  (widget) => widget is Scaffold && widget.drawer != null,
-);
