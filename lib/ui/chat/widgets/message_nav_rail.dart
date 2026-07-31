@@ -216,7 +216,10 @@ class _MessageNavRailState extends State<MessageNavRail>
                             // 拖拽时波形跟手指,否则跟滚动进度。
                             focus: _dragT ?? progress,
                             tickColor: colors.onSurfaceVariant.withValues(
-                              alpha: 0.32,
+                              alpha: 0.5,
+                            ),
+                            minorColor: colors.onSurfaceVariant.withValues(
+                              alpha: 0.2,
                             ),
                             focusColor: colors.primary,
                             trackColor: colors.onSurfaceVariant.withValues(
@@ -245,20 +248,21 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 }
 
-/// 声波波形绘制:一排从基线向右伸出的横条,
-/// 长度/颜色随「焦点位置」连续起伏。
+/// 声波波形绘制:大节点(用户消息锚点) + 小节点(过渡装饰)
+/// 双排从基线向右伸出的横条,随「焦点位置」连续起伏。
 ///
-/// 每根条的影响力 = 高斯衰减(离焦点越近越大):
-/// - 长度 6 → 21 连续变化,颜色从灰调渐变到强调色;
-/// - 焦点(滚动进度/手指位置)本身是连续值,所以条高变化
-///   天然丝滑 —— 不需要任何补间动画,没有「跳到最近节点」的阶跃。
-///
-/// 过密(相邻 < 3px)时抽样绘制;抽样只影响视觉,手势映射仍按全量序号。
+/// - 小节点均匀插在大节点之间,只负责让波形连续好看,不映射消息;
+/// - **增益分离**:焦点处大节点 8→24px 冒尖、小节点只 3.5→10px,
+///   峰值差距拉开,「当前在哪条消息」一眼能看出来;
+/// - 包络 σ 收窄到一个大节点间隔内 —— 焦点在大节点上时,
+///   两侧小节点只微微隆起,不会和峰值一样高;
+/// - 焦点(滚动进度/手指位置)是连续值,条高变化天然丝滑。
 class _RailPainter extends CustomPainter {
   _RailPainter({
     required this.count,
     required this.focus,
     required this.tickColor,
+    required this.minorColor,
     required this.focusColor,
     required this.trackColor,
   });
@@ -269,7 +273,12 @@ class _RailPainter extends CustomPainter {
 
   /// 焦点位置 0~1(连续):滚动进度,拖拽时是手指位置。
   final double focus;
+
+  /// 大节点(消息锚点)的常态色。
   final Color tickColor;
+
+  /// 小节点(过渡装饰)的常态色,比大节点淡。
+  final Color minorColor;
   final Color focusColor;
   final Color trackColor;
 
@@ -288,22 +297,59 @@ class _RailPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
-    // 均匀密布:3px 一根,超出容量就抽样(视觉),交互不受影响。
-    final maxTicks = (usable / 3).floor().clamp(1, count);
-    final step = (count / maxTicks).ceil();
-    // 高斯衰减的 σ:影响范围约 ±2~3 根(刻度稀) / ±7% 轨道高(刻度密)。
-    final sigma = math.max(0.05, step * 1.3 / count);
+    // 大节点太密时抽样(视觉),手势映射不受影响。
+    final maxTicks = (usable / 3).floor().clamp(1, 200);
+    final majorStep = (count / maxTicks).ceil();
+    final majors = <int>[
+      for (var i = 0; i < count; i += majorStep) i,
+      if ((count - 1) % majorStep != 0) count - 1,
+    ];
 
-    for (var i = 0; i < count; i += step) {
-      final t = count == 1 ? 0.5 : i / (count - 1);
+    // 每个大节点间隔插多少小节点:总条数逼近 3px 一根的容量,上限 3。
+    final gaps = majors.length - 1;
+    final fill = gaps > 0
+        ? ((maxTicks - majors.length) / gaps).floor().clamp(0, 3)
+        : 0;
+
+    // σ = 1/6 个大节点间隔:焦点在大节点上时,最近的小节点
+    // influence ≈ 0.35,下个大节点 ≈ 0 —— 峰值尖锐,两侧只微微隆起。
+    final sigma = gaps > 0 ? (1.0 / gaps) / 6 : 0.05;
+
+    double tOf(double index) => count == 1 ? 0.5 : index / (count - 1);
+
+    void bar(double t, bool major) {
       final y = vPad + usable * t;
       final dist = t - focus;
       final influence = math.exp(-(dist * dist) / (2 * sigma * sigma));
-      final len = 6.0 + 15.0 * influence;
-      paint
-        ..strokeWidth = 2.0 + 0.6 * influence
-        ..color = Color.lerp(tickColor, focusColor, influence)!;
-      canvas.drawLine(Offset(4, y), Offset(4 + len, y), paint);
+      if (major) {
+        paint
+          ..strokeWidth = 2.2 + 0.9 * influence
+          ..color = Color.lerp(tickColor, focusColor, influence)!;
+        canvas.drawLine(Offset(4, y), Offset(4 + 8 + 16 * influence, y), paint);
+      } else {
+        paint
+          ..strokeWidth = 1.8 + 0.4 * influence
+          ..color = Color.lerp(
+            minorColor,
+            focusColor.withValues(alpha: 0.6),
+            influence,
+          )!;
+        canvas.drawLine(
+          Offset(4, y),
+          Offset(4 + 3.5 + 6.5 * influence, y),
+          paint,
+        );
+      }
+    }
+
+    for (var m = 0; m < majors.length; m++) {
+      bar(tOf(majors[m].toDouble()), true);
+      if (m + 1 < majors.length) {
+        final span = majors[m + 1] - majors[m];
+        for (var k = 1; k <= fill; k++) {
+          bar(tOf(majors[m] + span * k / (fill + 1)), false);
+        }
+      }
     }
   }
 
@@ -312,6 +358,7 @@ class _RailPainter extends CustomPainter {
       old.count != count ||
       old.focus != focus ||
       old.tickColor != tickColor ||
+      old.minorColor != minorColor ||
       old.focusColor != focusColor ||
       old.trackColor != trackColor;
 }
