@@ -21,6 +21,48 @@ const _kAskUserQuestion = 'ask_user_question';
 /// 答案信封头的前缀(与 relay 的 ASK_ANSWER_HEADER 保持一致即可,不必全文相等)。
 const _kAskAnswerMarker = 'The user answered this questionnaire on their phone';
 
+/// 这个工具有没有可展开的内容?
+///
+/// 问卷未完成时内容不在 output 里(题目来自 pendingAsk),不算进来的话
+/// 卡片就永远不可展开 —— 手机上只剩一个转不完的圈,看不出在等什么。
+bool toolHasBody(ToolItem item) =>
+    (item.name == _kAskUserQuestion && !item.done) ||
+    item.output.isNotEmpty ||
+    _writeContent(item) != null;
+
+/// 工具执行内容:按工具类型选择结构化渲染(read 行号/edit diff/write 代码)。
+///
+/// **不带任何卡片外壳** —— 调用方(工具卡 / 工具组胶囊)自己提供容器,
+/// 这样同一套渲染逻辑不会被套进「卡中卡」。
+class ToolExecutionContent extends ConsumerWidget {
+  const ToolExecutionContent({super.key, required this.item});
+
+  final ToolItem item;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 电脑端转过来、当前正等这台手机作答的问卷。
+    //
+    // 必须用 select 只盯自己那一份:直接 watch 整个 PiState 的话,流式输出时
+    // revision 每秒改很多次,窗口里几十张工具卡会跟着全量重建 —— 手机卡到
+    // 连 bridge 的 10s ping 都答不上,接着就是断线重连。
+    // 空 toolCallId 不匹配:宁可不画,也不能把问卷接到别的工具卡上。
+    final ask = item.name == _kAskUserQuestion && !item.done
+        ? ref.watch(
+            piSessionProvider.select((s) {
+              final pending = s.pendingAsk;
+              return pending != null &&
+                      pending.toolCallId.isNotEmpty &&
+                      pending.toolCallId == item.toolCallId
+                  ? pending
+                  : null;
+            }),
+          )
+        : null;
+    return _buildToolBody(context, item, ask);
+  }
+}
+
 /// 工具调用卡片:按工具类型选择结构化渲染(read 行号/edit diff/write 代码)。
 ///
 /// Editorial Retro:整条身份行铺**复古类别色**(赤陶/橄榄/灰蓝/麦黄…),
@@ -80,12 +122,8 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             }),
           )
         : null;
-    // 问卷还没有结果 —— 要么在等这台手机,要么已经回落到电脑上答。
-    final askPending = item.name == _kAskUserQuestion && !item.done;
-    // 问卷的内容不在 output 里。不把它算进 hasBody,卡片就永远不可展开 ——
-    // 手机上只剩一个转不完的圈,看不出在等什么。
-    final hasBody =
-        askPending || item.output.isNotEmpty || _writeContent(item) != null;
+    // 问卷的内容不在 output 里(见 toolHasBody):不算进去卡片就永远不可展开。
+    final hasBody = toolHasBody(item);
     // 可作答的问卷强制展开:折叠着的话用户根本不知道自己能答。
     final expanded = ask != null || _expanded;
     final category = PiToolAvatar.categoryForTool(item.name);
@@ -94,7 +132,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
     final (headerBg, headerFg) = PiToolAvatar.colorsFor(category, piColors);
     // 手机作答的答案被 pi 包在错误信封里(agent-loop 的 block 分支写死
     // isError: true,钩子改不了)。那是一次**成功**的作答,不能标红。
-    final askAnswered = _isAskAnswer(item);
+    final askAnswered = isAskAnswerOutput(item);
     final showError = item.isError && !askAnswered;
 
     return MessageCard(
@@ -164,134 +202,134 @@ class _ToolCardState extends ConsumerState<ToolCard> {
         alignment: Alignment.topCenter,
         child: !expanded || !hasBody
             ? const SizedBox(width: double.infinity)
-            : _buildBody(context, item, ask),
+            : _buildToolBody(context, item, ask),
       ),
     );
   }
+}
 
-  Widget _buildBody(BuildContext context, ToolItem item, AskRequest? ask) {
-    final path = item.args?['path'];
-    switch (item.name) {
-      case _kAskUserQuestion:
-        // 正在等这台手机作答:画可交互的那份。
-        if (ask != null) {
-          return _AnswerableQuestionnaire(
-            key: ValueKey(ask.requestId),
-            ask: ask,
-          );
-        }
-        // 没转到手机(没人在看、认领超时、或你点了「在电脑上作答」)。
-        // 只给一行交代 —— 以前把整张只读问卷拄在这里,反而让人以为手机能答。
-        if (!item.done) return const _DesktopAnsweringNotice();
-        if (item.output.isNotEmpty) {
-          return _outputWell(
-            context,
-            _isAskAnswer(item) ? _stripAskHeader(item.output) : item.output,
-          );
-        }
-      case 'read':
-        return CodeBlock(
-          code: item.output,
-          language: path is String ? languageForPath(path) : null,
-          showLineNumbers: true,
-          firstLineNumber: switch (item.args?['offset']) {
-            final int offset when offset > 0 => offset,
-            _ => 1,
-          },
+/// 工具执行内容的实际渲染。`ToolCard`(独立卡片)与 `ToolExecutionContent`
+/// (工具组胶囊内嵌)共用这一份 —— 两处各写一遍必然会分叉。
+Widget _buildToolBody(BuildContext context, ToolItem item, AskRequest? ask) {
+  final path = item.args?['path'];
+  switch (item.name) {
+    case _kAskUserQuestion:
+      // 正在等这台手机作答:画可交互的那份。
+      if (ask != null) {
+        return _AnswerableQuestionnaire(key: ValueKey(ask.requestId), ask: ask);
+      }
+      // 没转到手机(没人在看、认领超时、或你点了「在电脑上作答」)。
+      // 只给一行交代 —— 以前把整张只读问卷拄在这里,反而让人以为手机能答。
+      if (!item.done) return const _DesktopAnsweringNotice();
+      if (item.output.isNotEmpty) {
+        return _outputWell(
+          context,
+          isAskAnswerOutput(item) ? _stripAskHeader(item.output) : item.output,
+        );
+      }
+    case 'read':
+      return CodeBlock(
+        code: item.output,
+        language: path is String ? languageForPath(path) : null,
+        showLineNumbers: true,
+        firstLineNumber: switch (item.args?['offset']) {
+          final int offset when offset > 0 => offset,
+          _ => 1,
+        },
+        maxHeight: _kOutputMaxHeight,
+        embedded: true,
+      );
+    case 'edit':
+      if (looksLikeUnifiedDiff(item.output)) {
+        return DiffView(
+          diffText: item.output,
           maxHeight: _kOutputMaxHeight,
           embedded: true,
         );
-      case 'edit':
-        if (looksLikeUnifiedDiff(item.output)) {
-          return DiffView(
-            diffText: item.output,
-            maxHeight: _kOutputMaxHeight,
-            embedded: true,
-          );
-        }
-        final diff = _diffFromArgs(item);
-        if (diff != null) {
-          return DiffView(
-            lines: diff,
-            maxHeight: _kOutputMaxHeight,
-            embedded: true,
-          );
-        }
-      case 'write':
-        final content = _writeContent(item);
-        if (content != null) {
-          return CodeBlock(
-            code: content,
-            language: path is String ? languageForPath(path) : null,
-            maxHeight: _kOutputMaxHeight,
-            embedded: true,
-          );
-        }
-    }
-    // 默认:mono + ANSI 解析的输出井(固定井底,保证前景对比度与主题无关)
-    return _outputWell(context, item.output);
+      }
+      final diff = _diffFromArgs(item);
+      if (diff != null) {
+        return DiffView(
+          lines: diff,
+          maxHeight: _kOutputMaxHeight,
+          embedded: true,
+        );
+      }
+    case 'write':
+      final content = _writeContent(item);
+      if (content != null) {
+        return CodeBlock(
+          code: content,
+          language: path is String ? languageForPath(path) : null,
+          maxHeight: _kOutputMaxHeight,
+          embedded: true,
+        );
+      }
   }
+  // 默认:mono + ANSI 解析的输出井(固定井底,保证前景对比度与主题无关)
+  return _outputWell(context, item.output);
+}
 
-  /// 这份输出是手机作答回来的答案吗?
-  ///
-  /// relay 拦截后只能返回 `{block, reason}`,而 pi 的 agent-loop 把 block 分支写成
-  /// `createErrorToolResult(reason)` 加 `isError: true`(常量,钩子改不了)。
-  /// 所以一次成功的作答会顶着错误标记回来 —— 靠信封头认出来,别标红。
-  static bool _isAskAnswer(ToolItem item) =>
-      item.name == _kAskUserQuestion &&
-      item.output.startsWith(_kAskAnswerMarker);
+/// 这份输出是手机作答回来的答案吗?
+///
+/// relay 拦截后只能返回 `{block, reason}`,而 pi 的 agent-loop 把 block 分支写成
+/// `createErrorToolResult(reason)` 加 `isError: true`(常量,钩子改不了)。
+/// 所以一次成功的作答会顶着错误标记回来 —— 靠信封头认出来,别标红。
+///
+/// 工具组的紧凑详情行也要这个判断,所以是公开的。
+bool isAskAnswerOutput(ToolItem item) =>
+    item.name == _kAskUserQuestion && item.output.startsWith(_kAskAnswerMarker);
 
-  /// 把给模型看的信封头去掉,只留 Q/A 行。那段英文是写给模型的,用户不必读。
-  static String _stripAskHeader(String output) {
-    final idx = output.indexOf('\n\n');
-    return idx < 0 ? output : output.substring(idx + 2);
+/// 把给模型看的信封头去掉,只留 Q/A 行。那段英文是写给模型的,用户不必读。
+String _stripAskHeader(String output) {
+  final idx = output.indexOf('\n\n');
+  return idx < 0 ? output : output.substring(idx + 2);
+}
+
+/// write 工具的落盘内容:参数里叫 content 或 text。
+String? _writeContent(ToolItem item) {
+  final args = item.args;
+  if (args == null) return null;
+  final content = args['content'] ?? args['text'];
+  return content is String && content.isNotEmpty ? content : null;
+}
+
+/// 从 edit 参数(oldText/newText 或 edits 列表)现算行级 diff。
+///
+/// 多块编辑必须逐块算再拼起来:工具的 output 只是
+/// "Successfully replaced N block(s)" 这类成功文案,不含任何 diff 内容。
+/// 以前只处理单块,多块就返回 null 掉到默认分支,把那句文案直接显示出来。
+List<DiffLine>? _diffFromArgs(ToolItem item) {
+  final args = item.args;
+  if (args == null) return null;
+  final oldText = args['oldText'];
+  final newText = args['newText'];
+  if (oldText is String && newText is String) {
+    return computeLineDiff(oldText, newText);
   }
+  final edits = args['edits'];
+  if (edits is! List || edits.isEmpty) return null;
 
-  /// write 工具的落盘内容:参数里叫 content 或 text。
-  static String? _writeContent(ToolItem item) {
-    final args = item.args;
-    if (args == null) return null;
-    final content = args['content'] ?? args['text'];
-    return content is String && content.isNotEmpty ? content : null;
+  final blocks = <List<DiffLine>>[];
+  for (final edit in edits) {
+    if (edit is! Map) continue;
+    final from = edit['oldText'];
+    final to = edit['newText'];
+    if (from is! String || to is! String) continue;
+    blocks.add(computeLineDiff(from, to));
   }
+  if (blocks.isEmpty) return null;
+  if (blocks.length == 1) return blocks.single;
 
-  /// 从 edit 参数(oldText/newText 或 edits 列表)现算行级 diff。
-  ///
-  /// 多块编辑必须逐块算再拼起来:工具的 output 只是
-  /// "Successfully replaced N block(s)" 这类成功文案,不含任何 diff 内容。
-  /// 以前只处理单块,多块就返回 null 掉到默认分支,把那句文案直接显示出来。
-  static List<DiffLine>? _diffFromArgs(ToolItem item) {
-    final args = item.args;
-    if (args == null) return null;
-    final oldText = args['oldText'];
-    final newText = args['newText'];
-    if (oldText is String && newText is String) {
-      return computeLineDiff(oldText, newText);
-    }
-    final edits = args['edits'];
-    if (edits is! List || edits.isEmpty) return null;
-
-    final blocks = <List<DiffLine>>[];
-    for (final edit in edits) {
-      if (edit is! Map) continue;
-      final from = edit['oldText'];
-      final to = edit['newText'];
-      if (from is! String || to is! String) continue;
-      blocks.add(computeLineDiff(from, to));
-    }
-    if (blocks.isEmpty) return null;
-    if (blocks.length == 1) return blocks.single;
-
-    // 多块之间插 hunk 头,让用户看清这是第几处修改(DiffView 会给它浅底)
-    final merged = <DiffLine>[];
-    for (var i = 0; i < blocks.length; i++) {
-      merged.add(
-        DiffLine(DiffLineKind.hunk, '@@ 第 ${i + 1}/${blocks.length} 处修改 @@'),
-      );
-      merged.addAll(blocks[i]);
-    }
-    return merged;
+  // 多块之间插 hunk 头,让用户看清这是第几处修改(DiffView 会给它浅底)
+  final merged = <DiffLine>[];
+  for (var i = 0; i < blocks.length; i++) {
+    merged.add(
+      DiffLine(DiffLineKind.hunk, '@@ 第 ${i + 1}/${blocks.length} 处修改 @@'),
+    );
+    merged.addAll(blocks[i]);
   }
+  return merged;
 }
 
 /// 默认输出井:mono + ANSI 解析,固定井底保证前景对比度与主题无关。
