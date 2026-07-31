@@ -12,16 +12,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 多设备改造后「保存并连接」走 roster:upsertDevice 即触发连接编排
 /// (详见 device_manager.dart)。假 manager 只记录 upsert,不真打网络。
 class _FakeDeviceManager extends DeviceManagerNotifier {
+  _FakeDeviceManager({List<DeviceProfile> seeded = const []})
+    : _seeded = seeded;
+
+  final List<DeviceProfile> _seeded;
   final List<DeviceProfile> upserts = [];
 
   @override
-  DeviceManagerState build() => const DeviceManagerState(loaded: true);
+  DeviceManagerState build() =>
+      DeviceManagerState(devices: _seeded, loaded: true);
 
   @override
-  Future<void> upsertDevice(
-    DeviceProfile device, {
-    bool connect = true,
-  }) async {
+  Future<void> upsertDevice(DeviceProfile device, {bool connect = true}) async {
     upserts.add(device);
   }
 }
@@ -134,6 +136,57 @@ void main() {
     expect(upserted.host, '192.168.1.10');
     expect(upserted.p2pDeviceId, 'home-pc');
     expect(upserted.transport, DeviceTransport.auto);
+  });
+
+  testWidgets('设置页 P2P 卡为空时不会抹掉设备已有的 P2P 配置', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    const existing = DeviceProfile(
+      id: 'dev-1',
+      name: '书房电脑',
+      host: '192.168.1.10',
+      port: 9377,
+      token: 'old-token',
+      transport: DeviceTransport.auto,
+      p2pRendezvous: 'pi-pilot.sisct.xyz',
+      p2pDeviceId: 'cachyos-x8664',
+      p2pSecret: 'Pi!abcdef123456',
+      lastHubId: 'hub-1',
+    );
+    final fakeManager = _FakeDeviceManager(seeded: [existing]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [deviceManagerProvider.overrideWith(() => fakeManager)],
+        child: MaterialApp(
+          theme: buildLightTheme(),
+          home: const ConnectionPage(),
+        ),
+      ),
+    );
+    await settle(tester);
+
+    Finder field(String label) => find.byWidgetPredicate(
+      (widget) => widget is TextField && widget.decoration?.labelText == label,
+    );
+
+    // 只改连接信息;P2P 卡保持默认(关),不得因此清掉 roster 里的 P2P。
+    await tester.enterText(field('主机'), '192.168.1.10');
+    await tester.enterText(field('端口'), '9377');
+    await tester.enterText(field('Token'), 'new-token');
+
+    await tester.ensureVisible(find.text('保存并连接'));
+    await tester.pump();
+    await tester.tap(find.text('保存并连接'));
+    await settle(tester);
+
+    expect(fakeManager.upserts, hasLength(1));
+    final saved = fakeManager.upserts.single;
+    expect(saved.id, 'dev-1');
+    expect(saved.token, 'new-token');
+    expect(saved.transport, DeviceTransport.auto);
+    expect(saved.p2pRendezvous, 'pi-pilot.sisct.xyz');
+    expect(saved.p2pDeviceId, 'cachyos-x8664');
+    expect(saved.p2pSecret, 'Pi!abcdef123456');
+    expect(saved.lastHubId, 'hub-1');
   });
 
   testWidgets('公网明文信令会阻止保存与连接', (tester) async {

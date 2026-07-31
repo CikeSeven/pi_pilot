@@ -75,13 +75,18 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
           port: port,
           token: _token.text.trim(),
         );
-    // 连接配置升级为 roster 设备:地址命中的复用原 id(保留 lastHubId 等
-    // 元数据),否则新建。upsertDevice 会让它成为激活设备并按新配置重连。
+    // 连接配置升级为 roster 设备:地址命中的复用原 id,并**保留它已有的
+    // transport / P2P 三要素 / lastHubId**。设置页是旧版单设备表单,它的
+    // P2P 卡为空不代表「清空这台设备的 P2P」——否则在设备卡上配好的 P2P
+    // 会被这里静默抹掉(「重开应用后 P2P 配置全消失」的根源)。只有设置页
+    // P2P 四要素齐备时,才视为用户明确要用设置页的值覆盖。
+    // upsertDevice 会让它成为激活设备并按新配置重连。
     final settings = ref.read(settingsProvider);
     final manager = ref.read(deviceManagerProvider);
     final hit = manager.devices
         .where((d) => d.host == parsed.host && d.port == port)
         .firstOrNull;
+    final useSettingsP2p = settings.hasP2p;
     await ref
         .read(deviceManagerProvider.notifier)
         .upsertDevice(
@@ -91,16 +96,17 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
             host: parsed.host,
             port: port,
             token: _token.text.trim(),
-            transport: settings.hasP2p
+            transport: useSettingsP2p
                 ? DeviceTransport.auto
-                : DeviceTransport.lan,
-            p2pRendezvous: settings.p2pRendezvous.isEmpty
-                ? null
-                : settings.p2pRendezvous,
-            p2pDeviceId: settings.p2pDeviceId.isEmpty
-                ? null
-                : settings.p2pDeviceId,
-            p2pSecret: settings.p2pSecret.isEmpty ? null : settings.p2pSecret,
+                : (hit?.transport ?? DeviceTransport.lan),
+            p2pRendezvous: useSettingsP2p
+                ? settings.p2pRendezvous
+                : hit?.p2pRendezvous,
+            p2pDeviceId: useSettingsP2p
+                ? settings.p2pDeviceId
+                : hit?.p2pDeviceId,
+            p2pSecret: useSettingsP2p ? settings.p2pSecret : hit?.p2pSecret,
+            lastHubId: hit?.lastHubId,
           ),
         );
   }
