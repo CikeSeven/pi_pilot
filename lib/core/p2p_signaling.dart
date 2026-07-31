@@ -1,14 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:crypto/crypto.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-/// 配对密钥的挑战-应答应答:sha256(nonce:secret)。
-/// 密钥本身永不上行——信令服被攻破也拿不到配对密钥。
-String pairingResponse(String nonce, String secret) =>
-    sha256.convert(utf8.encode('$nonce:$secret')).toString();
-
+/// 配对密钥通过强制 TLS/WSS 传输,由信令服校验策略并在房间内比较摘要。
+/// 信令服不落盘、不记录密钥;公网明文 ws 仍被客户端拒绝。
 final _explicitUrlScheme = RegExp(
   r'^[a-z][a-z0-9+.-]*://',
   caseSensitive: false,
@@ -130,7 +126,7 @@ class GuestSignaling {
 
   bool get isClosed => _closed;
 
-  /// 连接信令服并完成 guest 握手。设备未知/密钥错误/host 不在线/超时都返回 null。
+  /// 连接信令服并完成 guest 握手。Key 不合规/不匹配/host 不在线/超时都返回 null。
   static Future<GuestSignaling?> connect({
     required String url,
     required String deviceId,
@@ -178,10 +174,7 @@ class GuestSignaling {
                 'type': 'hello',
                 'role': 'guest',
                 'deviceId': deviceId,
-                'response': pairingResponse(
-                  frame['nonce'] as String? ?? '',
-                  secret,
-                ),
+                'secret': secret,
               }),
             );
           case 'ok':

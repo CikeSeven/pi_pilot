@@ -58,7 +58,7 @@ export interface P2pConfig {
   rendezvousUrl: string;
   /// 这台桌面在信令服上的名字;手机凭它找到本机。
   deviceId: string;
-  /// 配对密钥:与信令服 devices 表里的值一致。挑战-应答校验,永不上行。
+  /// 配对密钥:与手机端填写的值一致。经 WSS hello 传给信令服校验,仅保存摘要。
   secret: string;
 }
 

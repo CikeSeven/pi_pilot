@@ -72,20 +72,35 @@ P2P 的 SDP 包含 DTLS 指纹,因此公网信令必须经过认证的 TLS。App
 PIPILOT_P2P_RENDEZVOUS=signal.example.com/pipilot
 ```
 
-也可以把整组 P2P 配置写进 `bridge/config.json`（推荐：此文件已在
-`bridge/.gitignore` 中，密钥不会进仓库；落盘权限 0600），每次启动自动读取：
+P2P 不需要在信令服务器预注册设备。手机和 bridge 只要填写相同的设备名与配对
+Key 即可进入同一个临时房间。信令服务器会校验 Key 必须满足：
+
+- 长度为 16–128 个 ASCII 可打印字符。
+- 小写、大写、数字、符号四类字符中至少包含三类。
+- 不允许空格、换行或其它控制字符。
+
+bridge 配置示例：
 
 ```json
 {
   "p2p": {
     "rendezvousUrl": "signal.example.com/pipilot",
     "deviceId": "my-desktop",
-    "secret": "配对密钥"
+    "secret": "替换为至少16位的随机配对Key"
   }
 }
 ```
 
-优先级：CLI 参数 > 环境变量 > `config.json`。配齐 `rendezvousUrl` 与
+手机端填写相同的信令地址、设备名和配对 Key。Key 通过强制 WSS hello 帧传输，
+信令服务器只在内存中校验并保存房间摘要，不写入磁盘、不输出日志。信令服务器
+运营者仍然可以看到握手中的 Key，因此必须使用 WSS，并且不要在多个设备之间复用
+同一个 Key。
+
+同一个设备名同时只允许一个 bridge host 在线；同一个 host 可以接入多个手机。
+host 下线后，设备名对应的房间会被清理，下一台使用该设备名和合规 Key 的 bridge
+可以重新建立房间。
+
+配置优先级：CLI 参数 > 环境变量 > `config.json`。配齐 `rendezvousUrl` 与
 `secret` 即默认启用；`"enabled": false` 可显式关闭。`deviceId` 缺省取本机
 hostname。
 
@@ -106,7 +121,8 @@ location /pipilot {
 ```
 
 TURN/STUN 的 UDP 端口不经过上述 HTTP 反代；coturn 继续独立监听自己的公网端口。
-配对密钥、Hub token 与 TURN REST shared secret 都不得写入仓库或反代配置。
+Hub token 与 TURN REST shared secret 都不得写入仓库或反代配置。配对 Key 虽然不
+落盘,但会在 WSS hello 中被信令服务器看到。
 
 ## Source Hub 协议
 

@@ -38,10 +38,6 @@ export {
   normalizeP2pSignalingUrl,
 } from "./p2p_signaling_url.js";
 
-function sha256Hex(text: string): string {
-  return crypto.createHash("sha256").update(text).digest("hex");
-}
-
 export interface RelayIceServer {
   urls: string[];
   username?: string;
@@ -672,7 +668,6 @@ export class P2pHost {
   private reconnectTimer?: NodeJS.Timeout;
   private credentialRefreshTimer?: NodeJS.Timeout;
   private backoffMs = RECONNECT_MIN_MS;
-  private nonce?: string;
   private iceServers: RelayIceServer[] = [];
   private readonly rendezvousUrl: string;
 
@@ -810,7 +805,6 @@ export class P2pHost {
   private onRendezvousMessage(ws: WebSocket, msg: Record<string, unknown>): void {
     switch (msg.type) {
       case "welcome": {
-        this.nonce = String(msg.nonce ?? "");
         const legacyStunUrls = normalizeLegacyStunUrls(msg.stunUrls);
         this.iceServers = legacyStunUrls.length > 0 ? [{ urls: legacyStunUrls }] : [];
         ws.send(
@@ -818,7 +812,7 @@ export class P2pHost {
             type: "hello",
             role: "host",
             deviceId: this.deps.deviceId,
-            response: sha256Hex(`${this.nonce}:${this.deps.secret}`),
+            secret: this.deps.secret,
           }),
         );
         return;

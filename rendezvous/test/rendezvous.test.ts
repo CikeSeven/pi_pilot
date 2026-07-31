@@ -7,20 +7,26 @@ import { normalizeStunUrls, normalizeTurnConfig } from "../src/config.js";
 import {
   buildClientIceServers,
   createRendezvous,
-  sha256Hex,
   type RendezvousHandle,
 } from "../src/server.js";
+import {
+  pairingKeyPolicy,
+  validateDeviceId,
+  validatePairingKey,
+} from "../src/key_policy.js";
 
 interface Running {
   url: string;
   close: () => Promise<void>;
 }
 
+const TEST_DEVICE_ID = "dev1";
+const TEST_PAIRING_KEY = "S3cret-Key-2026!";
+
 async function startRendezvous(): Promise<Running> {
   const handle: RendezvousHandle = createRendezvous({
     port: 0,
     host: "127.0.0.1",
-    devices: { dev1: "s3cret-pairing" },
     stunUrls: ["stun:stun.example.test:3478"],
     turn: {
       urls: ["turn:turn.example.test:3478?transport=udp"],
@@ -47,7 +53,6 @@ class Peer {
 
   static async connect(url: string): Promise<Peer> {
     const ws = new WebSocket(url);
-    // 先挂监听再等 open:服务器连接瞬间就发 welcome,晚挂会丢帧。
     const peer = new Peer(ws);
     await once(ws, "open");
     return peer;
@@ -57,7 +62,6 @@ class Peer {
     this.ws.send(JSON.stringify(frame));
   }
 
-  /** 从已收帧里找;waitFor 从头扫,谓词要带区分度(参考 bridge 测试教训)。 */
   async waitFor(predicate: (frame: Frame) => boolean, timeoutMs = 3000): Promise<Frame> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -69,12 +73,26 @@ class Peer {
   }
 
   async hello(role: "host" | "guest", deviceId: string, secret: string): Promise<Frame> {
-    const welcome = await this.waitFor((f) => f.type === "welcome");
-    const response = sha256Hex(`${welcome.nonce as string}:${secret}`);
-    this.send({ type: "hello", role, deviceId, response });
+    await this.waitFor((f) => f.type === "welcome");
+    this.send({ type: "hello", role, deviceId, secret });
     return this.waitFor((f) => f.type === "ok" || f.type === "error");
   }
 }
+
+test("pairing key policy accepts strong ASCII keys and rejects weak inputs", () => {
+  assert.equal(validatePairingKey(TEST_PAIRING_KEY), true);
+  assert.equal(validatePairingKey("short"), false);
+  assert.equal(validatePairingKey("alllowercaseletters"), false);
+  assert.equal(validatePairingKey("NO-SPACES-ALLOWED 2026"), false);
+  assert.equal(validatePairingKey("A".repeat(pairingKeyPolicy.maxLength + 1)), false);
+});
+
+test("device id policy restricts names to safe room identifiers", () => {
+  assert.equal(validateDeviceId(TEST_DEVICE_ID), true);
+  assert.equal(validateDeviceId("ab"), false);
+  assert.equal(validateDeviceId("bad/id"), false);
+  assert.equal(validateDeviceId("contains space"), false);
+});
 
 test("STUN 配置只接受 stun:地址并去重限量", () => {
   assert.deepEqual(
@@ -108,7 +126,6 @@ test("TURN 配置严格校验并签发 coturn REST 短期凭据", () => {
     {
       port: 0,
       host: "127.0.0.1",
-      devices: {},
       stunUrls: ["stun:stun.example:3478"],
       turn: {
         urls: ["turn:relay.example:3478?transport=udp"],
@@ -134,7 +151,7 @@ test("host 注册、guest 加入,信令双向转发", async () => {
   const running = await startRendezvous();
   try {
     const host = await Peer.connect(running.url);
-    const hostHello = await host.hello("host", "dev1", "s3cret-pairing");
+    const hostHello = await host.hello("host", TEST_DEVICE_ID, TEST_PAIRING_KEY);
     assert.equal(hostHello.type, "ok");
     const hostIceServers = hostHello.iceServers as Array<Record<string, unknown>>;
     assert.deepEqual(hostIceServers[0], { urls: ["stun:stun.example.test:3478"] });
@@ -143,7 +160,7 @@ test("host 注册、guest 加入,信令双向转发", async () => {
     assert.ok(String(hostIceServers[1]?.credential).length > 0);
 
     const guest = await Peer.connect(running.url);
-    const guestHello = await guest.hello("guest", "dev1", "s3cret-pairing");
+    const guestHello = await guest.hello("guest", TEST_DEVICE_ID, TEST_PAIRING_KEY);
     assert.equal(guestHello.type, "ok");
     const peerId = guestHello.peerId as string;
     assert.ok(peerId.length > 0);
@@ -151,12 +168,10 @@ test("host 注册、guest 加入,信令双向转发", async () => {
     const joined = await host.waitFor((f) => f.type === "peer_joined" && f.peerId === peerId);
     assert.equal(joined.peerId, peerId);
 
-    // guest → host:带 from
     guest.send({ type: "signal", data: { kind: "offer", sdp: "v=0..." } });
     const atHost = await host.waitFor((f) => f.type === "signal" && f.from === peerId);
     assert.deepEqual(atHost.data, { kind: "offer", sdp: "v=0..." });
 
-    // host → guest:按 peerId 定向
     host.send({ type: "signal", peerId, data: { kind: "answer", sdp: "v=1..." } });
     const atGuest = await guest.waitFor((f) => f.type === "signal");
     assert.deepEqual(atGuest.data, { kind: "answer", sdp: "v=1..." });
@@ -168,20 +183,23 @@ test("host 注册、guest 加入,信令双向转发", async () => {
   }
 });
 
-test("错误密钥、未知设备、重复 host 都被拒", async () => {
+test("弱密钥、错误密钥、非法设备名、重复 host 都被拒", async () => {
   const running = await startRendezvous();
   try {
-    const badSecret = await Peer.connect(running.url);
-    assert.equal((await badSecret.hello("host", "dev1", "wrong")).type, "error");
-    assert.equal((await badSecret.waitFor((f) => f.type === "error")).reason, "bad_secret");
+    const weak = await Peer.connect(running.url);
+    assert.equal((await weak.hello("host", TEST_DEVICE_ID, "short")).reason, "weak_key");
 
-    const unknown = await Peer.connect(running.url);
-    assert.equal((await unknown.hello("host", "nope", "s3cret-pairing")).reason, "unknown_device");
+    const badDevice = await Peer.connect(running.url);
+    assert.equal((await badDevice.hello("host", "bad/id", TEST_PAIRING_KEY)).reason, "bad_device_id");
 
     const host = await Peer.connect(running.url);
-    assert.equal((await host.hello("host", "dev1", "s3cret-pairing")).type, "ok");
+    assert.equal((await host.hello("host", TEST_DEVICE_ID, TEST_PAIRING_KEY)).type, "ok");
+
+    const badKey = await Peer.connect(running.url);
+    assert.equal((await badKey.hello("guest", TEST_DEVICE_ID, "Wrong-Key-2026!!")).reason, "bad_key");
+
     const second = await Peer.connect(running.url);
-    assert.equal((await second.hello("host", "dev1", "s3cret-pairing")).reason, "device_id_in_use");
+    assert.equal((await second.hello("host", TEST_DEVICE_ID, TEST_PAIRING_KEY)).reason, "device_id_in_use");
 
     host.ws.close();
   } finally {
@@ -193,23 +211,19 @@ test("host 不在线时 guest 被拒;host 断开时 guest 被通知并关闭", a
   const running = await startRendezvous();
   try {
     const early = await Peer.connect(running.url);
-    assert.equal((await early.hello("guest", "dev1", "s3cret-pairing")).reason, "host_offline");
+    assert.equal((await early.hello("guest", TEST_DEVICE_ID, TEST_PAIRING_KEY)).reason, "host_offline");
 
     const host = await Peer.connect(running.url);
-    await host.hello("host", "dev1", "s3cret-pairing");
+    await host.hello("host", TEST_DEVICE_ID, TEST_PAIRING_KEY);
     const guest = await Peer.connect(running.url);
-    const hello = await guest.hello("guest", "dev1", "s3cret-pairing");
+    const hello = await guest.hello("guest", TEST_DEVICE_ID, TEST_PAIRING_KEY);
     const peerId = hello.peerId as string;
 
-    // guest 断开 → host 收 peer_left
     guest.ws.close();
     await host.waitFor((f) => f.type === "peer_left" && f.peerId === peerId);
 
     const guest2 = await Peer.connect(running.url);
-    await guest2.hello("guest", "dev1", "s3cret-pairing");
-    // host 断开 → guest 收 peer_left 且 socket 被关。
-    // 不能 await once(ws, "close"):轮询到 peer_left 时 close 可能已发完,
-    // once 挂在已过去的事件上会永远等下去(套件挂死),只能轮询 readyState。
+    await guest2.hello("guest", TEST_DEVICE_ID, TEST_PAIRING_KEY);
     host.ws.close();
     await guest2.waitFor((f) => f.type === "peer_left");
     const deadline = Date.now() + 3000;
@@ -222,22 +236,15 @@ test("host 不在线时 guest 被拒;host 断开时 guest 被通知并关闭", a
   }
 });
 
-test("配对密钥永不上行:抓包视角只有 nonce 和 sha256 应答", async () => {
+test("welcome 不回显 TURN shared secret 或配对 key", async () => {
   const running = await startRendezvous();
   try {
     const peer = await Peer.connect(running.url);
     const welcome = await peer.waitFor((f) => f.type === "welcome");
-    assert.ok(typeof welcome.nonce === "string" && (welcome.nonce as string).length >= 16);
     assert.deepEqual(welcome.stunUrls, ["stun:stun.example.test:3478"]);
     assert.equal(welcome.iceServers, undefined);
     assert.ok(!JSON.stringify(welcome).includes("turn-rest-secret-for-tests"));
-    // 模拟一次 hello,断言线上只有哈希
-    const response = crypto
-      .createHash("sha256")
-      .update(`${welcome.nonce as string}:s3cret-pairing`)
-      .digest("hex");
-    assert.equal(response.length, 64);
-    assert.ok(!response.includes("s3cret"));
+    assert.ok(!JSON.stringify(welcome).includes(TEST_PAIRING_KEY));
     peer.ws.close();
   } finally {
     await running.close();
