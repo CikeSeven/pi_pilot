@@ -189,14 +189,23 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             _ => 1,
           },
           maxHeight: _kOutputMaxHeight,
+          embedded: true,
         );
       case 'edit':
         if (looksLikeUnifiedDiff(item.output)) {
-          return DiffView(diffText: item.output, maxHeight: _kOutputMaxHeight);
+          return DiffView(
+            diffText: item.output,
+            maxHeight: _kOutputMaxHeight,
+            embedded: true,
+          );
         }
         final diff = _diffFromArgs(item);
         if (diff != null) {
-          return DiffView(lines: diff, maxHeight: _kOutputMaxHeight);
+          return DiffView(
+            lines: diff,
+            maxHeight: _kOutputMaxHeight,
+            embedded: true,
+          );
         }
       case 'write':
         final content = _writeContent(item);
@@ -205,6 +214,7 @@ class _ToolCardState extends ConsumerState<ToolCard> {
             code: content,
             language: path is String ? languageForPath(path) : null,
             maxHeight: _kOutputMaxHeight,
+            embedded: true,
           );
         }
     }
@@ -275,17 +285,13 @@ class _ToolCardState extends ConsumerState<ToolCard> {
 }
 
 /// 默认输出井:mono + ANSI 解析,固定井底保证前景对比度与主题无关。
+/// 不画边框/背景——工具卡片本身已有外壳,再套一层就是「框中框」。
 Widget _outputWell(BuildContext context, String text) {
   final piColors = PiColors.of(context);
   return Container(
     width: double.infinity,
     constraints: const BoxConstraints(maxHeight: _kOutputMaxHeight),
     padding: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: piColors.codeWellBg,
-      borderRadius: BorderRadius.circular(PiShape.sm),
-      border: Border.all(color: piColors.codeWellBorder),
-    ),
     child: SingleChildScrollView(
       child: AnsiText(
         text: text,

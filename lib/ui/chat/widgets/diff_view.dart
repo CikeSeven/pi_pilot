@@ -100,12 +100,20 @@ List<DiffLine> computeLineDiff(String oldText, String newText) {
 
 /// 彩色 diff 渲染:add/del 全宽着色行,@@ hunk 头,横向滚动。
 class DiffView extends StatelessWidget {
-  const DiffView({super.key, this.diffText, this.lines, this.maxHeight})
-    : assert(diffText != null || lines != null);
+  const DiffView({
+    super.key,
+    this.diffText,
+    this.lines,
+    this.maxHeight,
+    this.embedded = false,
+  }) : assert(diffText != null || lines != null);
 
   final String? diffText;
   final List<DiffLine>? lines;
   final double? maxHeight;
+
+  /// 嵌入在工具卡片内部时:去掉边框和背景,工具卡片已有外壳。
+  final bool embedded;
 
   @override
   Widget build(BuildContext context) {
@@ -159,6 +167,7 @@ class DiffView extends StatelessWidget {
         child: SingleChildScrollView(child: body),
       );
     }
+    if (embedded) return body;
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 6),
       clipBehavior: Clip.antiAlias,

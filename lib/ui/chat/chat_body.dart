@@ -454,7 +454,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                 left: 0,
                 right: 0,
                 bottom: _composerHeight,
-                height: 40,
+                height: 28,
                 child: IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
@@ -465,12 +465,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                           Theme.of(
                             context,
                           ).colorScheme.surface.withValues(alpha: 0),
-                          Theme.of(
-                            context,
-                          ).colorScheme.surface.withValues(alpha: 0.6),
                           Theme.of(context).colorScheme.surface,
                         ],
-                        stops: const [0.0, 0.4, 1.0],
                       ),
                     ),
                   ),
