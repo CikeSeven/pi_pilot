@@ -14,6 +14,22 @@ String taskCompletionTitle(String? sessionName) {
   return name != null && name.isNotEmpty ? '$name 已完成' : 'PiPilot 任务完成';
 }
 
+/// 连接中断提醒使用固定 id,重复断线会更新同一条通知,重连后也能精确取消。
+@visibleForTesting
+const connectionLostNotificationId = 2;
+
+/// 保证快速的断线/重连状态变化仍按发生顺序操作系统通知。
+@visibleForTesting
+class NotificationOperationSequencer {
+  Future<void> _tail = Future<void>.value();
+
+  Future<void> enqueue(Future<void> Function() operation) {
+    final result = _tail.then((_) => operation());
+    _tail = result.catchError((Object _, StackTrace _) {});
+    return result;
+  }
+}
+
 /// 常驻通知要展示的会话计数:已连接(dormant 不算)与正在工作中的会话数。
 /// sessions 还没就绪(空列表)时返回 null —— 不推状态,原生保留上一份文案。
 /// 断开源上残留的 streaming 标记不算工作中。
@@ -41,10 +57,10 @@ String taskCompletionTitle(String? sessionName) {
 ///   若进程曾被杀、回前台才补收到完成(_streamingWhenBackgrounded 兜底),也补发通知。
 /// - 扩展等待输入、连接中断:后台时通知。
 ///
-/// 通知 id 策略:FGS 常驻通知固定 id=1;任务通知 Dart 侧从 100 起、原生
-/// watcher 从 200 起。回前台时用 getActiveNotifications 全扫取消(只留 id=1),
-/// 进程被杀后残留的孤儿通知也一并清掉 —— 绝不能用 cancelAll(会把前台
-/// 服务通知一起干掉,可能导致服务被系统杀)。
+/// 通知 id 策略:FGS 常驻通知固定 id=1;连接中断固定 id=2;任务通知 Dart
+/// 侧从 100 起、原生 watcher 从 200 起。回前台时用 getActiveNotifications
+/// 全扫取消(只留 id=1),进程被杀后残留的孤儿通知也一并清掉 —— 绝不能用
+/// cancelAll(会把前台服务通知一起干掉,可能导致服务被系统杀)。
 class NotificationController extends ConsumerStatefulWidget {
   const NotificationController({super.key, required this.child});
 
@@ -66,6 +82,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   /// 原生观察连接是否已接管后台事件。接管期间 Dart 侧不再发完成通知,
   /// 否则回前台补收到事件时会和原生通知重复。
   bool _watcherActive = false;
+  final _connectionNotificationOperations = NotificationOperationSequencer();
 
   bool get _inBackground => _lifecycle != AppLifecycleState.resumed;
   bool get _enabled => ref.read(settingsProvider).notificationsEnabled;
@@ -83,6 +100,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   Future<void> _initializeNotifications() async {
     await NotificationService.instance.init();
     if (!mounted) return;
+    if (ref.read(piSessionProvider).status == PiConnStatus.connected) {
+      _cancelConnectionLostNotification();
+    }
     _syncForeground();
   }
 
@@ -187,6 +207,30 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     );
   }
 
+  void _notifyConnectionLost() {
+    if (!_enabled || !_inBackground) return;
+    unawaited(
+      _connectionNotificationOperations.enqueue(
+        () => NotificationService.instance.show(
+          id: connectionLostNotificationId,
+          title: '与 bridge 的连接已断开',
+          body: '将自动重连',
+          vibrate: _vibrate,
+        ),
+      ),
+    );
+  }
+
+  void _cancelConnectionLostNotification() {
+    unawaited(
+      _connectionNotificationOperations.enqueue(
+        () => NotificationService.instance.cancelById(
+          connectionLostNotificationId,
+        ),
+      ),
+    );
+  }
+
   /// 当前选中会话的显示名(会话名 > 目录名 > id 前 8 位),供完成通知标题
   /// 和原生 watcher 使用。sessions 里没有这个源时退到 pi 自己的会话名。
   String? _selectedSessionName() {
@@ -268,6 +312,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     // 连接状态:连上时确保 FGS 已启动;瞬时断线保留 FGS 给自动重连。
     ref.listen(piSessionProvider.select((s) => s.status), (prev, next) {
       if (next == PiConnStatus.connected) {
+        _cancelConnectionLostNotification();
         _syncForeground();
       } else if (prev == PiConnStatus.connected) {
         unawaited(
@@ -276,7 +321,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
           ),
         );
         _syncForeground();
-        _notify('与 bridge 的连接已断开', '将自动重连');
+        _notifyConnectionLost();
       }
     });
 

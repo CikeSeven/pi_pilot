@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/state/hub_models.dart';
 import 'package:pi_pilot/state/notification_controller.dart';
@@ -16,6 +18,53 @@ HubSession _session({
 );
 
 void main() {
+  test('连接中断通知使用保留的固定 id', () {
+    expect(connectionLostNotificationId, 2);
+  });
+
+  test('通知操作串行执行,快速重连不会让延迟显示覆盖取消', () async {
+    final sequencer = NotificationOperationSequencer();
+    final showStarted = Completer<void>();
+    final releaseShow = Completer<void>();
+    final operations = <String>[];
+
+    final show = sequencer.enqueue(() async {
+      operations.add('show:start');
+      showStarted.complete();
+      await releaseShow.future;
+      operations.add('show:end');
+    });
+    await showStarted.future;
+
+    final cancel = sequencer.enqueue(() async {
+      operations.add('cancel');
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(operations, ['show:start']);
+
+    releaseShow.complete();
+    await Future.wait([show, cancel]);
+    expect(operations, ['show:start', 'show:end', 'cancel']);
+  });
+
+  test('通知操作失败后仍继续执行后续操作', () async {
+    final sequencer = NotificationOperationSequencer();
+    final operations = <String>[];
+
+    await expectLater(
+      sequencer.enqueue(() async {
+        operations.add('failed');
+        throw StateError('notification failed');
+      }),
+      throwsStateError,
+    );
+    await sequencer.enqueue(() async {
+      operations.add('next');
+    });
+
+    expect(operations, ['failed', 'next']);
+  });
+
   group('keepAliveSessionCounts', () {
     test('sessions 还没就绪(空列表)时返回 null,不推状态', () {
       expect(keepAliveSessionCounts(const []), isNull);

@@ -301,7 +301,12 @@ class NotificationService {
   Future<void> cancelById(int id) async {
     await init();
     if (!_initialized) return;
-    await _plugin.cancel(id: id);
+    try {
+      await _plugin.cancel(id: id);
+      await logDiagnostic('notification canceled: id=$id');
+    } catch (error) {
+      await logDiagnostic('notification cancel failed: id=$id error=$error');
+    }
   }
 
   /// 打开 Android/MIUI 的应用通知设置。顶部横幅属于系统的"悬浮通知"
