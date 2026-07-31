@@ -315,7 +315,7 @@ class _P2pCardState extends ConsumerState<_P2pCard> {
               controller: _rendezvous,
               decoration: const InputDecoration(
                 labelText: '信令服地址',
-                hintText: 'signal.example.com',
+                hintText: kDefaultRendezvousAddress,
                 prefixIcon: Icon(Icons.hub_outlined),
               ),
             ),

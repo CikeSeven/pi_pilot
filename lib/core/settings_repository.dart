@@ -97,7 +97,9 @@ class SettingsRepository {
       port: prefs.getInt(_kPort) ?? 9377,
       token: prefs.getString(_kToken) ?? '',
       transport: DeviceTransport.auto,
-      p2pRendezvous: _emptyToNull(prefs.getString(_kP2pRendezvous)),
+      p2pRendezvous:
+          _emptyToNull(prefs.getString(_kP2pRendezvous)) ??
+          kDefaultRendezvousAddress,
       p2pDeviceId: _emptyToNull(prefs.getString(_kP2pDeviceId)),
       p2pSecret: _emptyToNull(prefs.getString(_kP2pSecret)),
     );
@@ -261,7 +263,7 @@ class SettingsRepository {
       accent: prefs.getString(_kAccent) ?? 'terracotta',
       preferredSessionId: prefs.getString(_kPreferredSessionId),
       p2pEnabled: prefs.getBool(_kP2pEnabled) ?? false,
-      p2pRendezvous: prefs.getString(_kP2pRendezvous) ?? '',
+      p2pRendezvous: prefs.getString(_kP2pRendezvous) ?? kDefaultRendezvousAddress,
       p2pDeviceId: prefs.getString(_kP2pDeviceId) ?? '',
       p2pSecret: prefs.getString(_kP2pSecret) ?? '',
     );

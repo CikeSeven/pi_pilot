@@ -9,6 +9,10 @@ import 'dart:math' show Random;
 ///   ① DHCP 换 IP 后认出「这还是原来那台」(自愈,见 docs/multi-device-plan.md §5.3);
 ///   ② 发现列表里过滤掉已经在 roster 里的设备。
 
+/// 信令服默认地址。新增设备、旧配置迁移、未配过 P2P 的设置加载都回落到它;
+/// 用户显式保存过的值(含清空)永远优先。
+const kDefaultRendezvousAddress = 'pi-pilot.sisct.xyz';
+
 /// 一台设备的连接偏好。
 enum DeviceTransport {
   /// 局域网直连优先,失败自动回落 P2P(与旧版单设备行为一致)。

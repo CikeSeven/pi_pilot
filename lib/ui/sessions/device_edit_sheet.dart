@@ -80,7 +80,9 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
     _host = TextEditingController(text: e?.host ?? d?.host ?? '');
     _port = TextEditingController(text: '${e?.port ?? d?.port ?? 9377}');
     _token = TextEditingController(text: e?.token ?? '');
-    _rendezvous = TextEditingController(text: e?.p2pRendezvous ?? '');
+    _rendezvous = TextEditingController(
+      text: e?.p2pRendezvous ?? kDefaultRendezvousAddress,
+    );
     _p2pDeviceId = TextEditingController(text: e?.p2pDeviceId ?? '');
     _secret = TextEditingController(text: e?.p2pSecret ?? '');
     _transport = e?.transport ?? DeviceTransport.auto;
@@ -262,7 +264,7 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
               _field(
                 _rendezvous,
                 label: '信令服',
-                hint: 'signal.example.com',
+                hint: kDefaultRendezvousAddress,
                 icon: Icons.hub_outlined,
               ),
               const SizedBox(height: 12),
