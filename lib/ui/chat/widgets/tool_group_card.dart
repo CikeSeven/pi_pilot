@@ -18,10 +18,16 @@ import 'tool_card.dart';
 /// - 单工具:类别小图标 +「bash · export LC_ALL…」(信息不丢);
 /// - 多工具:类别小图标 +「使用了 N 个工具」+ **迷你图标序列**
 ///   (按调用顺序排,扫一眼就知道用了哪些、什么顺序 —— 时序不丢)。
+///
+/// `statOnly` 纯统计模式:胶囊只报数量,不可点、无箭头、不展开。
+/// 用于轮尾统计行 —— 工具卡已在消息流原位,展开只是重复。
 class ToolGroupCard extends StatefulWidget {
-  const ToolGroupCard({super.key, required this.tools});
+  const ToolGroupCard({super.key, required this.tools, this.statOnly = false});
 
   final List<ToolItem> tools;
+
+  /// 见类注释。
+  final bool statOnly;
 
   @override
   State<ToolGroupCard> createState() => _ToolGroupCardState();
@@ -53,7 +59,8 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final piColors = PiColors.of(context);
-    final expanded = _expanded || _anyRunning;
+    final statOnly = widget.statOnly;
+    final expanded = !statOnly && (_expanded || _anyRunning);
     final running = _runningName;
     final tools = widget.tools;
     final single = tools.length == 1;
@@ -70,11 +77,11 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
           child: GlassPill(
-            onTap: () => setState(() => _expanded = !_expanded),
+            onTap: statOnly ? null : () => setState(() => _expanded = !_expanded),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                  if (_anyRunning)
+                  if (!statOnly && _anyRunning)
                     SizedBox(
                       width: 14,
                       height: 14,
@@ -101,7 +108,7 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                   const SizedBox(width: 8),
                   Flexible(
                     child: Text(
-                      running != null
+                      !statOnly && running != null
                           ? '正在执行 $running…'
                           : single
                           ? _singleLabel(tools.first)
@@ -109,7 +116,7 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: _anyRunning
+                        color: !statOnly && _anyRunning
                             ? colors.primary
                             : colors.onSurfaceVariant,
                         letterSpacing: 0.2,
@@ -117,23 +124,28 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                     ),
                   ),
                   // 迷你图标序列:按调用顺序排列,折叠也能看出顺序。
-                  if (!_anyRunning && !single) ..._miniIcons(piColors),
-                  const SizedBox(width: 6),
-                  AnimatedRotation(
-                    turns: expanded ? 0.5 : 0,
-                    duration: PiMotion.collapse,
-                    curve: PiMotion.collapseCurve,
-                    child: Icon(
-                      Icons.expand_more,
-                      size: 15,
-                      color: colors.onSurfaceVariant,
+                  if ((statOnly || !_anyRunning) && !single)
+                    ..._miniIcons(piColors),
+                  if (!statOnly) ...[
+                    const SizedBox(width: 6),
+                    AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: PiMotion.collapse,
+                      curve: PiMotion.collapseCurve,
+                      child: Icon(
+                        Icons.expand_more,
+                        size: 15,
+                        color: colors.onSurfaceVariant,
+                      ),
                     ),
-                  ),
+                  ],
               ],
             ),
           ),
         ),
         // 展开区:ToolCard 自带 margin,这里不加水平 padding。
+        // statOnly 时 expanded 恒为 false,这里始终渲染占位空盒 ——
+        // 工具卡在消息流原位,展开只是重复。
         AnimatedSize(
           duration: PiMotion.collapse,
           curve: PiMotion.collapseCurve,

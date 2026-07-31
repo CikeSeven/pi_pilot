@@ -340,12 +340,12 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     _derivedRevision = state.revision;
     final items = state.items;
 
-    // 派生渲染行。**按轮分段**(UserItem 开头),完成轮与进行轮两种布局:
+    // 派生渲染行。**按轮分段**(UserItem 开头),完成轮与进行轮统一布局:
     //
-    // - 进行轮(streaming/有 running 工具):工具原位连续聚合 ——
-    //   实时进度要看得见,位置和实际执行顺序一致。
-    // - 完成轮:重排 —— 正文片段按顺序连着排,这轮的所有工具聚成
-    //   一个胶囊挪到最终回复下面。工具不再打断阅读,对话流干净。
+    // - 工具原位:连续工具聚成一颗胶囊,位置和实际执行顺序一致,
+    //   实时进度看得见;不再把工具挪到轮尾重排(会弄丢上下文位置)。
+    // - 轮尾追加一颗**纯统计**胶囊(「使用了 N 个工具」+ 迷你图标),
+    //   不可点、不展开 —— 工具卡已在流里,展开只是重复。
     final rows = <_ChatRow>[];
     final index = <String, int>{};
     final rowTimes = <DateTime?>[];
@@ -359,7 +359,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       }
     }
 
-    void buildSegment(int start, int end, {required bool isLast}) {
+    void buildSegment(int start, int end) {
       if (start >= end) return;
 
       // 空 AssistantItem(纯工具调用回合产生)不产生行,也不打断工具收集。
@@ -369,33 +369,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
           i.text.isEmpty &&
           i.thinking.isEmpty;
 
-      final events = <ChatItem>[];
-      final tools = <ToolItem>[];
-      for (var i = start; i < end; i++) {
-        final item = items[i];
-        if (item is ToolItem) {
-          tools.add(item);
-        } else if (!isEmptyAssistant(item)) {
-          events.add(item);
-        }
-      }
-
-      final hasStreaming = events.any((i) => i is AssistantItem && !i.complete);
-      final hasRunning = tools.any((t) => !t.done);
-      final complete = !isLast || (!hasStreaming && !hasRunning);
-
-      if (complete) {
-        // 完成轮:正文/bash/系统项按原顺序,工具组收尾。
-        for (final item in events) {
-          addRow(_SingleRow(item), timeOf(item), [item]);
-        }
-        if (tools.isNotEmpty) {
-          addRow(_ToolGroupRow(List.unmodifiable(tools)), null, tools);
-        }
-        return;
-      }
-
-      // 进行轮:按原始顺序流式扫描,连续工具原位聚合成组。
+      // 按原始顺序流式扫描,连续工具原位聚合成组。
+      final allTools = <ToolItem>[];
       var pending = <ToolItem>[];
       void flushPending() {
         if (pending.isEmpty) return;
@@ -406,6 +381,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       for (var i = start; i < end; i++) {
         final item = items[i];
         if (item is ToolItem) {
+          allTools.add(item);
           pending.add(item);
         } else if (!isEmptyAssistant(item)) {
           flushPending();
@@ -413,16 +389,22 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
         }
       }
       flushPending();
+
+      // 轮尾统计胶囊。不注册工具 key:那些 key 属于流里的原位工具行,
+      // 重复注册会把滚动锚点从工具行抢过来。
+      if (allTools.isNotEmpty) {
+        addRow(_ToolStatRow(List.unmodifiable(allTools)), null, const []);
+      }
     }
 
     var segStart = 0;
     for (var i = 1; i < items.length; i++) {
       if (items[i] is UserItem) {
-        buildSegment(segStart, i, isLast: false);
+        buildSegment(segStart, i);
         segStart = i;
       }
     }
-    buildSegment(segStart, items.length, isLast: true);
+    buildSegment(segStart, items.length);
 
     // 时间戳标志按行算:工具行/组行无时间(null 跳过),
     // 和原来按 items 算的语义一致 —— 时间戳只看 user/assistant。
@@ -639,6 +621,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     final primaryKey = switch (row) {
                       _SingleRow(item: final item) => item.key,
                       _ToolGroupRow(tools: final tools) => tools.first.key,
+                      // 统计行不注册任何 item key,永远解析不到。
+                      _ToolStatRow() => null,
                     };
                     if (key.value != primaryKey) return null;
                     return window.slotOf(full);
@@ -671,6 +655,11 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                         key: ValueKey(tools.first.key),
                         tools: tools,
                       ),
+                      // 统计行无 key:它不属于任何 item,也无状态可保。
+                      _ToolStatRow(tools: final tools) => ToolGroupCard(
+                        tools: tools,
+                        statOnly: true,
+                      ),
                     };
                     // 导航轨道的跳转目标:挂上 GlobalKey,构建出来以后
                     // _refineJump 用 ensureVisible 校正粗跳的估算误差。
@@ -682,7 +671,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     // 工具组行无时间,flag 一定是 false,走不到这里。
                     final rowTime = switch (row) {
                       _SingleRow(item: final item) => timeOf(item),
-                      _ToolGroupRow() => null,
+                      _ToolGroupRow() || _ToolStatRow() => null,
                     };
                     if (rowTime == null) return view;
                     return Column(
@@ -1104,8 +1093,9 @@ bool shouldAutoLoadEarlier({
 
 /// 消息列表的渲染行:由 ChatItem 列表派生。
 ///
-/// 连续的 ≥2 个 ToolItem 聚合成一个 [_ToolGroupRow],其余每项一行。
-/// 窗口/下标/时间戳全按行维度计算,不再直接用 items 下标。
+/// 连续 ToolItem 原位聚合成 [_ToolGroupRow],其余每项一行;每轮末尾
+/// 追加一颗纯统计的 [_ToolStatRow]。窗口/下标/时间戳全按行维度计算,
+/// 不再直接用 items 下标。
 sealed class _ChatRow {
   const _ChatRow();
 }
@@ -1117,6 +1107,11 @@ class _SingleRow extends _ChatRow {
 
 class _ToolGroupRow extends _ChatRow {
   const _ToolGroupRow(this.tools);
+  final List<ToolItem> tools;
+}
+
+class _ToolStatRow extends _ChatRow {
+  const _ToolStatRow(this.tools);
   final List<ToolItem> tools;
 }
 
