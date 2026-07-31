@@ -106,6 +106,11 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
     ref.read(deviceManagerProvider.notifier).setActive(device.id);
   }
 
+  /// 手动刷新:重扫局域网 + 刷新已连设备的窗口列表。
+  /// RefreshIndicator 等待这个 Future,转动画直到收窗口(3 秒)。
+  Future<void> _rescan() =>
+      ref.read(deviceManagerProvider.notifier).rescanDiscovery();
+
   @override
   Widget build(BuildContext context) {
     final manager = ref.watch(deviceManagerProvider);
@@ -118,9 +123,10 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
           _Header(
             onlineCount: onlineCount,
             total: manager.devices.length,
+            onAdd: () => _editDevice(),
           ),
           Expanded(
-            child: _body(manager),
+            child: RefreshIndicator(onRefresh: _rescan, child: _body(manager)),
           ),
         ],
       ),
@@ -146,6 +152,8 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
     ];
 
     return ListView(
+      // 内容不足一屏时也要能下拉(下拉刷新是唯一全页刷新手势)。
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
       children: [
         for (final device in manager.devices) ...[
@@ -157,22 +165,64 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
           ),
           const SizedBox(height: 10),
         ],
-        if (discovered.isNotEmpty) ...[
+        // 发现区:扫描中也显示这一节,让「正在扫」有地方落脚。
+        // 右上角刷新按钮挪到这里 + 全页下拉刷新;扫描时图标变转圈。
+        if (discovered.isNotEmpty || manager.isScanning) ...[
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 14, 4, 12),
-            child: Eyebrow(
-              text: '局域网发现 · ${discovered.length}',
-              color: colors.onSurfaceVariant,
-              withRule: true,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Eyebrow(
+                    text: discovered.isEmpty
+                        ? '局域网发现'
+                        : '局域网发现 · ${discovered.length}',
+                    color: colors.onSurfaceVariant,
+                    withRule: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                if (manager.isScanning)
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: colors.primary,
+                    ),
+                  )
+                else
+                  InkResponse(
+                    onTap: _rescan,
+                    radius: 18,
+                    child: Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: Icon(
+                        Icons.refresh,
+                        size: 16,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
-          for (final d in discovered) ...[
-            _DiscoveredCard(
-              discovered: d,
-              onTap: () => _editDevice(discovered: d),
-            ),
-            const SizedBox(height: 10),
-          ],
+          if (discovered.isEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+              child: Text(
+                '正在扫描局域网…',
+                style: AppType.monoLabel(color: colors.onSurfaceVariant),
+              ),
+            )
+          else
+            for (final d in discovered) ...[
+              _DiscoveredCard(
+                discovered: d,
+                onTap: () => _editDevice(discovered: d),
+              ),
+              const SizedBox(height: 10),
+            ],
         ],
         const SizedBox(height: 4),
         _AddDeviceCard(onTap: () => _editDevice()),
@@ -181,12 +231,20 @@ class _DevicesBodyState extends ConsumerState<_DevicesBody> {
   }
 }
 
-/// 页头:衬线大标题 + 说明。
+/// 页头:衬线大标题 + 说明 + 右上角添加设备按钮。
 class _Header extends StatelessWidget {
-  const _Header({required this.onlineCount, required this.total});
+  const _Header({
+    required this.onlineCount,
+    required this.total,
+    required this.onAdd,
+  });
 
   final int onlineCount;
   final int total;
+
+  /// 右上角「添加设备」。旧版这个位置是刷新按钮,刷新已挪到
+  /// 发现区小节头 + 全页下拉手势。
+  final VoidCallback onAdd;
 
   @override
   Widget build(BuildContext context) {
@@ -210,6 +268,13 @@ class _Header extends StatelessWidget {
                   size: 15,
                   color: colors.primary,
                 ),
+              ),
+              const Spacer(),
+              IconButton(
+                onPressed: onAdd,
+                icon: const Icon(Icons.add),
+                tooltip: '添加设备',
+                color: colors.primary,
               ),
             ],
           ),
@@ -491,6 +556,8 @@ class _EmptyRoster extends StatelessWidget {
     final colors = theme.colorScheme;
     return Center(
       child: SingleChildScrollView(
+        // 空态内容不足一屏,不给 AlwaysScrollable 就拉不动下拉刷新。
+        physics: const AlwaysScrollableScrollPhysics(),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(32, 8, 32, 32),
           child: Column(

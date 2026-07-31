@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart'
+    show debugPrint, debugPrintStack, listEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/device_models.dart';
@@ -27,13 +29,14 @@ class DeviceManagerState {
     this.discovered = const [],
     this.activeDeviceId,
     this.loaded = false,
+    this.isScanning = false,
   });
 
   /// 已添加设备(持久化于 `devices.list`)。
   final List<DeviceProfile> devices;
 
-  /// 局域网发现到、尚未添加的设备。
-  /// 迭代 3 接入 LanDiscovery(mDNS/子网扫描)前恒为空,UI 据此隐藏发现区。
+  /// 局域网发现到、尚未添加的设备(来自 lanDiscoveredProvider)。
+  /// 测试环境(LanDiscovery 不走真网络)恒为空,UI 据此隐藏发现区。
   final List<DiscoveredDevice> discovered;
 
   /// 当前激活设备 id;聊天页读这台。null = 尚未选择(roster 为空)。
@@ -42,17 +45,22 @@ class DeviceManagerState {
   /// 首次磁盘加载是否完成(避免 hydrate 前闪空态)。
   final bool loaded;
 
+  /// 手动刷新(局域网重扫)进行中——设备页转圈反馈用。
+  final bool isScanning;
+
   DeviceManagerState copyWith({
     List<DeviceProfile>? devices,
     List<DiscoveredDevice>? discovered,
     String? activeDeviceId,
     bool? loaded,
+    bool? isScanning,
   }) {
     return DeviceManagerState(
       devices: devices ?? this.devices,
       discovered: discovered ?? this.discovered,
       activeDeviceId: activeDeviceId ?? this.activeDeviceId,
       loaded: loaded ?? this.loaded,
+      isScanning: isScanning ?? this.isScanning,
     );
   }
 }
@@ -72,7 +80,10 @@ class _RosterIdsNotifier extends Notifier<List<String>> {
   @override
   List<String> build() => const [];
 
-  void setIds(List<String> ids) => state = ids;
+  void setIds(List<String> ids) {
+    if (listEquals(state, ids)) return;
+    state = List.unmodifiable(ids);
+  }
 }
 
 /// **当前设备的会话状态代理**。命名刻意保留旧的 `piSessionProvider`:
@@ -99,6 +110,35 @@ final piSessionNotifierProvider = Provider<PiSessionNotifier?>((ref) {
   return ref.read(piSessionFamilyProvider(activeId).notifier);
 });
 
+/// 局域网发现实例的持有者。独立出来的原因:DeviceManager.build 的
+/// 保活 watch 会让它频繁重跑,发现实例若在其中创建会被反复
+/// stop/start(onDispose 在 rebuild 时同样触发)。这里不 watch
+/// 任何东西,整个 provider 生命周期只创建一次。
+final lanDiscoveryProvider = Provider<LanDiscovery?>((ref) {
+  if (DeviceManagerNotifier.isTestEnvironment) return null;
+  final discovery = LanDiscovery.platform();
+  unawaited(_startLanDiscovery(discovery));
+  ref.onDispose(() => unawaited(discovery.stop()));
+  return discovery;
+});
+
+Future<void> _startLanDiscovery(LanDiscovery discovery) async {
+  try {
+    await discovery.start();
+  } catch (error, stackTrace) {
+    // 发现是增强能力，插件或系统 NSD 不可用时不能阻塞应用首帧。
+    debugPrint('LAN discovery unavailable: $error');
+    debugPrintStack(stackTrace: stackTrace);
+  }
+}
+
+/// 发现结果流。DeviceManager 用 ref.listen 消费;手动重扫走
+/// DeviceManagerNotifier.rescanDiscovery → LanDiscovery.rescan。
+final lanDiscoveredProvider = StreamProvider<List<DiscoveredDevice>>((ref) {
+  final discovery = ref.watch(lanDiscoveryProvider);
+  return discovery?.devices ?? const Stream<List<DiscoveredDevice>>.empty();
+});
+
 /// 在线(connected)设备数,设备页页头用。
 final onlineDeviceCountProvider = Provider<int>((ref) {
   final devices = ref.watch(deviceManagerProvider.select((s) => s.devices));
@@ -113,10 +153,29 @@ final onlineDeviceCountProvider = Provider<int>((ref) {
 });
 
 class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
-  final SettingsRepository _repo = SettingsRepository();
+  DeviceManagerNotifier({SettingsRepository? repository})
+    : _repo = repository ?? SettingsRepository();
+
+  final SettingsRepository _repo;
 
   /// 本批次 hydrate 已发起过连接的设备,防止 roster 反复刷新时重复 connect。
   final Set<String> _connectRequested = {};
+
+  /// build 会随 roster/session 状态重跑，但磁盘初始化每个 notifier 只做一次。
+  bool _hydrateStarted = false;
+
+  /// 最近一次 _emit 的状态。
+  ///
+  /// rebuild 语义(已核实 riverpod 3.3.2 element 源码:handleCreate 每次
+  /// 重建都无条件 setValue(build 返回值)):保活 watch 的 status 一变,
+  /// build 就重跑,返回值会**覆盖** hydrate/upsert 等异步写入的 roster。
+  /// 所以 build 必须返回 _current,所有状态修改也统一走 _emit。
+  DeviceManagerState? _current;
+
+  void _emit(DeviceManagerState next) {
+    _current = next;
+    state = next;
+  }
 
   @override
   DeviceManagerState build() {
@@ -132,24 +191,32 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
         unawaited(_persistHubId(id, hubId));
       }
     }
-    unawaited(_hydrate());
-    // 局域网发现:mDNS 为主、子网扫描兜底。测试环境跳过——
-    // 扫描/组播都是真实网络行为,理由同 _hydrate 的连接守卫。
-    if (!isTestEnvironment) {
-      final discovery = LanDiscovery.platform();
-      final sub = discovery.devices.listen(_onDiscovered);
-      unawaited(discovery.start());
-      ref.onDispose(() {
-        unawaited(sub.cancel());
-        unawaited(discovery.stop());
-      });
+    if (!_hydrateStarted) {
+      _hydrateStarted = true;
+      unawaited(_hydrateOnce());
     }
-    return const DeviceManagerState();
+    // 发现:实例与生命周期在 lanDiscoveryProvider(见上),这里只消费流。
+    // fireImmediately:本 provider 重跑 build 后,补发当前已发现的列表。
+    ref.listen(lanDiscoveredProvider, (_, next) {
+      next.whenData(_onDiscovered);
+    }, fireImmediately: true);
+    return _current ?? const DeviceManagerState();
+  }
+
+  Future<void> _hydrateOnce() async {
+    try {
+      await _hydrate();
+    } catch (error, stackTrace) {
+      // 持久化不可用时降级为空 roster，仍允许主界面正常出首帧。
+      debugPrint('Device roster hydration failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      _emit(state.copyWith(loaded: true));
+    }
   }
 
   /// 发现流入口:更新 discovered,并对 roster 设备做 DHCP 自愈。
   void _onDiscovered(List<DiscoveredDevice> list) {
-    state = state.copyWith(discovered: list);
+    _emit(state.copyWith(discovered: list));
     for (final discovered in list) {
       if (discovered.hubId.isEmpty) continue;
       final hit = state.devices
@@ -179,10 +246,8 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
     ref.read(_rosterIdsProvider.notifier).setIds([
       for (final d in devices) d.id,
     ]);
-    state = state.copyWith(
-      devices: devices,
-      activeDeviceId: activeId,
-      loaded: true,
+    _emit(
+      state.copyWith(devices: devices, activeDeviceId: activeId, loaded: true),
     );
     // 启动即并发连接所有设备——「多连接保活」的入口。
     // flutter test 环境下绝不发起真实连接:否则 widget 测试会向假地址
@@ -192,6 +257,30 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
     for (final device in devices) {
       unawaited(connectDevice(device));
     }
+  }
+
+  /// 设备页手动刷新:重扫局域网 + 顺带刷新已连设备的窗口列表
+  /// (旧版右上角刷新按钮的语义)。mDNS 是持续发现、没有「扫完了」
+  /// 事件,转圈给足 3 秒扫描窗口再收。
+  Future<void> rescanDiscovery() async {
+    if (isTestEnvironment || state.isScanning) return;
+    _emit(state.copyWith(isScanning: true));
+    for (final device in state.devices) {
+      if (ref.read(piSessionFamilyProvider(device.id)).status ==
+          PiConnStatus.connected) {
+        unawaited(
+          ref
+              .read(piSessionFamilyProvider(device.id).notifier)
+              .refreshSources(),
+        );
+      }
+    }
+    final discovery = ref.read(lanDiscoveryProvider);
+    await Future.wait([
+      if (discovery != null) discovery.rescan(),
+      Future<void>.delayed(const Duration(seconds: 3)),
+    ]);
+    _emit(state.copyWith(isScanning: false));
   }
 
   /// 是否处于 flutter test 运行环境。
@@ -217,9 +306,9 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
     }
     _connectRequested.add(device.id);
     try {
-      await ref.read(piSessionFamilyProvider(device.id).notifier).connect(
-        device,
-      );
+      await ref
+          .read(piSessionFamilyProvider(device.id).notifier)
+          .connect(device);
     } finally {
       // 失败后允许下次(编辑保存/下拉刷新)再发起。
       _connectRequested.remove(device.id);
@@ -234,7 +323,7 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
     ref.read(_rosterIdsProvider.notifier).setIds([
       for (final d in devices) d.id,
     ]);
-    state = state.copyWith(devices: devices, activeDeviceId: device.id);
+    _emit(state.copyWith(devices: devices, activeDeviceId: device.id));
     await _repo.saveActiveDeviceId(device.id);
     if (connect) {
       // 配置变了要重连才生效:先断开旧快照再按新配置连。
@@ -257,13 +346,13 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
         : (state.activeDeviceId == deviceId
               ? devices.first.id
               : state.activeDeviceId);
-    state = state.copyWith(devices: devices, activeDeviceId: activeId);
+    _emit(state.copyWith(devices: devices, activeDeviceId: activeId));
   }
 
   /// 切换聊天页指向的设备。连接早已保活,切换是即时的。
   Future<void> setActive(String deviceId) async {
     if (!state.devices.any((d) => d.id == deviceId)) return;
-    state = state.copyWith(activeDeviceId: deviceId);
+    _emit(state.copyWith(activeDeviceId: deviceId));
     await _repo.saveActiveDeviceId(deviceId);
   }
 
@@ -275,10 +364,12 @@ class DeviceManagerNotifier extends Notifier<DeviceManagerState> {
       port: discovered.port,
     );
     if (updated == null) return;
-    state = state.copyWith(
-      devices: [
-        for (final d in state.devices) d.id == updated.id ? updated : d,
-      ],
+    _emit(
+      state.copyWith(
+        devices: [
+          for (final d in state.devices) d.id == updated.id ? updated : d,
+        ],
+      ),
     );
     // 地址变了,旧连接的 host 快照已失效,按新地址重连。
     ref.read(piSessionFamilyProvider(updated.id).notifier).disconnect();

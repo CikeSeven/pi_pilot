@@ -20,6 +20,10 @@ abstract class LanDiscovery {
 
   Future<void> stop();
 
+  /// 手动重扫:清掉缓存结果,立即重新发现一轮。
+  /// mDNS 是持续发现,没有「扫完了」事件,这里语义是「从头再来」。
+  Future<void> rescan();
+
   /// 按平台选实现:
   /// - Android / iOS / macOS:系统 NSD(bonsoir 插件);
   /// - Windows / Linux:子网扫描(bonsoir 无这两个平台的实现);
@@ -47,6 +51,9 @@ class NoopLanDiscovery implements LanDiscovery {
 
   @override
   Future<void> stop() async {}
+
+  @override
+  Future<void> rescan() async {}
 }
 
 /// mDNS 发现:监听 `_pipilot._tcp`,resolve 后从 TXT 取 hubId。
@@ -76,6 +83,19 @@ class BonsoirLanDiscovery implements LanDiscovery {
     _sub = discovery.eventStream?.listen(_onEvent);
     await discovery.start();
     _discovery = discovery;
+  }
+
+  @override
+  Future<void> rescan() async {
+    // 没 start 过就没有可重扫的。清缓存 + 重建底层 discovery:
+    // 期间已消失的设备靠重新 found/lost 收敛,广播 controller 不动,
+    // 上层(DeviceManager)的订阅保持有效。
+    if (_discovery == null) return;
+    _found.clear();
+    _keyByServiceName.clear();
+    _emit();
+    await stop();
+    await start();
   }
 
   void _onEvent(BonsoirDiscoveryEvent event) {
@@ -251,6 +271,13 @@ class SubnetScanLanDiscovery implements LanDiscovery {
     } catch (_) {
       return null;
     }
+  }
+
+  @override
+  Future<void> rescan() async {
+    // 立即补一轮(_scanOnce 有 _scanning 守卫,与周期轮不叠加)。
+    if (_stopped) return;
+    await _scanOnce();
   }
 
   @override
