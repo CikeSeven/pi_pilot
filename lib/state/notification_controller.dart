@@ -4,11 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/notification_service.dart';
+import 'device_alerts.dart';
 import 'pi_session.dart';
 import 'settings_provider.dart';
 
 /// 任务完成通知的标题:「<会话名> 已完成」。会话名取不到时退成通用标题。
-@visibleForTesting
+/// 活跃设备(本文件)与非活跃设备扇出(device_alerts.dart)共用。
 String taskCompletionTitle(String? sessionName) {
   final name = sessionName?.trim();
   return name != null && name.isNotEmpty ? '$name 已完成' : 'PiPilot 任务完成';
@@ -271,6 +272,10 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   @override
   Widget build(BuildContext context) {
+    // 非活跃设备的任务完成提醒(多设备扇出)。挂在这里保证它与
+    // 通知控制器同生命周期;活跃设备的通知仍由下面的 listener 负责。
+    ref.watch(deviceAlertsProvider);
+
     // 常驻通知文案:连接状态或会话计数变化时推给原生刷新。
     ref.listen(
       piSessionProvider.select(

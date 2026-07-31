@@ -17,7 +17,7 @@ class SyncStore {
   SyncStore._(this._db);
 
   final Database _db;
-  static const _version = 1;
+  static const _version = 2;
   static SyncStore? _instance;
 
   /// 打开(或复用)全局实例;失败时返回 null,调用方降级为纯内存。
@@ -58,9 +58,19 @@ class SyncStore {
           );
           await db.execute(
             'CREATE TABLE op_log(op_id TEXT PRIMARY KEY, client_id TEXT, '
+            'device_key TEXT, '
             'source_id TEXT, session_id TEXT, type TEXT, payload_hash TEXT, '
             'status TEXT, created_at INTEGER, updated_at INTEGER)',
           );
+          },
+          // v2:op_log 增加 device_key。多设备共用一个库后,排队写操作必须
+          // 按设备隔离——A 设备的 pending op 绝不能被 B 设备的重连对账冲掉。
+          onUpgrade: (db, oldVersion, newVersion) async {
+            if (oldVersion < 2) {
+              await db.execute(
+                'ALTER TABLE op_log ADD COLUMN device_key TEXT',
+              );
+            }
           },
         ),
       );
@@ -214,10 +224,13 @@ class SyncStore {
 
   // -- op_log -----------------------------------------------------------------
 
+  /// [deviceKey] 为本 app 侧 DeviceProfile.id。旧行(升级前)该列为 NULL,
+  /// 属于单设备时代的遗留,视为「任何设备都可认领」。
   Future<void> insertOp({
     required String opId,
     required String clientId,
     required String type,
+    String? deviceKey,
     String? sourceId,
     String? sessionId,
     String? payloadHash,
@@ -226,6 +239,7 @@ class SyncStore {
     await _db.insert('op_log', {
       'op_id': opId,
       'client_id': clientId,
+      'device_key': deviceKey,
       'source_id': sourceId,
       'session_id': sessionId,
       'type': type,
@@ -245,14 +259,18 @@ class SyncStore {
     );
   }
 
-  /// 恢复时对账:所有还挂着 pending 的写操作。
-  Future<List<Map<String, dynamic>>> pendingOps() async {
-    final rows = await _db.query(
+  /// 恢复时对账:还挂着 pending 的写操作。
+  /// 传 [deviceKey] 时只回本设备 + 遗留(NULL)的 op,不拿别设备的。
+  Future<List<Map<String, dynamic>>> pendingOps({String? deviceKey}) async {
+    return _db.query(
       'op_log',
-      where: 'status = ?',
-      whereArgs: ['pending'],
+      where: deviceKey == null
+          ? 'status = ?'
+          : "status = ? AND (device_key IS NULL OR device_key = ?)",
+      whereArgs: deviceKey == null
+          ? ['pending']
+          : ['pending', deviceKey],
       orderBy: 'created_at ASC',
     );
-    return rows;
   }
 }

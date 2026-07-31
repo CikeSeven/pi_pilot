@@ -1022,6 +1022,8 @@ class PiSessionNotifier extends Notifier<PiState> {
         _syncStore?.insertOp(
           opId: opId,
           clientId: _creds?.clientId ?? '',
+          // 多设备共用一个库:op 归到本设备名下,别的设备重连对账时看不到。
+          deviceKey: _deviceId,
           type: frame['type'] as String? ?? 'unknown',
           sourceId: sourceId,
           sessionId: state.sessionId,
@@ -1046,7 +1048,9 @@ class PiSessionNotifier extends Notifier<PiState> {
   Future<void> _reconcilePendingOps() async {
     final store = _syncStore;
     if (store == null || !_hubV2) return;
-    final pending = await store.pendingOps();
+    // 只对账本设备的 op(+ 单设备时代遗留的 NULL 行),
+    // 不把别设备的排队写操作拿到这台 bridge 上问状态。
+    final pending = await store.pendingOps(deviceKey: _deviceId);
     for (final op in pending) {
       if (_disposed || _conn?.isOpen != true) return;
       final opId = op['op_id'] as String?;
