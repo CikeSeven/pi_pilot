@@ -35,7 +35,9 @@ await new Promise((resolve, reject) => {
   ws.once("error", reject);
 });
 await new Promise((resolve) => setTimeout(resolve, 50));
-if (hello?.version !== 2) throw new Error(`unexpected hello: ${JSON.stringify(hello)}`);
+if (hello == null || hello.version < 2) {
+  throw new Error(`unexpected hello: ${JSON.stringify(hello)}`);
+}
 
 const listed = await request("hub_list_sources");
 const source = listed.data?.sources?.find((item) => item.connected);

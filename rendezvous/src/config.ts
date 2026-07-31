@@ -7,12 +7,10 @@ export interface TurnConfig {
   ttlSeconds: number;
 }
 
-/** 信令服配置。真实值放 config.json(gitignore),仓库里只有 config.example.json。 */
+/** 信令服配置。TURN/STUN 运行配置放 config.json(gitignore)。 */
 export interface RendezvousConfig {
   port: number;
   host: string;
-  /** deviceId -> 配对密钥(挑战-应答校验,密钥本身从不上行) */
-  devices: Record<string, string>;
   /** STUN 仅做公网地址发现,不承载 DataChannel 会话数据。 */
   stunUrls?: string[];
   /** TURN 仅在直连失败时转发 DTLS 密文,凭据按次短期签发。 */
@@ -64,10 +62,6 @@ export function loadConfig(root: string = process.cwd()): RendezvousConfig {
   const raw: Record<string, unknown> = fs.existsSync(file)
     ? (JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>)
     : {};
-  const devices =
-    typeof raw.devices === "object" && raw.devices !== null
-      ? { ...(raw.devices as Record<string, string>) }
-      : {};
   const rawTurn =
     typeof raw.turn === "object" && raw.turn !== null
       ? (raw.turn as Record<string, unknown>)
@@ -83,7 +77,6 @@ export function loadConfig(root: string = process.cwd()): RendezvousConfig {
       (process.env.PIPILOT_RDV_HOST as string | undefined) ??
       (raw.host as string | undefined) ??
       "0.0.0.0",
-    devices,
     stunUrls: normalizeStunUrls(process.env.PIPILOT_RDV_STUN_URLS ?? raw.stunUrls),
     turn,
   };

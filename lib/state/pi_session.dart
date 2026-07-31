@@ -2011,8 +2011,9 @@ class PiSessionNotifier extends Notifier<PiState> {
     _msgSub = conn.messages.listen(_handleEvent);
     _statusSub = conn.status.listen(_onConnStatus);
 
-    // 直连优先。P2P 开着时缩短直连等待(在外网直连基本必败,
-    // 不值得让它占满 12s),失败后自动落到打洞:信令 → WebRTC → DataChannel。
+    // 局域网 WebSocket 与 P2P 配置相互独立。即使 P2P 已启用，直连仍需
+    // 保留完整握手窗口；否则 bridge 冷启动或设备刚恢复网络时会在 5 秒被
+    // 误判失败，并提前落到 P2P。
     final p2p = _p2p;
     var hello = await conn.connect(
       host: creds.host,
@@ -2020,9 +2021,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       token: creds.token,
       clientId: creds.clientId,
       capabilities: const [msgDeltaCapability],
-      timeout: p2p != null
-          ? const Duration(seconds: 5)
-          : const Duration(seconds: 12),
+      timeout: const Duration(seconds: 12),
     );
     if (hello == null && p2p != null && identical(_conn, conn)) {
       final settings = ref.read(settingsProvider.notifier);
