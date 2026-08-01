@@ -172,6 +172,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 原生接管状态由回调驱动,必须在这里就订阅:startWatcher 提交后
+    // ready 可能很快到达,晚订阅会漏掉那一次通知。
+    NotificationService.instance.watcherReady.addListener(_onWatcherReadyChanged);
     // 初始化完成后立即同步当前连接态。不能只等待 status 下一次变化:
     // 自动连接可能在通知权限请求期间已经完成,connected 不会再次重放。
     unawaited(_initializeNotifications());
@@ -189,6 +192,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    NotificationService.instance.watcherReady.removeListener(
+      _onWatcherReadyChanged,
+    );
     _watcherRequestGeneration++;
     // A startWatcher MethodChannel call can still be in flight when the
     // widget is disposed. Always issue the matching stop to close that race.
@@ -245,7 +251,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       return;
     }
     final settings = ref.read(settingsProvider);
-    final started = await NotificationService.instance.startWatcher(
+    final submitted = await NotificationService.instance.startWatcher(
       host: target.host,
       port: target.port,
       token: target.token,
@@ -259,13 +265,30 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       wasStreaming: target.wasStreaming,
     );
     if (!mounted || requestGeneration != _watcherRequestGeneration) return;
-    if (_inBackground) {
-      _watcherActive = started;
-    } else if (started) {
-      // The app returned to the foreground while startWatcher was awaiting
-      // the platform channel. Do not leave a second connection behind.
-      await NotificationService.instance.stopWatcher();
+    if (!_inBackground) {
+      // 回前台了。startWatcher 只是「已提交」,无论如何都要收回,
+      // 否则会留下第二条连接。
+      if (submitted) await NotificationService.instance.stopWatcher();
+      return;
     }
+    // 关键:不再用 submitted 推断接管成功。
+    //
+    // startWatcher 返回 true 只代表原生受理了启动请求,此时 socket 可能
+    // 还没连上、没鉴权、没追平事件。真正的接管由原生的 watcherReady 回调
+    // 宣布,_onWatcherReadyChanged 会在那时把 _watcherActive 置为 true。
+    // 在此之前 Dart 必须保留兜底通知所有权,否则就是通知空窗。
+  }
+
+  /// 原生接管状态变化。只有它能把 _watcherActive 置为 true。
+  void _onWatcherReadyChanged() {
+    if (!mounted) return;
+    final ready = NotificationService.instance.watcherReady.value;
+    // 已回前台时忽略迟到的 ready:此时 Dart 自己在连,不该让出所有权。
+    final next = ready && _inBackground;
+    if (_watcherActive == next) return;
+    setState(() {
+      _watcherActive = next;
+    });
   }
 
   Future<void> _stopWatcher() async {

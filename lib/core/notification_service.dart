@@ -34,6 +34,30 @@ class NotificationService {
     'com.pipilot.pi_pilot/system',
   );
 
+  /// 原生 watcher 是否真正接管了后台通知。
+  ///
+  /// 这个值只由原生的 `watcherReady` 回调驱动,绝不由 `startWatcher` 的返回值
+  /// 推断:后者只表示「异步启动已提交」,不代表 socket 已连上、已鉴权、已追平
+  /// 事件。据返回值抑制 Dart 兜底通知,会在原生实际没接管的窗口里丢通知。
+  final ValueNotifier<bool> watcherReady = ValueNotifier<bool>(false);
+
+  bool _readyHandlerInstalled = false;
+
+  /// 安装原生 -> Dart 的状态回调。幂等,可重复调用。
+  void _installReadyHandler() {
+    if (_readyHandlerInstalled) return;
+    _readyHandlerInstalled = true;
+    _systemChannel.setMethodCallHandler((call) async {
+      if (call.method == 'watcherReady') {
+        final args = call.arguments;
+        final ready = args is Map ? args['ready'] == true : args == true;
+        watcherReady.value = ready;
+        await logDiagnostic('native watcher ready=$ready');
+      }
+      return null;
+    });
+  }
+
   /// FGS 常驻通知的 id(在 KeepAliveService.kt 里固定为 1)。全扫取消任务
   /// 通知时必须跳过它,否则前台服务可能因通知被撤而被系统降级。
   static const int _keepAliveNotificationId = 1;
@@ -227,6 +251,7 @@ class NotificationService {
   }) async {
     await init();
     if (!_initialized || !_permissionGranted) return false;
+    _installReadyHandler();
     try {
       await _systemChannel.invokeMethod<void>('startWatcher', {
         'host': host,
@@ -238,7 +263,9 @@ class NotificationService {
         'wasStreaming': wasStreaming,
         'sessionName': sessionName ?? '',
       });
-      await logDiagnostic('watcher started: source=$sourceId');
+      // 注意:true 只代表原生已受理,不代表已接管通知。
+      // 真正的接管由 watcherReady 通知,调用方必须等它。
+      await logDiagnostic('watcher start submitted: source=$sourceId');
       return true;
     } on PlatformException catch (error) {
       await logDiagnostic('watcher start failed: $error');
@@ -250,6 +277,8 @@ class NotificationService {
   Future<void> stopWatcher() async {
     try {
       await _systemChannel.invokeMethod<void>('stopWatcher');
+      // 原生停了就一定没在接管,立刻收回所有权,不等回调。
+      watcherReady.value = false;
       await logDiagnostic('watcher stopped');
     } on PlatformException catch (error) {
       await logDiagnostic('watcher stop failed: $error');

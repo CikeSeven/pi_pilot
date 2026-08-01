@@ -996,6 +996,11 @@ class PiSessionNotifier extends Notifier<PiState> {
         status: PiConnStatus.failed,
         error: '连接失败或鉴权被拒,请检查地址与 token',
       );
+      // 首连失败也必须进入重试。原来这里直接 return,而 _onConnStatus 开头有
+      // `!state.hasSession` 提前返回,于是自动重连只在「曾经连上过」之后才存在:
+      // 冷启动时 Bridge 没就绪、Wi-Fi 刚切换、DHCP 还没拿到地址等任何瞬时失败,
+      // 都会被固化成永久失败态,用户只能反复手动点重试(实测正是这个体感)。
+      _scheduleReconnect();
       return;
     }
     state = state.copyWith(status: PiConnStatus.connected, hasSession: true);
@@ -2245,6 +2250,7 @@ class PiSessionNotifier extends Notifier<PiState> {
               capabilities: const [msgDeltaCapability],
               timeout: const Duration(seconds: 12),
             ),
+            host: creds.host,
           );
           if (!currentAttempt()) {
             await conn.disconnectAndWait(notify: false);
@@ -2389,6 +2395,7 @@ class PiSessionNotifier extends Notifier<PiState> {
             return null;
           }
           return LanNetworkBinding.withWifiBinding(
+            host: creds.host,
             () => probe.connect(
               host: creds.host,
               port: creds.port,
@@ -2605,7 +2612,10 @@ class PiSessionNotifier extends Notifier<PiState> {
       return;
     }
     _reconnectAttempt = 0;
-    state = state.copyWith(status: PiConnStatus.connected);
+    // hasSession 必须一起置真。首连失败后是这条路径把连接建起来的,若只置
+    // status,_onConnStatus 开头的 `!state.hasSession` 守卫会继续拦着,之后
+    // 真掉线又不会重连 —— 等于把首连失败的设备永久留在「一次性连接」状态。
+    state = state.copyWith(status: PiConnStatus.connected, hasSession: true);
     await _initializeAfterConnect(generation);
   }
 
