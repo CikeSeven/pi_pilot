@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/background_permission.dart';
 import '../../core/notification_service.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
@@ -231,6 +232,8 @@ class NotificationsPage extends ConsumerWidget {
                       ),
                 ),
                 const Divider(height: 1),
+                const _BackgroundPermissionTile(),
+                const Divider(height: 1),
                 const Padding(
                   padding: EdgeInsets.all(16),
                   child: QuickPromptsEditor(),
@@ -353,5 +356,136 @@ class AboutPage extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 后台运行豁免
+// ---------------------------------------------------------------------------
+
+/// 后台运行豁免状态与引导入口。
+///
+/// 为什么值得单独占一个入口:真机实测(小米 13 / HyperOS V816 / Android 16)
+/// 表明这是后台实时通知的**决定性变量**。未授予时应用退到后台约 60-90 秒即被
+/// 系统整体冻结,前台服务不给豁免,冻结期间进程内一切都醒不过来;授予后同一
+/// 场景下 5 分钟 7 条事件全部实时送达(延迟 7-43ms)。
+///
+/// 用户遇到「通知延迟」时第一时间会来通知设置页,所以入口放在这里而不是
+/// 藏进关于页。
+class _BackgroundPermissionTile extends StatefulWidget {
+  const _BackgroundPermissionTile();
+
+  @override
+  State<_BackgroundPermissionTile> createState() =>
+      _BackgroundPermissionTileState();
+}
+
+class _BackgroundPermissionTileState extends State<_BackgroundPermissionTile>
+    with WidgetsBindingObserver {
+  BackgroundPermissionStatus? _status;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 用户去系统设置改完开关会回到这里,必须重读状态,
+    // 否则界面停留在旧结论、看起来像没生效。
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final status = await NotificationService.instance
+        .readBackgroundPermissionState();
+    if (!mounted) return;
+    setState(() => _status = status);
+  }
+
+  Future<void> _open() async {
+    final outcome = await NotificationService.instance
+        .openBackgroundPermissionSettings();
+    if (!mounted) return;
+    // 只跳到了通用列表页时,用户还得自己在长列表里找到应用,
+    // 必须把厂商对应的路径提示出来,否则很多人会卡在这一步。
+    if (outcome == BackgroundPermissionOutcome.batteryWhitelistList ||
+        outcome == BackgroundPermissionOutcome.appDetails ||
+        outcome == BackgroundPermissionOutcome.failed) {
+      _showHint();
+    }
+  }
+
+  void _showHint() {
+    final status = _status;
+    if (status == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('如何允许后台运行'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(status.vendor.settingsHint),
+              const SizedBox(height: 16),
+              Text(
+                status.rationale,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _status;
+    // 非 Android 或读取失败:不显示这一项,避免出现无法操作的死入口。
+    if (status == null ||
+        status.verdict == BackgroundPermissionVerdict.unknown) {
+      return const SizedBox.shrink();
+    }
+
+    final theme = Theme.of(context);
+    final ok = status.verdict == BackgroundPermissionVerdict.unrestricted;
+    final color = ok ? theme.colorScheme.primary : theme.colorScheme.error;
+
+    return ListTile(
+      leading: Icon(
+        ok ? Icons.battery_saver : Icons.battery_alert_outlined,
+        color: color,
+      ),
+      title: const Text('后台运行'),
+      subtitle: Text(status.summary),
+      trailing: ok
+          ? Icon(Icons.check_circle_outline, color: color)
+          : const Icon(Icons.chevron_right),
+      // 已授予时点击仍可进入设置(用户可能想确认或关闭),
+      // 但主动引导只在未授予时出现。
+      onTap: ok ? _open : _promptThenOpen,
+    );
+  }
+
+  Future<void> _promptThenOpen() async {
+    _showHint();
+    await _open();
   }
 }

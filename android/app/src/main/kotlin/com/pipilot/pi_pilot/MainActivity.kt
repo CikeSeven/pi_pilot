@@ -169,6 +169,22 @@ class MainActivity : FlutterActivity() {
                         openNotificationSettings(call.argument<String>("channelId"))
                         result.success(null)
                     }
+                    // 后台运行豁免是后台实时通知的决定性变量:真机实测
+                    // (小米 13 / HyperOS V816 / Android 16)未授予时进程会在退到
+                    // 后台 60-90 秒后被整体冻结(前台服务不给豁免),授予后
+                    // 5 分铟 7 条事件全部实时送达。所以诊断必须能报告它,
+                    // 否则用户无法知道为何通知会延迟几分钟。
+                    "backgroundPermissionState" -> {
+                        result.success(BackgroundPermissionState.snapshot(applicationContext))
+                    }
+                    // 跳转用 Activity context(startActivity 需要),不能用
+                    // applicationContext。preferVendor 默认 true 优先进厂商页,
+                    // 因为各家真正的后台开关往往不在 AOSP 电池优化页里。
+                    "openBackgroundPermissionSettings" -> {
+                        val preferVendor = call.argument<Boolean>("preferVendor") ?: true
+                        val outcome = BackgroundPermissionIntents.open(this, preferVendor)
+                        result.success(outcome.name)
+                    }
                     else -> result.notImplemented()
                 }
             }

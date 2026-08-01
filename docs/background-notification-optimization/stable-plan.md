@@ -1236,6 +1236,36 @@ Android JVM 60）。
 真机有限验收（45 分钟日常使用 + Wi-Fi 切换 + DHCP 换址 + 进程死亡恢复）待跑；
 Dart 侧 flag 开关 UI 未做（验收期用 `setFeatureFlag` 通道或 run-as 改 prefs）。
 
+### §F 后台豁免发现与多厂商适配（2026-08-01）
+
+**决定性变量**：用户在小米 13 上授予「后台无限制」后，复测 5 分钟 7 条事件全部实时送达
+（延迟 7–43ms、零丢失、零半开击杀、CPU jiffies 持续增长）——MIUI 整体冻结由「必然」变为
+「未授予时的默认行为」。此前四次冻结实测（92s / 5m27s / 6m21s / 6m21s）均发生在未授予状态。
+
+**实测校正厂商文档**：小米文档只承诺「无限制」映射到 `isBackgroundRestricted()`，但 HyperOS
+V816 / Android 16 上它同时把包名写入 deviceidle 白名单（`user,com.pipilot.pi_pilot`），标准 API
+`isIgnoringBatteryOptimizations()` 在该机上即可作为检测信号，无需私有逆向。
+
+**已落地**（三端回归全绿：Kotlin 编译、Android JVM 76、flutter analyze、flutter test 360）：
+
+- `BackgroundPermissionState.kt`：三公开 API 并集判定（deviceidle 白名单 + 用户显式限制 +
+  standby bucket），判定逻辑抽成纯函数供 junit4 覆盖；中间档 bucket 不参与判定
+  （官方「Don't try to influence which bucket」+ 充电时无视 bucket）。
+- `OemVendor.kt` + `BackgroundPermissionIntents.kt`：小米/三星/vivo/OPPO/一加/华为/荣耀/魅族
+  各一组候选组件名逐个 try，全失败退回标准页——私有组件名无一稳定 API，Android 11+ 包可见性
+  使 `resolveActivity` 不可作为判据，只能 try/catch 降级。三星 deeplink 是唯一有官方文档的。
+- 设置页「通知与快捷指令」新增「后台运行」入口：未授予时先弹厂商对应路径说明再跳设置，
+  回前台自动刷新。
+- 有意不用 `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 弹框：Play Device and Network Abuse
+  政策禁止不符合豁免条件者绕过电源管理，有真实拒审案例；只用不需权限的列表页 Intent。
+
+**对路线图的影响**：决策点 B 的第一条「纯 LAN 实时达标」在用户授权后即可满足，Phase 4
+（FCM/Relay 兜底）的定位从「绕过冻结」回归本来的「跨网络送达」（离网/远程/不同 LAN）。
+是否仍做 Phase 4 取决于产品是否需要跨网络通知，而非冻结问题。
+
+**未验证**：三星/vivo/OPPO 等厂商组件名来自社区维护列表，新系统上存活率无真机可测，
+靠降级链宪底 + 层级名文案让用户自行辨认。荣耀 MagicOS 缺少一手证据（dontkillmyapp 无独立页）。
+
 ## 23. LAN 威胁模型与合规记录（Phase 0 治理欠债补账，2026-08-01）
 
 ### §A 威胁模型（LAN 范围）

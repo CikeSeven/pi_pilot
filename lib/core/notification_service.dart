@@ -1,6 +1,10 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+import 'background_permission.dart';
 
 /// 本地通知封装(Android channel `agent_events`)。
 ///
@@ -346,6 +350,62 @@ class NotificationService {
       });
     } on PlatformException catch (error) {
       debugPrint('[NotificationService] 打开系统通知设置失败: $error');
+    }
+  }
+
+  /// 读取后台运行豁免状态。
+  ///
+  /// 这是后台实时通知的决定性变量:真机实测(小米 13 / HyperOS V816 /
+  /// Android 16)未授予时进程退到后台约 60-90 秒即被整体冻结,前台服务不给
+  /// 豁免,冻结期间进程内一切都醒不过来;授予后同一场景 5 分钟 7 条事件
+  /// 全部实时送达。所以必须能读出来告诉用户,而不是让人猜为什么通知会延迟。
+  ///
+  /// 非 Android 平台或读取失败一律返回 unavailable(unknown 且不提示),
+  /// 绝不抛异常 —— 诊断功能不该影响主流程。
+  Future<BackgroundPermissionStatus> readBackgroundPermissionState() async {
+    if (!Platform.isAndroid) return BackgroundPermissionStatus.unavailable;
+    try {
+      final raw = await _systemChannel.invokeMethod<Map<Object?, Object?>>(
+        'backgroundPermissionState',
+      );
+      if (raw == null) return BackgroundPermissionStatus.unavailable;
+      return BackgroundPermissionStatus.fromMap(raw);
+    } on PlatformException catch (error) {
+      debugPrint('[NotificationService] 读取后台权限状态失败: $error');
+      return BackgroundPermissionStatus.unavailable;
+    } on MissingPluginException catch (error) {
+      // 旧版本原生代码没有这个 method 时不该崩。
+      debugPrint('[NotificationService] 后台权限状态不可用: $error');
+      return BackgroundPermissionStatus.unavailable;
+    }
+  }
+
+  /// 跳转到后台运行设置页。
+  ///
+  /// preferVendor=true 时优先进厂商专属页(小米省电策略、三星永不休眠列表等),
+  /// 因为各家真正的后台开关往往**不在** AOSP 电池优化页里。跳失败会自动
+  /// 逐级降级到标准白名单列表页,再到应用详情页。
+  ///
+  /// 故意不用 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 直接弹框:
+  /// 那需要声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限,而 Google Play
+  /// 的 Device and Network Abuse 政策禁止不符合豁免条件的应用绕过系统电源管理,
+  /// 已有真实拒审案例。这里选择政策安全的路径。
+  Future<BackgroundPermissionOutcome> openBackgroundPermissionSettings({
+    bool preferVendor = true,
+  }) async {
+    if (!Platform.isAndroid) return BackgroundPermissionOutcome.failed;
+    try {
+      final raw = await _systemChannel.invokeMethod<String>(
+        'openBackgroundPermissionSettings',
+        {'preferVendor': preferVendor},
+      );
+      return BackgroundPermissionOutcome.parse(raw);
+    } on PlatformException catch (error) {
+      debugPrint('[NotificationService] 打开后台运行设置失败: $error');
+      return BackgroundPermissionOutcome.failed;
+    } on MissingPluginException catch (error) {
+      debugPrint('[NotificationService] 后台运行设置不可用: $error');
+      return BackgroundPermissionOutcome.failed;
     }
   }
 }
