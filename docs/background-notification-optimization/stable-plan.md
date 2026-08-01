@@ -147,7 +147,8 @@ receipt_uploaded    -- 显示回执已送达 Bridge（允许显著延迟）
 | 事件不丢 | 保留期内 100% 可 cursor 补齐 | 已 fsync 且 App 再次连接 |
 | LAN 可见延迟 | P95 <= 1s，99% <= 5s | owner READY、权限正常、LAN 稳定 |
 | 在线提示可见延迟 | P95 <= 15s，99% <= 60s | **PiPilot 进程与 Rendezvous socket 均存活**、后台豁免有效、Rendezvous 可达；不满足此前提时不适用 |
-| 进程死亡后补齐 | best effort | WorkManager 最小调度间隔 15 分钟，Doze/配额/OEM 可使其更晚；近实时需模式二 system_push_wake_v1 |
+| 进程死亡后补齐 | best effort | WorkManager 只是恢复信号（最小调度间隔 15 分钟，可更晚），
+实际拉取发生在 App 下次启动；近实时需模式二 system_push_wake_v1（通用通知） |
 | 恢复延迟 | P95 <= 10s，99% <= 30s | 网络已可用、Bridge 可发现、凭据有效 |
 | 重复打扰率 | 稳态 0；崩溃窗口单独统计 | 稳定 ID + onlyAlertOnce |
 | 长时稳定 | 8h 无 silent stuck | Pixel / One UI / HyperOS 真机 |
@@ -842,8 +843,10 @@ Gate：DHCP 换址、Wi-Fi 切换、Activity 销毁均无不可补偿空窗；�
   诊断模式；依赖「后台无限制」豁免保活，豁免缺失时明确降级为轮询。
 - [ ] 提示到达后按需 P2P 回连：走已有 WebRTC 配对通道连回 Bridge，cursor 拉取事件，
   经 NotificationGate 统一入口展示——这条链 Phase 1-3 已建好，**零新代码**。
-- [ ] WorkManager 周期轮询兜底（最小调度间隔 15 分钟，实际可能更晚）：进程已死时
-  的补齐手段，醒来后同样走 P2P 拉取 + cursor。
+- [ ] WorkManager 周期任务（最小调度间隔 15 分钟，实际可能更晚）：**只是调度/恢复信号**。
+  WebRTC 客户端在 Dart 里（`PiConnection`/`P2pConnector`），原生 worker 没有 headless
+  Flutter 引擎或原生 WebRTC 客户端就做不了 P2P 拉取，只能记录「待恢复」，等 App
+  下次启动后走正常 P2P/LAN 补偿。
 - **定位**：在线提示，不是进程唤醒机制。进程活着时近实时；进程死亡时退回轮询 +
   下次打开 App 补齐。
 
@@ -851,8 +854,11 @@ Gate：DHCP 换址、Wi-Fi 切换、Activity 销毁均无不可补偿空窗；�
 
 - [ ] 接入 FCM 或国内厂商/聚合推送通道（MiPush/个推/极光，按目标设备与 Play 政策选择），
   仅发送**纯数据**唤醒载荷（installation 域 nonce），不携带任何内容。
-- [ ] 推送到达 → 系统唤醒 PiPilot 进程 → 与模式一共用同一条「P2P 拉取 + NotificationGate」
-  路径。两条模式仅在「唤醒传输」上不同，其余代码完全共享。
+- [ ] 推送到达 → 系统拉起 PiPilot 原生组件 → **立刻弹 PiPilot 自己的通用通知**
+  「PiPilot 有新事件」（经 NotificationGate，不含详情）；详情在用户打开 App 后由正常
+  P2P/LAN 补偿补齐。**注意**：叫醒后的进程同样用不了 Dart P2P 栈拉详情——死亡进程下
+  直接弹详情需 headless Flutter+P2P / 原生 WebRTC / 推送载荷加密三选一，复杂度重回
+  原方案量级，本设计明确不做。
 - [ ] 无推送凭据/无 GMS/未配置时明确回退模式一，不得静默无兜底。
 
 Gate：LAN 正常时不发提示；进程活着且 Rendezvous 可达时提示→展示端到端达到 §2.4
@@ -896,7 +902,8 @@ Gate：MIUI/One UI/Pixel 8 小时锁屏测试满足 SLO 且功耗流量达标；
 - 显示不含敏感内容的通用占位通知，或按产品选择先不显示。
 - 监听 `ACTION_USER_UNLOCKED`，解锁后重试回连拉取，走 §9.1 统一入口（稳定 ID 保证是
   更新而非新增打扰）。
-- WorkManager 轮询在凭据不可用时同样跳过并留待解锁后执行。
+- WorkManager 周期任务在凭据不可用时同样跳过并留待解锁后执行（它只是恢复信号，见
+  Phase 4 模式一）。
 - 凭据永久失效（撤销配对）时提示应被忽略，记 `wake_ignored_unpaired`。
 
 ### 13.3 Rendezvous 侧边界
@@ -1353,7 +1360,9 @@ Bridge fallback 触发器、Android 后台信令长连 owner（复用 Phase 3 Re
 
 **诚实代价**：进程活着时提示+P2P 建连比 FCM 推送慢，SLO P95 ≤15s（§2.4）；
 手机端保活依赖「后台无限制」豁免（§F 已验证豁免有效）；豁免缺失或进程死亡时降级为
-best-effort 轮询与下次打开 App 补齐；近实时死亡唤醒需要模式二与对应推送渠道账号。
+best-effort 恢复信号（WorkManager 只是调度信号，拉取要等 App 启动）与下次打开 App 补齐；
+死亡进程下的近实时通知需要模式二，且只能先弹通用通知、详情等前台补齐——死亡进程下
+直接弹详情需 headless/原生 WebRTC/加密载荷，明确不做。
 Rendezvous 需要公网可达（P2P 配对本来就用它，已存在）。
 
 **未决项变化**：#4（Relay 部署主体）与 #5（GMS 决策）随旧方案一并关闭；新增 #11
