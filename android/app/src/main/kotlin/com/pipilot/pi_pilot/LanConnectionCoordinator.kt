@@ -82,11 +82,35 @@ object LanConnectionCoordinator {
         cipher: TokenCipher = KeystoreTokenCipher(),
     ) {
         synchronized(this) {
+            val previous = this.target
+            val sameTarget = previous != null &&
+                previous.host == target.host &&
+                previous.port == target.port &&
+                previous.clientId == target.clientId &&
+                this.plainToken == token
+            val alive = reconnect.state == ReconnectController.State.RUNNING ||
+                reconnect.state == ReconnectController.State.PENDING
+            // 幂等保护:Dart 生命周期会连续调 startWatcher。没有这个快通道时
+            // 每次调用都 generation++ 并新建 socket,旧 socket 只是回调失效、并未关闭,
+            // 真机上当场泄了 4 条连接(mobileClients=5)。
+            if (sameTarget && alive) {
+                this.vibrate = vibrate
+                WatcherDiagnostics.log(
+                    "coordinator start(sameTarget=true keep gen=${reconnect.generation} socket=${webSocket != null})",
+                )
+                // socket 既不在也没排重连时才补一次,否则保持现状。
+                if (webSocket == null && reconnect.pendingSchedule() == null) {
+                    connectLocked(reconnect.generation)
+                }
+                return
+            }
             appContext = context.applicationContext
             this.target = target
             this.plainToken = token
             this.vibrate = vibrate
             this.cipher = cipher
+            // 换目标/换凭据:旧 socket 必须先关掉再开新世代。
+            closeSocketLocked()
             WatcherDiagnostics.init(context.applicationContext)
             ensureNotificationLayer(context.applicationContext, target.clientId)
             val gen = reconnect.start()
@@ -148,6 +172,19 @@ object LanConnectionCoordinator {
             override fun onAvailable(network: Network) {
                 val gen = reconnect.generation
                 ConnectionMetrics.record(context, "network_available")
+                // 只有真的没连上才借网络通告提前点火。正在连/已 ready 时插一脚
+                // 只会制造第二条 socket——首次真机运行就是这样泄的。
+                val idle = when (states.state) {
+                    LanConnectionState.DISCONNECTED,
+                    LanConnectionState.DEGRADED,
+                    LanConnectionState.BLOCKED_LOCAL_NETWORK,
+                    -> true
+                    else -> false
+                }
+                if (!idle) {
+                    WatcherDiagnostics.log("network available ignored(state=${states.state})")
+                    return
+                }
                 val s = reconnect.onNetworkAvailable(gen) ?: return
                 WatcherDiagnostics.log("network available -> immediate reconcile(gen=$gen)")
                 handler.post { fireReconnect(gen, s.attempt) }
@@ -190,6 +227,15 @@ object LanConnectionCoordinator {
 
         states.transitionTo(gen, LanConnectionState.CONNECTING, "connect")
         connectStartedAt = System.currentTimeMillis()
+        // 无论为何重连,开新 socket 前必须关掉旧的:仅靠世代判断只能让旧回调
+        // 失效,TCP 连接会一直活到 Bridge 判它半开(约 30s),期间事件会被推到
+        // 没人读的旧 socket 上。
+        val stale = webSocket
+        if (stale != null) {
+            webSocket = null
+            WatcherDiagnostics.log("coordinator closing stale socket before reconnect")
+            runCatching { stale.close(1000, "superseded") }
+        }
         val routed = routedClientFor(context, t.host)
         val wsUrl = buildString {
             append("ws://")
@@ -435,11 +481,13 @@ object LanConnectionCoordinator {
             "notification_ready" -> {
                 reconnect.onConnected(gen)
                 states.transitionTo(gen, LanConnectionState.READY, "ready")
+                val latency = System.currentTimeMillis() - connectStartedAt
                 ConnectionMetrics.record(
                     appContext ?: return,
                     "ready",
-                    mapOf("latencyMs" to (System.currentTimeMillis() - connectStartedAt)),
+                    mapOf("latencyMs" to latency),
                 )
+                WatcherDiagnostics.log("coordinator READY(gen=$gen latency=${latency}ms)")
                 setReadyLocked(true)
                 ackCursor(webSocket)
             }
