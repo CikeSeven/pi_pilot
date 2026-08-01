@@ -2,10 +2,11 @@
 
 日期：2026-08-01
 状态：Phase 1-2（局域网后台稳定性改造）已实施并完成真机验收，标记为**完善**；
-      Phase 3-5 按决策点 A/B/C 暂不启动（见文末「实施与验收记录」）
+      Phase 3 原生 LAN owner 已在 `native_lan_owner_v1` flag（默认关）后实施，
+      待真机有限验收；connectedDevice 迁移与 Phase 4-5 按决策点暂不启动
 分支：`background-notification-optimization`
 范围：Bridge 事件持久化、Android 原生通知与连接 owner、LAN 直连、FCM/Relay 兜底、P2P 前台数据面
-实施范围说明：本分支已落地 Phase 1-2 的实现代码与验收记录；Phase 3 起仍遵循先决策后实施
+实施范围说明：本分支已落地 Phase 1-2 的实现代码与验收记录；Phase 3 代码已在 flag 后落地（默认路径行为不变），真机验收待跑；Phase 4 起仍遵循先决策后实施
 
 ## 0. 本文与既有文档的关系
 
@@ -767,9 +768,10 @@ cursor 分页在乱序、断线、buffer 溢出下零静默遗漏；旧客户端
 - [x] watcher 订阅 Bridge 通知事件流，替代只订阅 selected source 的窄路径。
 - [x] 用持久 cursor 替代内存基线，修掉 `notification_controller.dart:158` 的
       `_streamingWhenBackgrounded` 与 `WatcherTaskState` 的进程内存态。
-- [ ] 网络变化对所有保持连接的设备触发恢复，不只 active device
-      （留待 Phase 3 与原生 owner 一并实施；当前靠 1s-15s 退避自愈，已在 45 分钟
-      真机测试中验证可从冻结/断连恢复）。
+- [x] 网络变化对所有保持连接的设备触发恢复，不只 active device
+      （已在 Phase 3 原生 owner 落地：`registerDefaultNetworkCallback` 通告即清零
+      退避并立即重连；watcher 路径仍靠 1s-15s 退避，已在 45 分钟真机测试中验证
+      可从冻结/断连恢复）。
 - [x] `onTimeout()` 实现 §10.3 的显式降级与文案更新。
 
 Gate：断线期间完整 `idle -> streaming -> idle` 可从 cursor 补回；1,000 次重复/乱序注入无
@@ -780,14 +782,26 @@ Phase 3。
 
 ### Phase 3：原生 LAN connection owner
 
-- [ ] `NativeLanConnectionService` / `LanConnectionCoordinator` / `LanConnectionState`。
-- [ ] `NsdManager` 发现、endpoint candidate store、`NetworkCallback` 地址自愈。
-- [ ] Keystore-backed 凭据与 cursor store，no-backup。
-- [ ] 前后台 handoff：允许重叠，ready 后才交接，Activity 销毁时用持久 target 兜底。
-- [ ] 禁止后台 `/24` 扫描与进程级 `bindProcessToNetwork`（只用 `network.socketFactory`）。
+> 实施状态（2026-08-01）：**已在 `native_lan_owner_v1` flag（默认关）后实施，待真机
+> 有限验收**。默认路径仍是 Phase 2 的 watcher + Dart 兜底，行为不变；证据见文末 §E。
+> connectedDevice 迁移与 8h 功耗明确不声称。
+
+- [x] `LanConnectionCoordinator` / `LanConnectionState`（独立 socket + 显式状态机 +
+      世代防护；`NativeLanConnectionService` 未建——coordinator 由 startWatcher 驱动，
+      Service 托管留待 stopWithTask 评估一并做）。
+- [x] `NsdManager` 发现、endpoint 持久化与 `NetworkCallback` 地址自愈（连续 3 次失败
+      触发一轮 NSD；TXT `ipv4` 优先于解析地址；TXT `bridgeId` 只做提示，与持久身份
+      不符记 `identity_conflict` 且不改写 endpoint）。
+- [x] Keystore-backed 凭据与 cursor store，no-backup（`NativeLanTarget` 存
+      `noBackupFilesDir`，token 只存 Keystore AES/GCM 密文；无依赖序列化可 JVM 测）。
+- [x] 前后台 handoff：与 watcher 共用 `watcherReady` 通道，ready 前绝不抑制 Dart；
+      `startFromPersisted` 提供空 Intent 重建入口（Activity 销毁兜底待 Service 托管）。
+- [x] 禁止后台 `/24` 扫描与进程级 `bindProcessToNetwork`（coordinator 只用
+      `network.socketFactory` + 目标子网/路由匹配选网）。
 - [ ] Service 能从持久状态独立重建 owner 后，才设 `stopWithTask=false` 并评估 `START_STICKY`。
 - [ ] `connectedDevice` 合规 Gate（§10.4）通过后迁移类型。
-- [ ] Android 16 LNP compat flag 纳入回归（§4.2）。
+- [~] Android 16 LNP compat flag 纳入回归（§4.2）：`BLOCKED_LOCAL_NETWORK` 状态与
+      `blocked_local_network` 指标已落地；compat flag 真机回归待跑。
 
 技术细节以 `lan-plan.md` §10-11 为准。
 
@@ -1189,9 +1203,70 @@ rg -n "^## " docs/background-notification-optimization/stable-plan.md
 - **纯 LAN 实时（§11.2）在 MIUI 后台冻结下不成立**：冻结期无实时投递是平台行为，
   事件由 outbox 持久化兜底、解冻后追补——这正是「恢复补偿默认 + 实时是加分项」的设计依据，
   也是决策点 A 支持暂不进入 Phase 3 的实测数据。若未来要后台亚秒级实时，按 §Phase 5 评估。
-- 「网络变化对所有保持连接的设备触发恢复」一条未实施（留 Phase 3 与原生 owner 一并做）；
-  当前 1s–15s 退避已在实测中证明可从冻结/断连恢复。
+- 「网络变化触发恢复」已在 Phase 3 原生 owner 落地（NetworkCallback 通告即清零退避
+  并立即重连）；watcher 路径仍靠 1s–15s 退避，已在实测中证明可从冻结/断连恢复。
 - `DISPLAY_REQUESTED` 与 `DISPLAY_CONFIRMED` 存在差额（同 collapseKey 复用槽位时
   `activeNotifications` 读不到可见证据）：按设计不谎报确认，且允许 cursor 推进。
 - 故障注入量级为 200 轮（门槛 1,000 的子集）；1,000 高优先级事件发布候选与 8h 续航按用户
   决定不执行。
+
+### §E Phase 3 实施记录（2026-08-01，flag 后实施，待真机有限验收）
+
+新增（全部仅 `native_lan_owner_v1`=true 时生效，默认关）：
+
+- `LanConnectionCoordinator.kt`：独立 socket 的原生 owner，复用 `NativeCursorStore` /
+  `NotificationGate`，协议帧与 watcher 一致；目标子网/路由匹配选网修掉
+  `BridgeWatcher.routedClient` 的第一张 Wi-Fi 盲选；90s 活跃空洞记 `oem_freeze_suspected`。
+- `ReconnectController.kt`：纯逻辑重连状态机（1s-15s 封顶退避、onFailure/onClosed
+  去重、stop 取消、世代防护、网络通告立即点火）。
+- `LanConnectionState.kt`：DISCONNECTED→CONNECTING→AUTHENTICATING→CATCHING_UP→READY
+  显式状态机 + DEGRADED / BLOCKED_LOCAL_NETWORK，世代防旧回调覆盖。
+- `NativeLanTarget.kt`：noBackupFilesDir 持久目标；`TokenCipher` 接口隔离 Keystore
+  （生产 AES/GCM，测试明文直通）；无依赖序列化可 JVM 测。
+- `NsdDiscovery.kt`：`_pipilot._tcp` 一轮发现，TXT `ipv4` 优先、`notify=1` 过滤。
+- `MainActivity`：startWatcher 按 flag 路由、每次持久化目标、双 owner ready 通道、
+  `setFeatureFlag` / `connectionMetrics` / `clearConnectionMetrics` 通道。
+
+验证：`ReconnectControllerTest` 7 + `LanConnectionStateTest` 3 + `NativeLanTargetTest` 5
+覆盖持续重试/成对回调只排一次/stop 取消/网络恢复清零并立即重连/旧世代全拒/持久往返与
+损坏拒绝；三端回归全绿（Bridge typecheck + 测试、flutter analyze 零问题、flutter test 360、
+Android JVM 60）。
+
+明确不声称：connectedDevice 迁移（合规 Gate 未过，保留 dataSync）；8h 功耗（用户已豁免）；
+真机有限验收（45 分钟日常使用 + Wi-Fi 切换 + DHCP 换址 + 进程死亡恢复）待跑；
+Dart 侧 flag 开关 UI 未做（验收期用 `setFeatureFlag` 通道或 run-as 改 prefs）。
+
+## 23. LAN 威胁模型与合规记录（Phase 0 治理欠债补账，2026-08-01）
+
+### §A 威胁模型（LAN 范围）
+
+1. **传输明文边界（现状）**：`ws://` + `usesCleartextTraffic=true`，token 与事件对
+   **被动同网观察者**无机密性。内部接受此边界，但**禁止**对外声称可防御恶意 LAN。
+   WSS + 证书指纹固定或应用层 AEAD 仍在 Phase 3/4 检查单中，指纹经配对通道下发，
+   mDNS 只放 key id。
+2. **mDNS TXT 不可信**：同网任何设备可伪造。`bridgeId`/`notify=1` 只是发现提示，
+   **不是信任根**；客户端必须以认证后 `bridge_hello` 内的 `bridgeInstallationId` 为准，
+   认证身份与持久值不符时记 `identity_conflict` 且**不得静默改写 endpoint**。
+3. **凭据与 cursor 存储**：Phase 3 起持久于 `noBackupFilesDir`（不进云备份/设备迁移），
+   凭据经 Android Keystore 包装；Keystore 在重启后首次解锁前不可用时只保留路由元数据，
+   不落明文。
+4. **通知内容隐私**：`presentation` 默认 generic（不含会话名/正文），`session_name`
+   需用户显式开启；receipt/diagnostic 只记短 hash 与原因码，禁止正文与凭据。
+5. **离线伪造面**：Bridge 未认证前不执行任何来自 socket 的写操作；通知事件以
+   Bridge 持久层为唯一权威来源，客户端不根据未认证数据生成提醒。
+
+### §B 合规与验收豁免记录
+
+1. **8 小时锁屏续航测试：用户已豁免（2026-08-01）**。后果：Phase 3 gate 中
+   「8h 真机功耗与稳定性达标」一项**不能以原口径声称通过**；本阶段只报
+   「flag 后已实施 / 有限验收（45 分钟后台 + 切应用 + 锁屏 + Wi-Fi 切换 +
+   进程死亡追补）」。若要发布为默认路径，8h 测试仍需补做或正式降级验收标准。
+2. **connectedDevice FGS 合规 Gate：未通过，保留 `dataSync`**。迁移需：前台用户
+   显式开启 + 真实已配对桌面设备 + `FOREGROUND_SERVICE_CONNECTED_DEVICE` 与匹配权限 +
+   通知指明设备与停止路径 + Play Console 声明与可复现审核视频 + 法务/发布确认。
+   未批准前不得以 connectedDevice 规避 dataSync 6h 限额。
+3. **MIUI 进程冻结**：实测（2026-08-01，Xiaomi 13 / Android 16）App 后台约 60s 后
+   进程被整体冻结（内核 CPU 计数停走，FGS 亦不免），约 5.5 分钟随用户交互解冻，
+   解冻后自动重连 + cursor 追补全量恢复。**Dart→Kotlin 迁移不改变进程级冻结**；
+   Phase 3 的收益是 Flutter isolate 独立、DHCP/Wi-Fi 自愈与生命周期可重建，
+   不是冻结免疫。

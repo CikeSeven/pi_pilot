@@ -32,6 +32,13 @@ class MainActivity : FlutterActivity() {
                 systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
             }
         }
+        // Phase 3:coordinator 走同一 ready 通道。任意时刻只有一个 owner 活跃,
+        // 未启动的一方永远不报告,Dart 无需感知背后是 watcher 还是 coordinator。
+        LanConnectionCoordinator.setReadyListener { ready ->
+            runOnUiThread {
+                systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
+            }
+        }
         channel
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -67,27 +74,81 @@ class MainActivity : FlutterActivity() {
                         ) {
                             result.error("invalid_args", "watcher config incomplete", null)
                         } else {
-                            BridgeWatcher.start(
-                                context = applicationContext,
+                            val vibrate = call.argument<Boolean>("vibrate") ?: false
+                            // 无论哪个 owner 活跃都先持久化目标:flag 切换或服务重建
+                            // 时 coordinator 才能凭 noBackup 里的数据独立接管。
+                            val cipher = KeystoreTokenCipher()
+                            val previous = NativeLanTarget.load(applicationContext)
+                            val target = NativeLanTarget(
+                                deviceId = previous?.deviceId ?: host,
                                 host = host,
                                 port = port,
-                                token = token,
-                                sourceId = sourceId,
-                                vibrate = call.argument<Boolean>("vibrate") ?: false,
+                                wrappedToken = cipher.wrap(token),
                                 clientId = clientId,
-                                wasStreaming = wasStreaming,
-                                sessionName = call.argument<String>("sessionName").orEmpty(),
+                                bridgeInstallationId = previous?.bridgeInstallationId,
+                                savedAtMillis = System.currentTimeMillis(),
                             )
-                            // 返回值只表示「已提交」,真正的接管由 watcherReady 回调宣布。
-                            result.success(mapOf("submitted" to true, "ready" to BridgeWatcher.isSubscriptionReady()))
+                            NativeLanTarget.save(applicationContext, target, cipher)
+                            if (FeatureFlags.isEnabled(applicationContext, FeatureFlags.NATIVE_LAN_OWNER)) {
+                                LanConnectionCoordinator.start(
+                                    context = applicationContext,
+                                    target = target,
+                                    token = token,
+                                    vibrate = vibrate,
+                                )
+                                result.success(mapOf("submitted" to true, "ready" to LanConnectionCoordinator.isReady()))
+                            } else {
+                                BridgeWatcher.start(
+                                    context = applicationContext,
+                                    host = host,
+                                    port = port,
+                                    token = token,
+                                    sourceId = sourceId,
+                                    vibrate = vibrate,
+                                    clientId = clientId,
+                                    wasStreaming = wasStreaming,
+                                    sessionName = call.argument<String>("sessionName").orEmpty(),
+                                )
+                                // 返回值只表示「已提交」,真正的接管由 watcherReady 回调宣布。
+                                result.success(mapOf("submitted" to true, "ready" to BridgeWatcher.isSubscriptionReady()))
+                            }
                         }
                     }
                     "stopWatcher" -> {
                         BridgeWatcher.stop()
+                        LanConnectionCoordinator.stop("stopWatcher")
                         result.success(null)
                     }
                     "watcherReadyState" -> {
-                        result.success(BridgeWatcher.isSubscriptionReady())
+                        val ready = if (FeatureFlags.isEnabled(applicationContext, FeatureFlags.NATIVE_LAN_OWNER)) {
+                            LanConnectionCoordinator.isReady()
+                        } else {
+                            BridgeWatcher.isSubscriptionReady()
+                        }
+                        result.success(ready)
+                    }
+                    "setFeatureFlag" -> {
+                        val flag = call.argument<String>("flag")
+                        val enabled = call.argument<Boolean>("enabled")
+                        if (flag.isNullOrEmpty() || enabled == null) {
+                            result.error("invalid_args", "flag and enabled required", null)
+                        } else {
+                            FeatureFlags.setEnabled(applicationContext, flag, enabled)
+                            // 切换立即生效:停掉当前 owner,ready=false 会让 Dart 恢复
+                            // 兜底通知;下一次 startWatcher(后台切换)启动新路径。
+                            if (flag == FeatureFlags.NATIVE_LAN_OWNER) {
+                                BridgeWatcher.stop()
+                                LanConnectionCoordinator.stop("flag_toggle:$enabled")
+                            }
+                            result.success(true)
+                        }
+                    }
+                    "connectionMetrics" -> {
+                        result.success(ConnectionMetrics.dump(applicationContext))
+                    }
+                    "clearConnectionMetrics" -> {
+                        ConnectionMetrics.clear(applicationContext)
+                        result.success(null)
                     }
                     "log" -> {
                         Log.i("PiPilotDart", call.argument<String>("message").orEmpty())
