@@ -32,6 +32,7 @@ class NotificationP2pClient {
     required PiConnection connection,
     required String installationId,
     required bool vibrate,
+    Map<String, dynamic>? cachedHello,
   }) {
     if (_active) return;
     _active = true;
@@ -46,6 +47,13 @@ class NotificationP2pClient {
         NotificationService.instance.p2pNotificationClosed();
       }
     });
+    // 常见路径是「前台连上 → 后退后台」:hello 在连接建立时已经消费掉,
+    // 穿梭此刻才启动,永远等不到下一条。拿缓存的 hello 先重放给引擎,
+    // 让引擎立刻订阅;身份字段跨重连稳定,重放是安全的。
+    final hello = cachedHello;
+    if (hello != null) {
+      unawaited(_onFrame(connection, installationId, vibrate, hello));
+    }
   }
 
   Future<void> _onFrame(

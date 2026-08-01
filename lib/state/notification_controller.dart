@@ -264,16 +264,35 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
         _enabled &&
         session.status == PiConnStatus.connected &&
         session.activeTransport == PiActiveTransport.p2p;
+    unawaited(
+      NotificationService.instance.logDiagnostic(
+        'p2p sync: bg=$_inBackground en=$_enabled st=${session.status.name} '
+        'tr=${session.activeTransport?.name} active=${_p2pClient.isActive} run=$shouldRun',
+      ),
+    );
     if (!shouldRun) {
       if (_p2pClient.isActive) await _p2pClient.stop();
       return;
     }
     if (_p2pClient.isActive) return;
-    final conn = ref.read(piSessionNotifierProvider)?.activeConnection;
-    if (conn == null) return;
+    final notifier = ref.read(piSessionNotifierProvider);
+    final conn = notifier?.activeConnection;
+    if (conn == null) {
+      unawaited(NotificationService.instance.logDiagnostic('p2p sync: conn=null'));
+      return;
+    }
     final deviceId = ref.read(deviceManagerProvider).activeDeviceId;
-    if (deviceId == null) return;
+    if (deviceId == null) {
+      unawaited(NotificationService.instance.logDiagnostic('p2p sync: deviceId=null'));
+      return;
+    }
     final settings = ref.read(settingsProvider);
+    final hello = notifier?.lastHelloFrame;
+    unawaited(
+      NotificationService.instance.logDiagnostic(
+        'p2p sync: start hello=${hello != null}',
+      ),
+    );
     _p2pClient.start(
       connection: conn,
       // 与 LAN watcher 同一个 installationId:Bridge 按它记 cursor,
@@ -283,6 +302,8 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
         deviceId: deviceId,
       ),
       vibrate: settings.notificationVibrationEnabled,
+      // 前台连上→后退后台时 hello 已被消费,拿缓存重放给引擎。
+      cachedHello: hello,
     );
   }
 
@@ -295,6 +316,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       if (requestGeneration == _watcherRequestGeneration) {
         _watcherActive = false;
         await NotificationService.instance.stopWatcher();
+        // 与 LAN 路径对齐:通知开关关掉时 P2P 穿梭也得停,否则引擎
+        // 会继续在原生弹通知,绕过 Dart 的开关检查。
+        await _p2pClient.stop();
       }
       return;
     }
@@ -306,8 +330,15 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     );
     if (target == null) {
       if (requestGeneration != _watcherRequestGeneration) return;
-      _watcherActive = false;
+      // stopWatcher 照发:原生 watcher 若还在跑(LAN→P2P 切换途中)必须停;
+      // 仲裁器下它不会再误伤 P2P 引擎的 ready。
       await NotificationService.instance.stopWatcher();
+      // 但 _watcherActive 不能无条件清:P2P 穿梭活跃时通知归它的引擎管,
+      // 所有权由引擎 ready 驱动。实测这里清掉后,Dart 兜底与原生引擎
+      // 对同一事件各弹一条(重复通知)。
+      if (!_p2pClient.isActive) {
+        _watcherActive = false;
+      }
       return;
     }
     final settings = ref.read(settingsProvider);
@@ -345,6 +376,11 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     final ready = NotificationService.instance.watcherReady.value;
     // 已回前台时忽略迟到的 ready:此时 Dart 自己在连,不该让出所有权。
     final next = ready && _inBackground;
+    unawaited(
+      NotificationService.instance.logDiagnostic(
+        'readyChanged: ready=$ready bg=$_inBackground $_watcherActive->$next',
+      ),
+    );
     if (_watcherActive == next) return;
     setState(() {
       _watcherActive = next;
@@ -395,6 +431,10 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   void _notify(String title, [String? body]) {
     if (!_enabled) return;
     if (!_inBackground) return;
+    // 原生引擎(watcher/coordinator/P2P)已接管后台通知时不能再弹:
+    // 引擎订阅全量 bridge 事件,后台会话完成与输入请求它都会弹,
+    // 这里不检查就会对同一事件重复通知(实测复现:id=100 与引擎各一条)。
+    if (_watcherActive) return;
     final id = ++_notificationId;
     unawaited(
       NotificationService.instance.show(

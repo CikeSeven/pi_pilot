@@ -1368,6 +1368,55 @@ Rendezvous 需要公网可达（P2P 配对本来就用它，已存在）。
 **未决项变化**：#4（Relay 部署主体）与 #5（GMS 决策）随旧方案一并关闭；新增 #11
 （Rendezvous 可用性 owner、提示帧速率限制取值、guest 长连鉴权细节），阻塞 Phase 4 实施。
 
+### §H remote_hint_v1 实施与真机验收（2026-08-02）
+
+**实现路径比 §G 的设想更简**：评审发现通知协议可以直接「骑」在已有 P2P 连接上——
+`PiConnection` 在 LAN 走 WebSocket、打洞走 WebRTC DataChannel，协议完全一致，而
+Bridge 侧 `P2pHost` 本就常驻 Rendezvous 房间并把每条 DataChannel 注册为移动客户端。
+所以**不需要单独的 Rendezvous 提示帧与后台信令长连**：手机进程活着且 P2P 连着时，
+事件帧经 DataChannel 直接实时推达，§G 流程图里的「提示→回连→拉取」三步坍缩成一步。
+
+**落地的组件**：
+
+- `NotificationProtocolEngine.kt`：传输无关的通知协议引擎——hello 能力判定与身份守卫、
+  订阅/分页/skippedRanges 连续性、批量静默投递、receipt、连续前缀 ack、
+  cursor_expired/resync/scope_changed。BridgeWatcher 与 LanConnectionCoordinator 各删
+  约 200 行近重复协议代码改为委托，协议逻辑收敛为一份。
+- `P2pNotificationBridge.kt`：P2P 路径的引擎持有器。installationId 与 LAN watcher 相同，
+  cursor 与去重表天然共享；每帧自带 installationId/vibrate，进程重建无需显式 init。
+- `NotificationP2pClient`（Dart）：穿梭客户端——过滤 bridge_hello/notification_* 帧喂给
+  原生引擎，出站帧经 PiConnection 发走。只按「后台 && 已连接 && transport==p2p」起停，
+  与 LAN watcher 互斥。
+- `ReadyArbitrator.kt`：三个 owner 的 ready 仲裁（有效 ready = 任一 owner ready，仅变化时
+  上报），取代各自的直报。
+
+**验收暴露并修复的三个真 bug**（真机 Xiaomi 13 + HyperOS，transport=p2p 强制打洞）：
+
+1. **hello 时序**：bridge_hello 每连接只发一次，「前台连上→退后台」时穿梭永远等不到。
+   修：notifier 留存 hello 原文（`lastHelloFrame`），穿梭启动时先重放给引擎。
+2. **ready 处理器未注册**（重复通知根因一）：`_installReadyHandler` 过去只在
+   `startWatcher` 里调用，P2P 路径不经 startWatcher，原生 `invokeMethod("watcherReady")`
+   没有 Dart 处理方被静默丢弃，`_watcherActive` 永远 false。修：挪进 `_initialize()`。
+3. **`_notify` 缺 `_watcherActive` 检查**（重复通知根因二）：注入器的源对手机是「另一个
+   后台会话」，`backgroundFinishTick` 触发的 `_notify` 不检查接管状态 unconditional 弹。
+   修：补检查（`_notifyTaskComplete` 本就有）。
+
+**验收结果**（强制 P2P 打洞、App 后台、注入任务完成事件）：订阅经缓存 hello 重放成功
+（cursor 跨 LAN/P2P 路径共享续上），ready 经仲裁器正常传播，实时事件 15–56ms 展示
+（DISPLAY_CONFIRMED），ack 连续推进，无重复通知，通知栏恰好 FGS + 引擎一条。
+另观测到一次约 17s 的 MIUI 冻结（豁免下仍可能发生），解冻后事件经 DataChannel 冲刷
+送达、cursor 补齐，无一丢失—— durable outbox + cursor 补偿再次兜住。
+
+**提示通道必要性评估（advisor 步骤 4）**：在线场景下通知协议已经骑在既有 P2P 连接上
+实时送达，单独的 Rendezvous 提示帧只在自己手里没连 P2P 时才有意义——而那时按 §G 它
+唯一的价值是催手机重连 P2P。实测手机进程活着时 P2P 重连（含打洞）已由会话层自动完成，
+提示帧对在线送达是冗余的。**结论：不建单独的提示通道**。进程死亡的近实时唤醒（模式二
+system_push_wake_v1）用户已明确不做；WorkManager 死亡轮询同理不建（只是恢复信号，
+拉取仍要等 App 启动，而启动时的 cursor 补偿已存在）。
+
+**Phase 4 状态**：remote_hint_v1 已完成并验收；system_push_wake_v1 不做（用户否决）。
+Phase 4 就此收口。
+
 ## 23. LAN 威胁模型与合规记录（Phase 0 治理欠债补账，2026-08-01）
 
 ### §A 威胁模型（LAN 范围）

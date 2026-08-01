@@ -27,24 +27,24 @@ class MainActivity : FlutterActivity() {
         // 这是修掉「提交即成功」的关键:startWatcher 返回只代表异步启动已提交,
         // 不代表 socket 已连上、已鉴权、已追平事件。Dart 若据此立刻抑制自己的
         // 兜底通知,就会在原生实际没接管的窗口里丢通知。
+        // 三个 owner 的 ready 都经仲裁器:有效 ready = 任一 owner ready,
+        // 只有有效值变化才上报。否则过渡态里后到的 false 会踩掉另一
+        // owner 刚建立的 true——实测表现:P2P 引擎已 ready,一次迟到的
+        // stopWatcher 把 Dart 侧 ready 清掉,Dart 兜底与原生引擎同时弹
+        // 通知(重复)。
+        ReadyArbitrator.listener = { ready ->
+            runOnUiThread {
+                systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
+            }
+        }
         BridgeWatcher.setReadyListener { ready ->
-            runOnUiThread {
-                systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
-            }
+            ReadyArbitrator.report("watcher", ready)
         }
-        // Phase 3:coordinator 走同一 ready 通道。任意时刻只有一个 owner 活跃,
-        // 未启动的一方永远不报告,Dart 无需感知背后是 watcher 还是 coordinator。
         LanConnectionCoordinator.setReadyListener { ready ->
-            runOnUiThread {
-                systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
-            }
+            ReadyArbitrator.report("coordinator", ready)
         }
-        // remote_hint_v1:P2P 路径的引擎走同一 ready 通道。三条路径互斥
-        // (transport 选择决定走哪条),Dart 无需感知背后是谁。
         P2pNotificationBridge.readyListener = { ready ->
-            runOnUiThread {
-                systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
-            }
+            ReadyArbitrator.report("p2p", ready)
         }
         channel
             .setMethodCallHandler { call, result ->
@@ -127,12 +127,10 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "watcherReadyState" -> {
-                        val ready = if (FeatureFlags.isEnabled(applicationContext, FeatureFlags.NATIVE_LAN_OWNER)) {
-                            LanConnectionCoordinator.isReady()
-                        } else {
-                            BridgeWatcher.isSubscriptionReady()
-                        }
-                        result.success(ready)
+                        // 读仲裁器有效值:任一 owner ready 即 true。
+                        // 不能按 flag 二选一读单个 owner——P2P 引擎的 ready
+                        // 会被漏报,Dart 据此恢复兜底就会重复弹通知。
+                        result.success(ReadyArbitrator.effective())
                     }
                     // remote_hint_v1:Dart 持有 P2P DataChannel,把 bridge_hello 与
                     // notification_* 帧喂给原生引擎,出站帧(subscribe/ack/receipt)
@@ -192,7 +190,12 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "log" -> {
-                        Log.i("PiPilotDart", call.argument<String>("message").orEmpty())
+                        val msg = call.argument<String>("message").orEmpty()
+                        Log.i("PiPilotDart", msg)
+                        // 这台验收机的 logcat 对应用自身标签不可靠,Dart 侧诊断
+                        // 一并落进私有文件,与原生 owner 日志同一处读回。
+                        WatcherDiagnostics.init(applicationContext)
+                        WatcherDiagnostics.log("dart $msg")
                         result.success(null)
                     }
                     // 后台稳定性取证用:这台验收机的 logcat 对应用自身标签不可靠

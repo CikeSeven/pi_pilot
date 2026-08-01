@@ -149,6 +149,11 @@ class NotificationService {
 
   Future<void> _initialize() async {
     try {
+      // ready 回调注册必须在任何 watcher/P2P 路径之前:它过去藏在
+      // startWatcher 里,P2P 路径不经 startWatcher,原生 invokeMethod
+      // ("watcherReady") 没有 Dart 处理方被静默丢弃,_watcherActive
+      // 永远 false,Dart 兜底与原生引擎对同一事件各弹一条(重复通知)。
+      _installReadyHandler();
       await _plugin.initialize(
         settings: const InitializationSettings(
           android: AndroidInitializationSettings('@mipmap/ic_launcher'),
@@ -281,8 +286,10 @@ class NotificationService {
   Future<void> stopWatcher() async {
     try {
       await _systemChannel.invokeMethod<void>('stopWatcher');
-      // 原生停了就一定没在接管,立刻收回所有权,不等回调。
-      watcherReady.value = false;
+      // ready 不在此乐观清除:ready 是三个 owner(LAN watcher / coordinator
+      // / P2P 引擎)共享的状态,原生仲裁器按「任一 owner ready」报告有效值。
+      // 这里清掉会误伤仍在接管的另一 owner(实测:P2P 引擎已 ready,一次
+      // 迟到的 stopWatcher 清掉 ready,Dart 兜底与原生同时弹通知)。
       await logDiagnostic('watcher stopped');
     } on PlatformException catch (error) {
       await logDiagnostic('watcher stop failed: $error');

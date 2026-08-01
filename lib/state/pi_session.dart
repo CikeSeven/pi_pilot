@@ -796,6 +796,12 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 生命周期仍由 notifier 管理,调用方不得持有它跨重连使用。
   PiConnection? get activeConnection => _conn;
 
+  /// remote_hint_v1:当前连接上收到的 bridge_hello 原文。
+  /// 后台才启动的通知穿梭等不到下一条 hello(每连接只发一次),
+  /// 启动时拿这份缓存先重放给原生引擎,否则引擎无法订阅。
+  Map<String, dynamic>? get lastHelloFrame => _lastHelloFrame;
+  Map<String, dynamic>? _lastHelloFrame;
+
   PiConnection? _conn;
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<PiConnStatus>? _statusSub;
@@ -940,6 +946,8 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 快照——用户在设备页改了配置,要显式再调 connect 才生效,重连不会
   /// 悄悄换参数。
   Future<void> connect(DeviceProfile device) async {
+    // 新连接尝试:旧 hello 属于旧连接,作废,等新连接的 hello 再写。
+    _lastHelloFrame = null;
     // clientId 是「这台手机」的全局身份(与设备无关),仍从设置读。
     final clientId = ref.read(settingsProvider).clientId;
     // token 两条路都要:直连经 ?token= 鉴权,打洞经首帧 auth 鉴权。
@@ -2329,6 +2337,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   }
 
   void _applyHello(Map<String, dynamic> hello) {
+    _lastHelloFrame = hello;
     final version = hello['version'] as int? ?? 1;
     final hubId = hello['hubId'] as String?;
     _hubV2 = version >= 2 && hubId != null;
