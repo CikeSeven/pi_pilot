@@ -792,6 +792,10 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 本实例负责的 roster 设备 id(保活/账本对账用)。
   String get deviceId => _deviceId;
 
+  /// remote_hint_v1:通知协议穿梭用的活动连接只读视图。
+  /// 生命周期仍由 notifier 管理,调用方不得持有它跨重连使用。
+  PiConnection? get activeConnection => _conn;
+
   PiConnection? _conn;
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<PiConnStatus>? _statusSub;

@@ -54,16 +54,11 @@ object LanConnectionCoordinator {
     private var nsd: NsdDiscovery? = null
     private var nsdInFlight = false
 
-    private var gate: NotificationGate? = null
-    private var cursors: NativeCursorStore? = null
-    private var prefix: ContiguousPrefix? = null
+    private var engine: NotificationProtocolEngine? = null
 
     private var webSocket: WebSocket? = null
     private var socketSeq: Long = 0L
 
-    private var notificationProtocol = false
-    private var bridgeInstallationId: String? = null
-    private var eventEpoch: String? = null
     private var connectStartedAt: Long = 0L
     private var lastActiveAt: Long = 0L
     private var readyListener: ((Boolean) -> Unit)? = null
@@ -146,7 +141,7 @@ object LanConnectionCoordinator {
             reconnect.stop(gen)
             states.transitionTo(gen, LanConnectionState.DISCONNECTED, reason)
             closeSocketLocked()
-            setReadyLocked(false)
+            engine?.reset()
             unregisterNetworkCallback()
             WatcherDiagnostics.log("coordinator stop(reason=$reason)")
         }
@@ -166,32 +161,79 @@ object LanConnectionCoordinator {
     /// 身份字段只截前 8 位。
     fun debugStatus(): Map<String, Any?> {
         val t = target
-        val bridgeId = bridgeInstallationId
+        val bridgeId = engine?.bridgeInstallationId
         val pending = reconnect.pendingSchedule()
         return mapOf(
             "state" to currentState().name,
             "ready" to isReady(),
-            "notificationProtocol" to notificationProtocol,
+            "notificationProtocol" to (engine?.notificationProtocol ?: false),
             "host" to (t?.host ?: ""),
             "port" to (t?.port ?: 0),
             "clientId" to (t?.clientId?.take(8) ?: ""),
             "bridgeInstallationId" to (bridgeId?.take(8) ?: ""),
-            "eventEpoch" to (eventEpoch?.take(8) ?: ""),
+            "eventEpoch" to ((engine?.eventEpoch)?.take(8) ?: ""),
             "reconnectAttempt" to reconnect.attempt,
             "reconnectPending" to (pending != null),
             "reconnectDelayMs" to (pending?.delayMs ?: 0L),
             "lastActiveAt" to lastActiveAt,
-            "cursorThrough" to (bridgeId?.let { cursors?.read(it)?.through } ?: -1L),
+            "cursorThrough" to (engine?.cursorThroughForDebug() ?: -1L),
         )
     }
 
+    /// 协议引擎装配:身份守卫以 NativeLanTarget 为准——认证身份与持久值不符
+    /// 时引擎拒绝订阅且绝不改写 endpoint;首次连接学到身份才落盘。
     private fun ensureNotificationLayer(context: Context, clientId: String) {
-        if (gate == null) {
-            val dedupe = NotificationDeduplicator.create(context)
-            val renderer = NativeNotificationRenderer(context)
-            gate = NotificationGate(dedupe, renderer)
+        if (engine != null) {
+            engine?.vibrate = vibrate
+            return
         }
-        if (cursors == null) cursors = NativeCursorStore.create(context, clientId)
+        val store = object : NotificationProtocolEngine.IdentityStore {
+            override fun persistedBridgeId(): String? = target?.bridgeInstallationId
+
+            override fun adopt(bridgeId: String) {
+                val app = appContext ?: return
+                val t = target ?: return
+                val adopted = t.copy(bridgeInstallationId = bridgeId)
+                if (NativeLanTarget.save(app, adopted, cipher)) {
+                    target = adopted
+                }
+            }
+        }
+        engine = NotificationProtocolEngine(
+            context = context,
+            installationId = clientId,
+            diagPrefix = "coordinator",
+            identityStore = store,
+        ).also { created ->
+            created.vibrate = vibrate
+            created.readyListener = { ready -> onEngineReady(ready) }
+            created.cursorRebaseListener = { gap, oldest ->
+                appContext?.let {
+                    ConnectionMetrics.record(
+                        it,
+                        "cursor_recovery",
+                        mapOf("rebaseGap" to gap, "oldest" to oldest),
+                    )
+                }
+            }
+        }
+    }
+
+    /// 引擎 ready 状态变化:ready=true 代表订阅追平,可以接管通知;
+    /// ready=false 只通知 Dart 恢复兜底,状态机由 socket 路径自己管。
+    private fun onEngineReady(ready: Boolean) {
+        if (ready) {
+            val gen = reconnect.generation
+            reconnect.onConnected(gen)
+            states.transitionTo(gen, LanConnectionState.READY, "ready")
+            val latency = System.currentTimeMillis() - connectStartedAt
+            appContext?.let { ConnectionMetrics.record(it, "ready", mapOf("latencyMs" to latency)) }
+            WatcherDiagnostics.log("coordinator READY(gen=$gen latency=${latency}ms)")
+            // 常驻通知必须跟真实连接走。coordinator 之前漏接,后台断连时
+            // 通知栏还写着「已连接」。
+            appContext?.let { KeepAliveService.updateConnection(it, true) }
+        }
+        readyListener?.invoke(ready)
     }
 
     // ------------------------------------------------------------------
@@ -230,7 +272,7 @@ object LanConnectionCoordinator {
                     LanConnectionState.DEGRADED,
                     "network_lost",
                 )
-                setReadyLocked(false)
+                engine?.onTransportClosed()
             }
         }
         runCatching {
@@ -317,7 +359,7 @@ object LanConnectionCoordinator {
 
     private fun onSocketLost(gen: Long, reason: String) {
         webSocket = null
-        setReadyLocked(false)
+        engine?.onTransportClosed()
         states.transitionTo(gen, LanConnectionState.DISCONNECTED, reason)
         // 如实下调常驻通知。FGS 通知带 setOnlyAlertOnce(true),只换文案不响铃,
         // 不会因为瀑布式重连而变成打扰。
@@ -501,7 +543,7 @@ object LanConnectionCoordinator {
     }
 
     // ------------------------------------------------------------------
-    // 协议(与 BridgeWatcher 通知协议一致)
+    // 协议:全部交给 NotificationProtocolEngine,这里只剩传输接线
     // ------------------------------------------------------------------
 
     private fun handleFrame(gen: Long, socketId: Long, webSocket: WebSocket, text: String) {
@@ -510,246 +552,46 @@ object LanConnectionCoordinator {
         } catch (_: Exception) {
             return
         }
-        when (frame.optString("type")) {
-            "bridge_hello" -> handleHello(gen, socketId, webSocket, frame)
-            "response" -> handleResponse(gen, socketId, webSocket, frame)
-            "notification_events" -> handleNotificationEvents(webSocket, frame)
-            "notification_ready" -> {
-                reconnect.onConnected(gen)
-                states.transitionTo(gen, LanConnectionState.READY, "ready")
-                val latency = System.currentTimeMillis() - connectStartedAt
-                ConnectionMetrics.record(
-                    appContext ?: return,
-                    "ready",
-                    mapOf("latencyMs" to latency),
-                )
-                WatcherDiagnostics.log("coordinator READY(gen=$gen latency=${latency}ms)")
-                // 常驻通知必须跟真实连接走。watcher 在 hello 成功处就调了这个,
-                // coordinator 之前漏接,结果后台断连时通知欄还写着「已连接」。
-                appContext?.let { KeepAliveService.updateConnection(it, true) }
-                setReadyLocked(true)
-                ackCursor(webSocket)
-            }
-            "notification_cursor_expired" -> {
-                val oldest = frame.optLong("oldestAvailable", 0L)
-                val bridgeId = bridgeInstallationId ?: return
-                val epoch = frame.optString("eventEpoch").takeIf { it.isNotEmpty() } ?: eventEpoch ?: return
-                val gap = cursors?.rebase(bridgeId, epoch, oldest) ?: 0L
-                ConnectionMetrics.record(
-                    appContext ?: return,
-                    "cursor_recovery",
-                    mapOf("rebaseGap" to gap, "oldest" to oldest),
-                )
-                subscribeNotifications(webSocket, "rebase-${System.currentTimeMillis()}", bridgeId, epoch)
-            }
-            "notification_resync_required", "notification_scope_changed" -> {
-                setReadyLocked(false)
-                val bridgeId = bridgeInstallationId ?: return
-                val epoch = eventEpoch ?: return
-                subscribeNotifications(webSocket, "resync-${System.currentTimeMillis()}", bridgeId, epoch)
-            }
-            else -> Unit
+        if (frame.optString("type") == "bridge_hello") {
+            handleHello(gen, socketId, webSocket, frame)
+            return
+        }
+        val e = engine ?: return
+        // response.data 首包解包在引擎内部;非通知帧 coordinator 没有业务,忽略。
+        if (e.onFrame(frame)) {
+            flushOutbound(webSocket)
         }
     }
 
-    /// 首包藏在 response.data 里——这是 BridgeWatcher 曾踩过的坑,直接复用结论。
-    private fun handleResponse(gen: Long, socketId: Long, webSocket: WebSocket, frame: JSONObject) {
-        val data = frame.optJSONObject("data") ?: return
-        when (data.optString("type")) {
-            "notification_events" -> handleNotificationEvents(webSocket, data)
-            "notification_ready" -> handleFrame(gen, socketId, webSocket, data.toString())
-            "notification_cursor_expired",
-            "notification_resync_required",
-            "notification_scope_changed",
-            -> handleFrame(gen, socketId, webSocket, data.toString())
-            else -> Unit
+    /// 引擎排队的出站帧(subscribe/next_page/ack/receipt)经当前 socket 发出。
+    private fun flushOutbound(webSocket: WebSocket) {
+        val e = engine ?: return
+        for (payload in e.pollOutbound()) {
+            webSocket.send(payload)
         }
     }
 
     private fun handleHello(gen: Long, socketId: Long, webSocket: WebSocket, frame: JSONObject) {
         val t = target ?: return
-        val caps = frame.optJSONArray("capabilities")
-        val supportsEvents = (0 until (caps?.length() ?: 0))
-            .any { caps?.optString(it) == "notification_events_v1" }
-        val helloBridgeId = frame.optString("bridgeInstallationId").takeIf { it.isNotEmpty() }
-        val helloEpoch = frame.optString("eventEpoch").takeIf { it.isNotEmpty() }
-
-        notificationProtocol = supportsEvents && helloBridgeId != null && helloEpoch != null
-        if (!notificationProtocol || helloBridgeId == null || helloEpoch == null) {
-            // coordinator 只接管新协议 Bridge。旧 Bridge 交还 watcher/Dart 路径。
-            WatcherDiagnostics.log("coordinator: bridge lacks notification_events_v1, decline ownership")
-            setReadyLocked(false)
-            return
-        }
-
-        // 身份守卫:认证身份与持久值不符,记冲突且绝不改写 endpoint。
-        // 首次连接(持久值为空)才允许学习并落盘。
-        val persistedId = t.bridgeInstallationId
-        if (persistedId != null && persistedId != helloBridgeId) {
-            ConnectionMetrics.record(appContext ?: return, "identity_conflict")
-            WatcherDiagnostics.log("coordinator identity_conflict(persisted=${persistedId.take(14)} hello=${helloBridgeId.take(14)})")
-            setReadyLocked(false)
-            webSocket.close(4000, "identity conflict")
-            return
-        }
-
-        bridgeInstallationId = helloBridgeId
-        eventEpoch = helloEpoch
-        // 首次连上学到的身份落盘:之后 NSD 自愈与冲突检测都以它为准。
-        if (persistedId == null) {
-            val context = appContext
-            if (context != null) {
-                val adopted = t.copy(bridgeInstallationId = helloBridgeId)
-                if (NativeLanTarget.save(context, adopted, cipher)) {
-                    target = adopted
-                    WatcherDiagnostics.log("coordinator identity adopted(${helloBridgeId.take(14)})")
-                }
+        val e = engine ?: return
+        when (e.onHello(frame, "$gen-$socketId")) {
+            NotificationProtocolEngine.HelloOutcome.SUBSCRIBED -> {
+                reconnect.onConnected(gen)
+                appContext?.let { ConnectionMetrics.record(it, "reconnect_ok") }
+                states.transitionTo(gen, LanConnectionState.CATCHING_UP, "hello")
+                flushOutbound(webSocket)
             }
-        }
-        reconnect.onConnected(gen)
-        ConnectionMetrics.record(appContext ?: return, "reconnect_ok")
-        states.transitionTo(gen, LanConnectionState.CATCHING_UP, "hello")
-        subscribeNotifications(webSocket, "$gen-$socketId", helloBridgeId, helloEpoch)
-    }
-
-    private fun subscribeNotifications(webSocket: WebSocket, suffix: String, bridgeId: String, epoch: String) {
-        val t = target ?: return
-        val saved = cursors?.read(bridgeId)
-        val cursorJson = if (saved != null && saved.eventEpoch == epoch) {
-            JSONObject().put("eventEpoch", saved.eventEpoch).put("sequence", saved.through)
-        } else {
-            null
-        }
-        synchronized(this) {
-            prefix = ContiguousPrefix(if (cursorJson != null) saved!!.through else 0L)
-        }
-        val payload = JSONObject()
-            .put("type", "notification_subscribe")
-            .put("id", "coordinator-notify-$suffix")
-            .put("installationId", t.clientId)
-            .put("scopeVersion", 1)
-            .put("pageLimit", 100)
-        if (cursorJson != null) payload.put("cursor", cursorJson)
-        webSocket.send(payload.toString())
-        WatcherDiagnostics.log("coordinator subscribe(from=${saved?.through ?: 0})")
-    }
-
-    private fun handleNotificationEvents(webSocket: WebSocket, frame: JSONObject) {
-        val accumulator = prefix ?: return
-        val t = target ?: return
-        val bridgeId = bridgeInstallationId ?: return
-
-        if (frame.has("fromExclusive")) {
-            accumulator.rebaseTo(frame.optLong("fromExclusive"))
-        }
-        val skipped = frame.optJSONArray("skippedRanges")
-        for (i in 0 until (skipped?.length() ?: 0)) {
-            val range = skipped?.optJSONObject(i) ?: continue
-            accumulator.acceptSkipped(range.optLong("from"), range.optLong("through"))
-        }
-        val events = frame.optJSONArray("events")
-        val total = events?.length() ?: 0
-        // 批量追补只打扰一次:一页里除最后一条外全部静默入栈。
-        // 真机实测冻结 6 分钟后 8 条在 133ms 内逐条响铃,那是骚扰不是提醒。
-        // 后翻页时 hasMore 为真,此时连最后一条也要静默——真正的打扰留给末页。
-        val hasMore = frame.optBoolean("hasMore")
-        for (i in 0 until total) {
-            val event = events?.optJSONObject(i) ?: continue
-            val eventId = event.optString("eventId").takeIf { it.isNotEmpty() } ?: continue
-            val sequence = event.optLong("sequence", -1L)
-            if (sequence < 0) continue
-            deliverEvent(
-                scope = "${t.clientId}\u0000$bridgeId",
-                event = event,
-                silent = hasMore || i < total - 1,
-            )
-            accumulator.accept(sequence)
-        }
-        if (hasMore) {
-            webSocket.send(
-                JSONObject()
-                    .put("type", "notification_next_page")
-                    .put("id", "coordinator-notify-page-${System.currentTimeMillis()}")
-                    .put("scopeVersion", 1)
-                    .toString(),
-            )
-            return
-        }
-        ackCursor(webSocket)
-    }
-
-    private fun deliverEvent(scope: String, event: JSONObject, silent: Boolean = false) {
-        val notificationGate = gate ?: return
-        val eventId = event.optString("eventId").takeIf { it.isNotEmpty() } ?: return
-        val presentation = event.optJSONObject("presentation")
-        val type = event.optString("type")
-        val renderable = RenderableEvent(
-            eventId = eventId,
-            type = type,
-            title = presentation?.optString("title")?.takeIf { it.isNotEmpty() } ?: "PiPilot",
-            body = presentation?.optString("body")?.takeIf { it.isNotEmpty() },
-            collapseKey = event.optString("collapseKey").takeIf { it.isNotEmpty() },
-            vibrate = vibrate,
-            silent = silent,
-        )
-        val started = System.currentTimeMillis()
-        if (type == "input_resolved") {
-            // 等待输入已被处理:撤掉原来那条提醒,不新弹一条。
-            notificationGate.resolve(scope, renderable)
-            WatcherDiagnostics.log(
-                "coordinator deliver(id=${eventId.take(8)} state=RESOLVED ms=${System.currentTimeMillis() - started})",
-            )
-            return
-        }
-        val state = notificationGate.deliver(scope, renderable)
-        if (state == DeliveryState.BLOCKED) {
-            ConnectionMetrics.record(appContext ?: return, "blocked_permission")
-        }
-        WatcherDiagnostics.log(
-            "coordinator deliver(id=${eventId.take(8)} state=$state silent=$silent ms=${System.currentTimeMillis() - started})",
-        )
-        val t = target ?: return
-        webSocket?.send(
-            JSONObject()
-                .put("type", "notification_receipt")
-                .put("installationId", t.clientId)
-                .put("eventId", eventId)
-                .put("state", receiptStateName(state))
-                .put("at", java.time.Instant.now().toString())
-                .toString(),
-        )
-    }
-
-    private fun receiptStateName(state: DeliveryState): String = when (state) {
-        DeliveryState.PENDING -> "received"
-        DeliveryState.DISPLAY_REQUESTED -> "display_requested"
-        DeliveryState.DISPLAY_CONFIRMED -> "display_confirmed"
-        DeliveryState.SUPPRESSED_DUPLICATE -> "suppressed_duplicate"
-        DeliveryState.BLOCKED -> "blocked_permission"
-    }
-
-    private fun ackCursor(webSocket: WebSocket) {
-        val accumulator = prefix ?: return
-        val bridgeId = bridgeInstallationId ?: return
-        val epoch = eventEpoch ?: return
-        val t = target ?: return
-        val through = accumulator.current()
-        if (through <= 0) return
-        cursors?.advance(NotificationCursor(bridgeId, epoch, through))
-        webSocket.send(
-            JSONObject()
-                .put("type", "notification_ack")
-                .put("installationId", t.clientId)
-                .put("eventEpoch", epoch)
-                .put("through", through)
-                .toString(),
-        )
-    }
-
-    private fun setReadyLocked(value: Boolean) {
-        val listener = readyListener
-        if (listener != null) {
-            handler.post { listener.invoke(value) }
+            NotificationProtocolEngine.HelloOutcome.LEGACY -> {
+                // coordinator 只接管新协议 Bridge。旧 Bridge 交还 watcher/Dart 路径。
+                WatcherDiagnostics.log("coordinator: bridge lacks notification_events_v1, decline ownership")
+                readyListener?.invoke(false)
+            }
+            NotificationProtocolEngine.HelloOutcome.IDENTITY_CONFLICT -> {
+                // 身份守卫:认证身份与持久值不符,记冲突且绝不改写 endpoint。
+                WatcherDiagnostics.log("coordinator identity_conflict closing(gen=$gen)")
+                readyListener?.invoke(false)
+                webSocket.close(4000, "identity conflict")
+            }
         }
     }
 }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/notification_p2p_client.dart';
 import '../core/notification_service.dart';
 import 'device_alerts.dart';
 import 'device_manager.dart';
@@ -180,6 +181,10 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   int _watcherRequestGeneration = 0;
 
+  /// remote_hint_v1:P2P 路径的通知协议穿梭。只在「后台 && transport==p2p
+  /// && 连接在」时活跃;帧处理全在原生引擎,这里只管传输生命周期。
+  final NotificationP2pClient _p2pClient = NotificationP2pClient();
+
   bool get _inBackground => _lifecycle != AppLifecycleState.resumed;
   bool get _enabled => ref.read(settingsProvider).notificationsEnabled;
   bool get _vibrate => ref.read(settingsProvider).notificationVibrationEnabled;
@@ -218,6 +223,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     // A startWatcher MethodChannel call can still be in flight when the
     // widget is disposed. Always issue the matching stop to close that race.
     unawaited(NotificationService.instance.stopWatcher());
+    unawaited(_p2pClient.stop());
     super.dispose();
   }
 
@@ -230,9 +236,13 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       _streamingWhenBackgrounded = ref.read(piSessionProvider).isStreaming;
       // 把后台的连接与通知交给原生线程(Dart isolate 会被 MIUI 停止调度)
       unawaited(_startWatcher());
+      // P2P 通道上的通知穿梭(Dart 持有 socket,原生引擎处理帧)
+      unawaited(_syncP2pNotificationClient());
     } else {
       // 回前台:先收回原生观察连接,避免与 Dart 连接重复收事件
       unawaited(_stopWatcher());
+      // 回前台:P2P 穿梭也收回,弹过的通知一并撤掉
+      unawaited(_p2pClient.reset());
       // 回前台:逐个取消任务通知(用户已回到 app),但绝不碰 FGS 常驻通知
       _cancelTaskNotifications();
       // 回前台且已连着:确保 FGS 在跑(可能因后台断连被停过)
@@ -242,6 +252,37 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     debugPrint(
       '[NotificationController] lifecycle: $state, wasBackground=$wasBackground, '
       'streamingWhenBg=$_streamingWhenBackgrounded',
+    );
+  }
+
+  /// remote_hint_v1:按当前状态决定 P2P 通知穿梭的起停。
+  /// 与 LAN watcher 互斥——transport==p2p 时原生 watcher 本来就不启动
+  /// (resolveWatcherConnectionTarget 返回 null),两条路径不会同时接管。
+  Future<void> _syncP2pNotificationClient() async {
+    final session = ref.read(piSessionProvider);
+    final shouldRun = _inBackground &&
+        _enabled &&
+        session.status == PiConnStatus.connected &&
+        session.activeTransport == PiActiveTransport.p2p;
+    if (!shouldRun) {
+      if (_p2pClient.isActive) await _p2pClient.stop();
+      return;
+    }
+    if (_p2pClient.isActive) return;
+    final conn = ref.read(piSessionNotifierProvider)?.activeConnection;
+    if (conn == null) return;
+    final deviceId = ref.read(deviceManagerProvider).activeDeviceId;
+    if (deviceId == null) return;
+    final settings = ref.read(settingsProvider);
+    _p2pClient.start(
+      connection: conn,
+      // 与 LAN watcher 同一个 installationId:Bridge 按它记 cursor,
+      // 两条路径共享同一份进度与去重表。
+      installationId: nativeWatcherClientId(
+        appClientId: settings.clientId,
+        deviceId: deviceId,
+      ),
+      vibrate: settings.notificationVibrationEnabled,
     );
   }
 
@@ -449,6 +490,8 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     ref.listen(_watcherIdentityProvider, (previous, next) {
       if (previous == null || previous == next) return;
       if (_inBackground) unawaited(_startWatcher());
+      // transport 也在身份元组里:LAN ↔ P2P 切换时穿梭要跟着起停。
+      unawaited(_syncP2pNotificationClient());
     });
 
     // 常驻通知文案:连接状态或会话计数变化时推给原生刷新。
@@ -510,7 +553,11 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
         // 重复调用安全:coordinator 的 start(sameTarget=true) 快速路径保留
         // 现有 socket,不重建连接、不递增世代。
         if (_inBackground) unawaited(_startWatcher());
+        // P2P 通道刚连上:后台期间把通知穿梭挂上。
+        unawaited(_syncP2pNotificationClient());
       } else if (prev == PiConnStatus.connected) {
+        // 断线:P2P 穿梭立刻停,引擎 ready 由 p2pNotificationClosed 收回。
+        unawaited(_p2pClient.stop());
         unawaited(
           NotificationService.instance.logDiagnostic(
             'bridge disconnected: next=${next.name} background=$_inBackground',

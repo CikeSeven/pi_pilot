@@ -289,6 +289,43 @@ class NotificationService {
     }
   }
 
+  /// remote_hint_v1:把 P2P 通道上收到的一帧交给原生通知协议引擎。
+  /// 返回引擎处理结果(outbound 待发帧、ready、能力判定);失败返回 null。
+  Future<Map<String, dynamic>?> p2pNotificationFrame({
+    required String frame,
+    required String installationId,
+    required bool vibrate,
+  }) async {
+    try {
+      final result = await _systemChannel.invokeMethod<Map<Object?, Object?>>(
+        'p2pNotificationFrame',
+        {'frame': frame, 'installationId': installationId, 'vibrate': vibrate},
+      );
+      return result?.map((key, value) => MapEntry(key.toString(), value));
+    } on PlatformException catch (error) {
+      debugPrint('[NotificationService] p2pNotificationFrame failed: $error');
+      return null;
+    }
+  }
+
+  /// P2P 通道断开:通知原生引擎撤 ready,让 Dart 恢复兜底。
+  Future<void> p2pNotificationClosed() async {
+    try {
+      await _systemChannel.invokeMethod<void>('p2pNotificationClosed');
+    } on PlatformException catch (error) {
+      debugPrint('[NotificationService] p2pNotificationClosed failed: $error');
+    }
+  }
+
+  /// 回前台/完整复位:撤掉 P2P 引擎弹过的通知并清状态。
+  Future<void> p2pNotificationReset() async {
+    try {
+      await _systemChannel.invokeMethod<void>('p2pNotificationReset');
+    } on PlatformException catch (error) {
+      debugPrint('[NotificationService] p2pNotificationReset failed: $error');
+    }
+  }
+
   /// 更新 FGS 常驻通知的标题与会话计数。服务未运行时原生只记录、不刷新,
   /// 下次启动服务时会用上最新值。
   Future<void> updateKeepAliveStatus({

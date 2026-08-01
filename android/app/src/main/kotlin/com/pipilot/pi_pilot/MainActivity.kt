@@ -39,6 +39,13 @@ class MainActivity : FlutterActivity() {
                 systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
             }
         }
+        // remote_hint_v1:P2P 路径的引擎走同一 ready 通道。三条路径互斥
+        // (transport 选择决定走哪条),Dart 无需感知背后是谁。
+        P2pNotificationBridge.readyListener = { ready ->
+            runOnUiThread {
+                systemMethodChannel?.invokeMethod("watcherReady", mapOf("ready" to ready))
+            }
+        }
         channel
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -126,6 +133,34 @@ class MainActivity : FlutterActivity() {
                             BridgeWatcher.isSubscriptionReady()
                         }
                         result.success(ready)
+                    }
+                    // remote_hint_v1:Dart 持有 P2P DataChannel,把 bridge_hello 与
+                    // notification_* 帧喂给原生引擎,出站帧(subscribe/ack/receipt)
+                    // 带回 Dart 经 PiConnection 发走。cursor/去重/展示只在原生。
+                    "p2pNotificationFrame" -> {
+                        val frame = call.argument<String>("frame")
+                        val installationId = call.argument<String>("installationId")
+                        if (frame.isNullOrEmpty() || installationId.isNullOrEmpty()) {
+                            result.error("invalid_args", "frame and installationId required", null)
+                        } else {
+                            val vibrate = call.argument<Boolean>("vibrate") ?: false
+                            result.success(
+                                P2pNotificationBridge.onFrame(
+                                    applicationContext,
+                                    installationId,
+                                    vibrate,
+                                    frame,
+                                ),
+                            )
+                        }
+                    }
+                    "p2pNotificationClosed" -> {
+                        P2pNotificationBridge.onTransportClosed()
+                        result.success(null)
+                    }
+                    "p2pNotificationReset" -> {
+                        P2pNotificationBridge.reset()
+                        result.success(null)
                     }
                     "setFeatureFlag" -> {
                         val flag = call.argument<String>("flag")
