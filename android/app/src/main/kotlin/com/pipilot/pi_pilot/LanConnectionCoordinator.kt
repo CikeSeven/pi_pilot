@@ -161,6 +161,30 @@ object LanConnectionCoordinator {
 
     fun currentState(): LanConnectionState = states.state
 
+    /// 诊断页用的状态快照。与 BridgeWatcher.debugStatus 保持同一套字段名,
+    /// Dart 侧不需要关心当前是哪个 owner。token 绝不进入快照;
+    /// 身份字段只截前 8 位。
+    fun debugStatus(): Map<String, Any?> {
+        val t = target
+        val bridgeId = bridgeInstallationId
+        val pending = reconnect.pendingSchedule()
+        return mapOf(
+            "state" to currentState().name,
+            "ready" to isReady(),
+            "notificationProtocol" to notificationProtocol,
+            "host" to (t?.host ?: ""),
+            "port" to (t?.port ?: 0),
+            "clientId" to (t?.clientId?.take(8) ?: ""),
+            "bridgeInstallationId" to (bridgeId?.take(8) ?: ""),
+            "eventEpoch" to (eventEpoch?.take(8) ?: ""),
+            "reconnectAttempt" to reconnect.attempt,
+            "reconnectPending" to (pending != null),
+            "reconnectDelayMs" to (pending?.delayMs ?: 0L),
+            "lastActiveAt" to lastActiveAt,
+            "cursorThrough" to (bridgeId?.let { cursors?.read(it)?.through } ?: -1L),
+        )
+    }
+
     private fun ensureNotificationLayer(context: Context, clientId: String) {
         if (gate == null) {
             val dedupe = NotificationDeduplicator.create(context)

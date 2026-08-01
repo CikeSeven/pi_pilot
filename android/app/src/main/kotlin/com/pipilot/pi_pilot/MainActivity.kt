@@ -146,6 +146,12 @@ class MainActivity : FlutterActivity() {
                     "connectionMetrics" -> {
                         result.success(ConnectionMetrics.dump(applicationContext))
                     }
+                    // 诊断页一次拿全:当前 owner、两个 owner 各自的状态、
+                    // FGS 模式与配额时间戳。快照永远没有 token,身份只截 8 位,
+                    // 导出到 issue 也不泄凭据。
+                    "ownerStatus" -> {
+                        result.success(OwnerStatus.dump(applicationContext))
+                    }
                     "clearConnectionMetrics" -> {
                         ConnectionMetrics.clear(applicationContext)
                         result.success(null)

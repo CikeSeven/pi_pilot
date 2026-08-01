@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:pi_pilot/ui/settings/diagnostics_page.dart';
 import 'package:pi_pilot/ui/settings/settings_screen.dart';
 import 'package:pi_pilot/ui/settings/settings_sections.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
@@ -24,7 +25,7 @@ void main() {
     await settle(tester);
 
     expect(find.text('连接'), findsNothing);
-    for (final title in ['外观', '通知与快捷指令', '模型与行为', '当前会话', '关于']) {
+    for (final title in ['外观', '通知与快捷指令', '模型与行为', '当前会话', '关于', '诊断']) {
       expect(find.text(title), findsOneWidget, reason: '缺少入口:$title');
     }
   });
@@ -37,6 +38,7 @@ void main() {
       '模型与行为': BehaviorPage,
       '当前会话': SessionInfoPage,
       '关于': AboutPage,
+      '诊断': DiagnosticsPage,
     };
 
     await tester.pumpWidget(wrap());

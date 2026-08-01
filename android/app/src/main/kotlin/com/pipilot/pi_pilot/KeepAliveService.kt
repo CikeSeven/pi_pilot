@@ -58,6 +58,10 @@ class KeepAliveService : Service() {
 
         fun quotaExhaustedAtMillis(): Long = quotaExhaustedAt
 
+        /// 诊断页用:FGS 视角的桥接连接状态。它由两个 owner 与 Dart 各自上报,
+        /// 三方可能短暂不一致,展示时以 owner 状态为准。
+        fun isHubConnected(): Boolean = hubConnected
+
         fun start(context: Context) {
             val intent = Intent(context, KeepAliveService::class.java).setAction(actionStart)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

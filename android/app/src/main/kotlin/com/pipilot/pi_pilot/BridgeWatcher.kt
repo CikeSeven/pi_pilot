@@ -148,6 +148,27 @@ object BridgeWatcher {
     @Synchronized
     fun isSubscriptionReady(): Boolean = subscriptionReady
 
+    /// 诊断页用的状态快照。token 绝不进入快照;
+    /// 身份字段只截前 8 位 —— 它们经 mDNS 广播不算机密,
+    /// 但完整值对诊断没有增量价值,还会撑大导出的 JSON。
+    fun debugStatus(): Map<String, Any?> {
+        val cfg = config
+        val bridgeId = bridgeInstallationId
+        return mapOf(
+            "running" to running,
+            "ready" to subscriptionReady,
+            "notificationProtocol" to notificationProtocol,
+            "host" to (cfg?.host ?: ""),
+            "port" to (cfg?.port ?: 0),
+            "clientId" to (cfg?.clientId?.take(8) ?: ""),
+            "bridgeInstallationId" to (bridgeId?.take(8) ?: ""),
+            "eventEpoch" to (eventEpoch?.take(8) ?: ""),
+            "reconnectAttempt" to attempt,
+            "reconnectPending" to reconnectPending,
+            "cursorThrough" to (bridgeId?.let { cursors?.read(it)?.through } ?: -1L),
+        )
+    }
+
     private fun ensureNotificationLayer(context: Context, clientId: String) {
         val app = context.applicationContext
         if (gate == null) {
