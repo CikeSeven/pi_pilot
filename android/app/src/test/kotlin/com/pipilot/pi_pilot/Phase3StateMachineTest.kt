@@ -59,6 +59,25 @@ class ReconnectControllerTest {
         assertEquals(ReconnectController.State.STOPPED, c.state)
     }
 
+    /// coordinator.stop() 的幂等守卫读的就是这三个条件。
+    /// 真机日志里 Dart 一次生命周期切换会连发 3-6 次 stopWatcher,
+    /// 守卫靠它们判定「已经停完了,无需再跑一遗」。
+    @Test
+    fun `repeated stop keeps stopped state and no pending`() {
+        val c = newController()
+        val gen = c.start()
+        c.onConnectionLost(gen)
+        assertNotNull("precondition: a schedule is pending", c.pendingSchedule())
+        c.stop(gen)
+        // 首次 stop 后守卫条件已全部成立。
+        assertEquals(ReconnectController.State.STOPPED, c.state)
+        assertNull("stop must clear pending", c.pendingSchedule())
+        // 重复 stop 不得把状态挖回 PENDING/RUNNING,也不得重新排期。
+        repeat(5) { c.stop(gen) }
+        assertEquals(ReconnectController.State.STOPPED, c.state)
+        assertNull("repeated stop must not re-arm", c.pendingSchedule())
+    }
+
     @Test
     fun `network recovery fires immediately and resets backoff`() {
         val c = newController()

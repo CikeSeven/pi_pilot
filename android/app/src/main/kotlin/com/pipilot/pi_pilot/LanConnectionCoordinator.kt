@@ -133,6 +133,15 @@ object LanConnectionCoordinator {
 
     fun stop(reason: String) {
         synchronized(this) {
+            // 幂等守卫。Dart 侧一次前台/后台切换会连发多次 stopWatcher
+            // (生命周期 inactive/paused/hidden 各一次,加 identity 监听器走 target=null
+            // 分支),实测 100ms 内 3-6 次。无守卫时每次都重跑全流程并写日志,
+            // 既污染诊断(真正的停止原因被淡化),也白做四项清理。
+            // 与 BridgeWatcher.stop() 的守卫保持同一模式。
+            val idle = reconnect.state == ReconnectController.State.STOPPED &&
+                webSocket == null &&
+                reconnect.pendingSchedule() == null
+            if (idle) return
             val gen = reconnect.generation
             reconnect.stop(gen)
             states.transitionTo(gen, LanConnectionState.DISCONNECTED, reason)

@@ -494,6 +494,22 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       if (next == PiConnStatus.connected) {
         _cancelConnectionLostNotification();
         _syncForeground();
+        // 后台重连成功后补拉一次原生 owner,作为显式恢复信号。
+        //
+        // 先说清一个容易误判的点:_startWatcher 只在生命周期切换与
+        // watcher 身份变化两处被调,而身份监听器**确实**覆盖
+        // selectedSourceId 的 null -> 原值 回归(那也是一次身份变化),
+        // 所以「源没了又回来」这类恢复本就有人管,此处不是为它兜底。
+        //
+        // 加这一路的真正理由:「owner 已停」与「Dart 已连上」之间没有任何
+        // 直接联系。任何停掉 owner 却不伴随后续身份变化的路径(例如通知
+        // 开关关掉再打开、或身份稳定期间下发的停止),都会让 owner 一直
+        // 停着,而应用全程在后台又没有生命周期切换可依赖。连接恢复是
+        // 最可靠的「该重新交接了」信号,直接用它,不再只依赖间接信号。
+        //
+        // 重复调用安全:coordinator 的 start(sameTarget=true) 快速路径保留
+        // 现有 socket,不重建连接、不递增世代。
+        if (_inBackground) unawaited(_startWatcher());
       } else if (prev == PiConnStatus.connected) {
         unawaited(
           NotificationService.instance.logDiagnostic(
