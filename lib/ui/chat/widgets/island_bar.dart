@@ -60,8 +60,8 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     final screenW = MediaQuery.sizeOf(context).width;
     // Timer 也占位置:不算它的话文案会被它挤成 ellipsis。
     final timerW = hasTimer ? 68.0 : 0.0;
-    // 36 = 水平 padding 18*2;最窄 120,最宽屏宽 65%(留位置给右侧内容)。
-    return (tp.width + 36 + timerW).clamp(120.0, screenW * 0.65);
+    // 36 = 水平 padding 18*2;最窄 120,最宽屏宽 78%(留位置给右侧内容)。
+    return (tp.width + 36 + timerW).clamp(120.0, screenW * 0.78);
   }
 
   void _toggle() {

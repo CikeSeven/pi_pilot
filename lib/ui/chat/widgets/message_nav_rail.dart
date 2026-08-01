@@ -103,8 +103,8 @@ class _MessageNavRailState extends State<MessageNavRail>
   late final Ticker _focusTicker = createTicker(_tickFocus);
   final _smoothFocus = ValueNotifier<double>(0);
   double _targetFocus = 0;
-  static const _kFollowScroll = 0.20;
-  static const _kFollowDrag = 0.38;
+  static const _kFollowScroll = 0.28;
+  static const _kFollowDrag = 0.48;
 
   void _setFocusTarget(double t) {
     _targetFocus = t.clamp(0.0, 1.0);

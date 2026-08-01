@@ -128,7 +128,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     final position = _scroll.position;
     final extent = position.hasContentDimensions ? position.maxScrollExtent : 0;
     if (extent <= 0) return 0;
-    final rowF = (position.pixels / extent) * (rows - 1);
+    // 视口中心而不是顶部:滚动时中心更稳定,
+    // 不会因为顶部一行刚滚出/滚入就跳变。
+    final center = position.pixels + position.viewportDimension / 2;
+    final rowF = (center / extent) * (rows - 1);
     if (rowF <= anchors.first.rowIndex) return 0;
     if (rowF >= anchors.last.rowIndex) return 1;
     for (var j = 0; j + 1 < anchors.length; j++) {
@@ -185,7 +188,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
           position.maxScrollExtent,
         ),
       );
-      _refineJump(8);
+      _refineJump(16);
     });
   }
 
@@ -210,6 +213,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
         setState(() => _pendingJumpRow = null);
         return;
       }
+      // 16 帧:行高不均时粗跳偏差大,给足帧数让目标构建出来。
       if (remaining <= 0) {
         setState(() => _pendingJumpRow = null);
         return;
