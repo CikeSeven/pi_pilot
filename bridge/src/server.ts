@@ -723,6 +723,26 @@ function noteStreamingFromEvent(sourceId: string, eventType: unknown): void {
   notifySessionsChanged();
 }
 
+/// 权威快照显示某个源正在工作时,同步内存边沿状态并让 detector 领养代次。
+///
+/// 为什么必须领养:noteStreamingFromEvent 只认 desktop_event 的
+/// agent_start/agent_end,而 Bridge 在任务中途重启后,内存里的
+/// streamingBySource 与 detector 代次表都是空的,pi 重连只补发快照、
+/// 不会重发 agent_start。此时若不建立代次归属,后续 agent_end 到达时
+/// onTaskEnd 找不到在飞代次,按约定返回 undefined(绝不凭空造完成事件),
+/// 于是那条完成通知整个消失。
+///
+/// 症状极具误导性:常驻通知的「工作中」计数直读快照(见 isSourceStreaming),
+/// 与 detector 无关,所以会话状态会如实更新成空闲,只有通知不来 ——
+/// 看起来像投递失败,实际是生成端从未产出。
+///
+/// 领养只建立「recovery-」前缀的代次归属,自己不发通知;
+/// 已有在飞代次时幂等(直接返回原代次 id)。
+function adoptStreamingFromSnapshot(sourceId: string): void {
+  streamingBySource.set(sourceId, true);
+  notificationDetector.adoptStreamingSource(sourceId);
+}
+
 /// op 幂等注册表:clientId 级 opId → 状态。内存表 + 侧车 JSONL
 /// (bridge/data/op-log.jsonl,10k 行 ring)。fire-and-forget 的 prompt/abort
 /// 没有响应,断线重连后手机靠 hub_op_status 对账:查得到=已受理,
@@ -2832,6 +2852,9 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
     );
     sources.setSnapshot(sourceId, snapshot);
     desktopOfflineSince.delete(sourceId);
+    // 注册路径同样要领养。Bridge 在任务中途重启后,pi 重连走的是
+    // desktop_register(不是 desktop_snapshot),这才是现实中最常见的入口。
+    if (snapshot.state.isStreaming === true) adoptStreamingFromSnapshot(sourceId);
     sendObject(desktop.ws, {
       type: "desktop_registered",
       hubId: sources.hubId,
@@ -2868,7 +2891,7 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
         desktop.claimedSessionId = nextSessionId;
         void reconcileDesktopClaim(sourceId, nextSessionId);
       }
-      if (snapshot.state.isStreaming === true) streamingBySource.set(sourceId, true);
+      if (snapshot.state.isStreaming === true) adoptStreamingFromSnapshot(sourceId);
       broadcastSnapshotAnnounce(sourceId, snapshot);
       notifySourcesChanged();
       return;
