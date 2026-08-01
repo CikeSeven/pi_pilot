@@ -42,9 +42,27 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     duration: const Duration(milliseconds: 380),
   );
 
-  static const _collapsedW = 200.0;
   static const _collapsedH = 42.0;
   static const _expandedH = 108.0;
+
+  /// 收起态宽度随文案自适应:短文案窄、长文案宽,
+  /// working-activity 的长状态行不再被 ellipsis 截断。
+  double _measureCollapsedW(
+    BuildContext context,
+    String text, {
+    bool hasTimer = false,
+  }) {
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: Theme.of(context).textTheme.labelLarge),
+      maxLines: 1,
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final screenW = MediaQuery.sizeOf(context).width;
+    // Timer 也占位置:不算它的话文案会被它挤成 ellipsis。
+    final timerW = hasTimer ? 68.0 : 0.0;
+    // 36 = 水平 padding 18*2;最窄 120,最宽屏宽 65%(留位置给右侧内容)。
+    return (tp.width + 36 + timerW).clamp(120.0, screenW * 0.65);
+  }
 
   void _toggle() {
     setState(() => _expanded = !_expanded);
@@ -120,6 +138,12 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
 
     final screenW = MediaQuery.sizeOf(context).width;
     final topPad = MediaQuery.paddingOf(context).top;
+    // 收起态宽度随文案自适应(working-activity 长文案不被截断)。
+    final collapsedW = _measureCollapsedW(
+      context,
+      _workStatus(state) ?? _title(state),
+      hasTimer: state.isStreaming && state.activityStatus == null,
+    );
 
     return Stack(
       children: [
@@ -144,7 +168,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               final collapsedOpacity = 1 - (t / 0.35).clamp(0.0, 1.0);
               final expandedOpacity = ((t - 0.55) / 0.45).clamp(0.0, 1.0);
               return Container(
-                width: _collapsedW + (screenW - 24 - _collapsedW) * t,
+                width: collapsedW + (screenW - 24 - collapsedW) * t,
                 height: _collapsedH + (_expandedH - _collapsedH) * t,
                 clipBehavior: Clip.antiAlias,
                 decoration: BoxDecoration(

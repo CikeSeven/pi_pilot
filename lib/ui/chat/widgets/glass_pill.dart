@@ -18,11 +18,18 @@ class GlassPill extends StatelessWidget {
     required this.child,
     this.onTap,
     this.expandedChild,
+    this.fillWidth = true,
   });
 
   /// 摘要行。始终占一行(34dp),是胶囊的「标题」。
   final Widget child;
   final VoidCallback? onTap;
+
+  /// 外壳是否占满可用宽度。
+  ///
+  /// 工具组胶囊要撑满(内部有 Spacer 撑开左右两端);
+  /// 思考胶囊只需裹住短文案,传 false 收缩到内容宽度。
+  final bool fillWidth;
 
   /// 展开内容。非空即视为展开态:胶囊长高把它裹进去,圆角收成中等圆角。
   ///
@@ -71,7 +78,9 @@ class GlassPill extends StatelessWidget {
         child: ClipRRect(
           borderRadius: radius,
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment: fillWidth
+                ? CrossAxisAlignment.stretch
+                : CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
               // 只有摘要行可点:展开内容里有代码块、可滚动输出井、问卷按钮,
@@ -91,7 +100,10 @@ class GlassPill extends StatelessWidget {
                     horizontal: 12,
                     vertical: 7,
                   ),
-                  alignment: Alignment.centerLeft,
+                  // fillWidth=false 时不设 alignment:有 alignment 的
+                  // Container 会无视 start 强制扩到最大宽度,
+                  // 思考胶囊的 shrink-wrap 会被它撑回去。
+                  alignment: fillWidth ? Alignment.centerLeft : null,
                   child: child,
                 ),
               ),

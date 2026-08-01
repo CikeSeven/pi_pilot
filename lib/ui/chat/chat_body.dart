@@ -684,7 +684,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   ),
                 ),
               // 消息导航轨道:刻度=用户消息,滚动时左侧弹出。
-              if (state.hasSession && _navAnchors.length >= 2)
+              // >= 1 就显示:短对话也有位置指示,不玩消失。
+              if (state.hasSession && _navAnchors.isNotEmpty)
                 Positioned(
                   left: 0,
                   top: widget.topPadding + 32,
