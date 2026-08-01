@@ -1414,6 +1414,16 @@ Bridge 侧 `P2pHost` 本就常驻 Rendezvous 房间并把每条 DataChannel 注�
 system_push_wake_v1）用户已明确不做；WorkManager 死亡轮询同理不建（只是恢复信号，
 拉取仍要等 App 启动，而启动时的 cursor 补偿已存在）。
 
+**45 分钟持续负载验收**（2026-08-02 05:49–06:36，强制 P2P 打洞、App 后台、
+注入 40 轮任务完成事件 × 70s 间隔，Xiaomi 13 HyperOS 后台无限制豁免下）：
+40/40 事件全部送达且 ack 精确跟随（113→153，零积压），引擎展示延迟
+min 8ms / median 18ms / P95 33ms / max 34ms（n=40），端到端（注入→展示）
+约 1–3s；零 MIUI 冻结（无 activity gap）、零重复通知（无 Dart 补发线）、
+零 onFailure/onClosed、零半开砍线、注入器零重连（attempts=1）。
+39 DISPLAY_CONFIRMED + 1 DISPLAY_REQUESTED（仍推 cursor，正常）。
+对照 LAN 45 分钟轮（15 次半开砍线 + 8 次重连）：本轮 P2P over TURN 全程
+零砍线零重连，DataChannel 在后台豁免下比 LAN socket 更稳。
+
 **Phase 4 状态**：remote_hint_v1 已完成并验收；system_push_wake_v1 不做（用户否决）。
 Phase 4 就此收口。
 
