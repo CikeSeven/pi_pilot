@@ -162,6 +162,22 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   bool _watcherActive = false;
   final _connectionNotificationOperations = NotificationOperationSequencer();
 
+  /// 断线提醒的防抖定时器。
+  ///
+  /// 断线**立即**弹通知是错的:实测原生 owner 从断连到重连成功只要约 1 秒
+  /// (冻结解冻后 onFailure 迟到 → 重连 → READY 216ms),而这条通知带震动、
+  /// 用固定 id=2,于是每次瞬态重连都白打扰用户一次。真机验收里用户明确
+  /// 反馈「还有连接失败重连的通知」。
+  ///
+  /// 改为宽限期内不打扰:超过 _connectionLostGrace 仍未恢复才提醒,
+  /// 期间恢复就直接取消,用户完全无感。
+  Timer? _connectionLostTimer;
+
+  /// 宽限期。取 20s:大于 Bridge 判半开的 30s 一半、也大于退避首档 1s 与
+  /// 冻结解冻后的典型重连耗时,足以滤掉全部瞬态断连;真正断网/关机等
+  /// 长时间失联仍会如实提醒。
+  static const _connectionLostGrace = Duration(seconds: 20);
+
   int _watcherRequestGeneration = 0;
 
   bool get _inBackground => _lifecycle != AppLifecycleState.resumed;
@@ -192,6 +208,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // 防抖定时器必须随组件销毁一起取消,否则回调会打到已 dispose 的 ref 上。
+    _connectionLostTimer?.cancel();
+    _connectionLostTimer = null;
     NotificationService.instance.watcherReady.removeListener(
       _onWatcherReadyChanged,
     );
@@ -348,19 +367,30 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   void _notifyConnectionLost() {
     if (!_enabled || !_inBackground) return;
-    unawaited(
-      _connectionNotificationOperations.enqueue(
-        () => NotificationService.instance.show(
-          id: connectionLostNotificationId,
-          title: '与 bridge 的连接已断开',
-          body: '将自动重连',
-          vibrate: _vibrate,
+    // 防抖:先起定时器,宽限期内恢复就不打扰。重复断线只保留最后一次计时。
+    _connectionLostTimer?.cancel();
+    _connectionLostTimer = Timer(_connectionLostGrace, () {
+      _connectionLostTimer = null;
+      // 到点再确认一次:期间可能已恢复,或应用已回前台。
+      if (!mounted || !_enabled || !_inBackground) return;
+      if (ref.read(piSessionProvider).status == PiConnStatus.connected) return;
+      unawaited(
+        _connectionNotificationOperations.enqueue(
+          () => NotificationService.instance.show(
+            id: connectionLostNotificationId,
+            title: '与 bridge 的连接已断开',
+            body: '将自动重连',
+            vibrate: _vibrate,
+          ),
         ),
-      ),
-    );
+      );
+    });
   }
 
   void _cancelConnectionLostNotification() {
+    // 计时中的提醒一并取消,否则重连成功后宽限期到点仍会弹出来。
+    _connectionLostTimer?.cancel();
+    _connectionLostTimer = null;
     unawaited(
       _connectionNotificationOperations.enqueue(
         () => NotificationService.instance.cancelById(

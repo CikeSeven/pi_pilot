@@ -286,6 +286,9 @@ object LanConnectionCoordinator {
         webSocket = null
         setReadyLocked(false)
         states.transitionTo(gen, LanConnectionState.DISCONNECTED, reason)
+        // 如实下调常驻通知。FGS 通知带 setOnlyAlertOnce(true),只换文案不响铃,
+        // 不会因为瀑布式重连而变成打扰。
+        appContext?.let { KeepAliveService.updateConnection(it, false) }
         val s = reconnect.onConnectionLost(gen) ?: return
         ConnectionMetrics.record(
             appContext ?: return,
@@ -488,6 +491,9 @@ object LanConnectionCoordinator {
                     mapOf("latencyMs" to latency),
                 )
                 WatcherDiagnostics.log("coordinator READY(gen=$gen latency=${latency}ms)")
+                // 常驻通知必须跟真实连接走。watcher 在 hello 成功处就调了这个,
+                // coordinator 之前漏接,结果后台断连时通知欄还写着「已连接」。
+                appContext?.let { KeepAliveService.updateConnection(it, true) }
                 setReadyLocked(true)
                 ackCursor(webSocket)
             }
@@ -609,15 +615,24 @@ object LanConnectionCoordinator {
             accumulator.acceptSkipped(range.optLong("from"), range.optLong("through"))
         }
         val events = frame.optJSONArray("events")
-        for (i in 0 until (events?.length() ?: 0)) {
+        val total = events?.length() ?: 0
+        // 批量追补只打扰一次:一页里除最后一条外全部静默入栈。
+        // 真机实测冻结 6 分钟后 8 条在 133ms 内逐条响铃,那是骚扰不是提醒。
+        // 后翻页时 hasMore 为真,此时连最后一条也要静默——真正的打扰留给末页。
+        val hasMore = frame.optBoolean("hasMore")
+        for (i in 0 until total) {
             val event = events?.optJSONObject(i) ?: continue
             val eventId = event.optString("eventId").takeIf { it.isNotEmpty() } ?: continue
             val sequence = event.optLong("sequence", -1L)
             if (sequence < 0) continue
-            deliverEvent("${t.clientId}\u0000$bridgeId", event)
+            deliverEvent(
+                scope = "${t.clientId}\u0000$bridgeId",
+                event = event,
+                silent = hasMore || i < total - 1,
+            )
             accumulator.accept(sequence)
         }
-        if (frame.optBoolean("hasMore")) {
+        if (hasMore) {
             webSocket.send(
                 JSONObject()
                     .put("type", "notification_next_page")
@@ -630,7 +645,7 @@ object LanConnectionCoordinator {
         ackCursor(webSocket)
     }
 
-    private fun deliverEvent(scope: String, event: JSONObject) {
+    private fun deliverEvent(scope: String, event: JSONObject, silent: Boolean = false) {
         val notificationGate = gate ?: return
         val eventId = event.optString("eventId").takeIf { it.isNotEmpty() } ?: return
         val presentation = event.optJSONObject("presentation")
@@ -642,6 +657,7 @@ object LanConnectionCoordinator {
             body = presentation?.optString("body")?.takeIf { it.isNotEmpty() },
             collapseKey = event.optString("collapseKey").takeIf { it.isNotEmpty() },
             vibrate = vibrate,
+            silent = silent,
         )
         val started = System.currentTimeMillis()
         if (type == "input_resolved") {
@@ -657,7 +673,7 @@ object LanConnectionCoordinator {
             ConnectionMetrics.record(appContext ?: return, "blocked_permission")
         }
         WatcherDiagnostics.log(
-            "coordinator deliver(id=${eventId.take(8)} state=$state ms=${System.currentTimeMillis() - started})",
+            "coordinator deliver(id=${eventId.take(8)} state=$state silent=$silent ms=${System.currentTimeMillis() - started})",
         )
         val t = target ?: return
         webSocket?.send(

@@ -23,6 +23,12 @@ data class RenderableEvent(
     /// 或取消原来那条「等待输入」,而不是新弹一条。
     val collapseKey: String?,
     val vibrate: Boolean,
+    /// 静默投递:仍然进通知栈,但不响铃不震动不弹横幅。
+    ///
+    /// 用于批量追补。冻结/断网期间积压的事件解冻后会连续到达(实测 8 条
+    /// 在 133ms 内投完),每条都独立响铃是骚扰而非提醒。批量里只让最后
+    /// 一条正常打扰,前面的静默入栈——用户仍能看到全部,但只被叫一次。
+    val silent: Boolean = false,
 )
 
 /// 所有平台通知的唯一出口。
@@ -39,6 +45,10 @@ class NativeNotificationRenderer(private val context: Context) {
         private const val TAG = "PiPilotNotifyRender"
         const val QUIET_CHANNEL_ID = "agent_events_heads_up_quiet_v3"
         const val VIBRATE_CHANNEL_ID = "agent_events_heads_up_vibrate_v3"
+
+        /// 批量追补专用。API 26+ 的响铃/横幅由渠道 importance 决定,
+        /// 单条通知无法降级,所以静默只能另开一个 IMPORTANCE_LOW 渠道。
+        const val SILENT_CHANNEL_ID = "agent_events_silent_v3"
     }
 
     private val manager: NotificationManager =
@@ -47,12 +57,17 @@ class NativeNotificationRenderer(private val context: Context) {
     /// 通知渠道是否可用。runtime permission 与渠道开关是两回事 ——
     /// 用户可以授予 POST_NOTIFICATIONS 但单独关掉某个渠道,
     /// 只查 permission 会把「渠道被关」误报成「已显示」。
-    fun channelBlocked(vibrate: Boolean): Boolean {
+    fun channelBlocked(vibrate: Boolean, silent: Boolean = false): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         ensureChannels()
-        val id = if (vibrate) VIBRATE_CHANNEL_ID else QUIET_CHANNEL_ID
-        val channel = manager.getNotificationChannel(id) ?: return false
+        val channel = manager.getNotificationChannel(channelIdFor(vibrate, silent)) ?: return false
         return channel.importance == NotificationManager.IMPORTANCE_NONE
+    }
+
+    private fun channelIdFor(vibrate: Boolean, silent: Boolean): String = when {
+        silent -> SILENT_CHANNEL_ID
+        vibrate -> VIBRATE_CHANNEL_ID
+        else -> QUIET_CHANNEL_ID
     }
 
     fun notificationsEnabled(): Boolean = manager.areNotificationsEnabled()
@@ -64,7 +79,7 @@ class NativeNotificationRenderer(private val context: Context) {
     /// 这是「允许重复投递但只打扰一次」的实现基础。
     fun display(event: RenderableEvent, notificationId: Int): Int {
         ensureChannels()
-        val channelId = if (event.vibrate) VIBRATE_CHANNEL_ID else QUIET_CHANNEL_ID
+        val channelId = channelIdFor(event.vibrate, event.silent)
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(context, channelId)
         } else {
@@ -77,14 +92,30 @@ class NativeNotificationRenderer(private val context: Context) {
             .setContentText(event.body ?: "点击查看结果")
             .setContentIntent(openAppIntent(event))
             .setCategory(Notification.CATEGORY_MESSAGE)
-            .setPriority(Notification.PRIORITY_MAX)
+            // 静默投递降到 DEFAULT:PRIORITY_MAX 会强推横幅,批量追补时
+            // 连续弹八次横幅比响铃更烦人。
+            .setPriority(if (event.silent) Notification.PRIORITY_DEFAULT else Notification.PRIORITY_MAX)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             // 重复投递静默更新的开关。没有它,第二次 notify 会再震一次。
             .setOnlyAlertOnce(true)
+            .apply {
+                // API 26 以下没有渠道,静默只能在通知层手动清掉声音与震动。
+                if (event.silent && Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                    @Suppress("DEPRECATION")
+                    setDefaults(0)
+                    @Suppress("DEPRECATION")
+                    setSound(null)
+                    @Suppress("DEPRECATION")
+                    setVibrate(null)
+                }
+            }
             .build()
         manager.notify(notificationId, notification)
-        Log.i(TAG, "displayed ${shortId(event.eventId)} as id=$notificationId type=${event.type}")
+        Log.i(
+            TAG,
+            "displayed ${shortId(event.eventId)} as id=$notificationId type=${event.type} silent=${event.silent}",
+        )
         return notificationId
     }
 
@@ -155,6 +186,21 @@ class NativeNotificationRenderer(private val context: Context) {
                 },
             )
         }
+        if (manager.getNotificationChannel(SILENT_CHANNEL_ID) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    SILENT_CHANNEL_ID,
+                    "批量补送提醒（静默）",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "冻结或断网期间积压的提醒，批量补送时不重复响铃"
+                    enableVibration(false)
+                    enableLights(false)
+                    setSound(null, null)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                },
+            )
+        }
     }
 }
 
@@ -180,7 +226,7 @@ class NotificationGate(
             Log.i(TAG, "suppressed duplicate ${shortId(event.eventId)}")
             return DeliveryState.SUPPRESSED_DUPLICATE
         }
-        if (!renderer.notificationsEnabled() || renderer.channelBlocked(event.vibrate)) {
+        if (!renderer.notificationsEnabled() || renderer.channelBlocked(event.vibrate, event.silent)) {
             // 被阻塞是终态:再重试也不会显示。但 cursor 仍可安全推进,
             // 因为「已安全处理」不等于「用户看见了」。
             deduplicator.markState(scope, event.eventId, DeliveryState.BLOCKED)

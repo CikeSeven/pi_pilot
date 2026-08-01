@@ -533,17 +533,21 @@ object BridgeWatcher {
         }
 
         val events = frame.optJSONArray("events")
-        for (i in 0 until (events?.length() ?: 0)) {
+        val total = events?.length() ?: 0
+        // 批量追补只打扰一次:除末页最后一条外全部静默入栈。
+        // 与 coordinator 保持一致——否则关掉 flag 就退回逐条轰炸。
+        val hasMore = frame.optBoolean("hasMore")
+        for (i in 0 until total) {
             val event = events?.optJSONObject(i) ?: continue
             val eventId = event.optString("eventId").takeIf { it.isNotEmpty() } ?: continue
             val sequence = event.optLong("sequence", -1L)
             if (sequence < 0) continue
-            deliverEvent(scope, event, current.vibrate)
+            deliverEvent(scope, event, current.vibrate, silent = hasMore || i < total - 1)
             accumulator.accept(sequence)
         }
 
         // 还有分页就继续拉,不能停在半路 —— 停下等于漏掉后面的完成事件。
-        if (frame.optBoolean("hasMore")) {
+        if (hasMore) {
             webSocket.send(
                 JSONObject()
                     .put("type", "notification_next_page")
@@ -556,7 +560,12 @@ object BridgeWatcher {
         ackCursor(webSocket)
     }
 
-    private fun deliverEvent(scope: String, event: JSONObject, vibrate: Boolean) {
+    private fun deliverEvent(
+        scope: String,
+        event: JSONObject,
+        vibrate: Boolean,
+        silent: Boolean = false,
+    ) {
         val gate = gate ?: return
         val eventId = event.optString("eventId")
         val type = event.optString("type")
@@ -573,6 +582,7 @@ object BridgeWatcher {
             body = body,
             collapseKey = collapseKey,
             vibrate = vibrate,
+            silent = silent,
         )
         if (type == "input_resolved") {
             // 等待输入已被处理:撤掉原来那条提醒,不新弹一条。
@@ -582,7 +592,7 @@ object BridgeWatcher {
         }
         val state = gate.deliver(scope, renderable)
         WatcherDiagnostics.log(
-            "deliver end(id=${eventId.take(8)} state=$state ms=${System.currentTimeMillis() - deliverStartedAt})",
+            "deliver end(id=${eventId.take(8)} state=$state silent=$silent ms=${System.currentTimeMillis() - deliverStartedAt})",
         )
         if (state == DeliveryState.DISPLAY_REQUESTED || state == DeliveryState.DISPLAY_CONFIRMED) {
             postedNotificationIds.add(StableNotificationId.forEvent(collapseKey ?: eventId))
