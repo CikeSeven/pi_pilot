@@ -8,15 +8,17 @@
 
 关联计划：[Android 局域网后台连接与通知优化执行计划](lan-plan.md)
 
-> **本文已降级为远程/推送专项参考，不再作为独立实施计划。**
+> **本文已降级为历史参考，其核心架构已被取代。**
 > 实施路径、可靠性口径、分期与验收以
-> [统一稳定方案](stable-plan.md) 为准。本文的 Relay 引导鉴权、installation/publisher
-> 凭据分离、密钥轮换等技术细节仍然有效并被新方案引用；但以下四处已被新方案修正，
-> 阅读时请以 `stable-plan.md` 为准：
+> [统一稳定方案](stable-plan.md) 为准。2026-08-01 起，本文的
+> 「新建 notification-relay + FCM + AES-GCM envelope + bootstrap ticket」
+> 架构**已被 stable-plan.md §G 的 P2P 唤醒设计整体取代**（复用 Rendezvous
+> 转发无内容唤醒信号，内容走已有 P2P 加密通道拉取），不再作为实施依据；
+> 本文仅保留其鉴权思路与威胁建模作为历史参考。此前已确认的四处理论修正：
 >
 > 1. §2.3 的「同一 eventId 最多显示一次」exactly-once 口径不可实现（见 stable-plan §2）。
 > 2. §5.2 的 envelope 未约束 FCM 4 KiB 上限，且用绝对 `expiresAt` 依赖设备时钟
->    （见 stable-plan §13.1、§5.4）。
+>    （随架构一并废弃）。
 > 3. §8.2 把 receipt 上传当作及时路径，未考虑 Android 16 的 job quota 约束
 >    （见 stable-plan §4.3）。
 > 4. §9/§15.3 只要求测试 FGS 6 小时 timeout，未定义 timeout 后的降级状态

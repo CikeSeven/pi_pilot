@@ -3,9 +3,11 @@
 日期：2026-08-01
 状态：Phase 1-2（局域网后台稳定性改造）已实施并完成真机验收，标记为**完善**；
       Phase 3 原生 LAN owner 已在 `native_lan_owner_v1` flag（默认关）后实施，
-      待真机有限验收；connectedDevice 迁移与 Phase 4-5 按决策点暂不启动
+      待真机有限验收；Phase 4 已于 2026-08-01 重设计为 **P2P 唤醒兜底**
+      （复用 Rendezvous，废弃 Relay/FCM 方案，见 §G），实施未启动；
+      connectedDevice 迁移与 Phase 5 按决策点暂不启动
 分支：`background-notification-optimization`
-范围：Bridge 事件持久化、Android 原生通知与连接 owner、LAN 直连、FCM/Relay 兜底、P2P 前台数据面
+范围：Bridge 事件持久化、Android 原生通知与连接 owner、LAN 直连、P2P 唤醒兜底、P2P 前台数据面
 实施范围说明：本分支已落地 Phase 1-2 的实现代码与验收记录；Phase 3 代码已在 flag 后落地（默认路径行为不变），真机验收待跑；Phase 4 起仍遵循先决策后实施
 
 ## 0. 本文与既有文档的关系
@@ -14,11 +16,11 @@
 |---|---|
 | 本文 `stable-plan.md` | 唯一推荐实施路径，分期、口径、验收以本文为准 |
 | `lan-plan.md` | LAN 专项参考：mDNS/NSD、NetworkCallback、地址自愈细节 |
-| `p2p-plan.md` | 远程专项参考：Relay 引导鉴权、FCM envelope、密钥轮换细节 |
+| `p2p-plan.md` | 历史参考：其 Relay/FCM 架构已被本文 2026-08-01 的 P2P 唤醒设计取代（§G），仅保留其鉴权与威胁建模思路 |
 
 两份旧文档不再作为独立实施计划。它们的技术细节仍然有效且可被引用，但只要与本文冲突，
 以本文为准。本文同时修正它们的三处硬错误（可靠性口径、Bridge 身份迁移缺失、target SDK
-事实错误），并补齐 FGS timeout 行为、FCM payload 预算和 LAN/FCM 竞态语义。
+事实错误），并补齐 FGS timeout 行为与 LAN/唤醒竞态语义。
 
 改动这三份文档时的规则：技术细节下沉到专项文档，口径、分期和验收只在本文维护，避免同
 一决策出现三份不一致的副本。
@@ -56,7 +58,7 @@ Phase 3  原生 LAN connection owner + connectedDevice FGS
    |
    +---- 若此处已满足 SLO ----> 停止。不做 Phase 4/5
    |
-Phase 4  FCM / Relay 兜底（离网、远程、进程被回收）
+Phase 4  P2P 唤醒兜底（离网、远程、进程被回收；复用 Rendezvous，不依赖 GMS）
    |
    +---- 若此处已满足 SLO ----> 停止。不做 Phase 5
    |
@@ -102,7 +104,7 @@ Android 上 `NotificationDeduplicator.claim()`、`NotificationManager.notify()` 
 | 层级 | 承诺 | 强度 |
 |---|---|---|
 | Bridge durable event | 保留期内已 fsync 的事件不丢，可通过 cursor 100% 补齐 | 硬保证 |
-| 投递（LAN / FCM / Dart） | at-least-once，允许重复、乱序、延迟 | 显式允许重复 |
+| 投递（LAN / 唤醒+P2P / Dart） | at-least-once，允许重复、乱序、延迟 | 显式允许重复 |
 | 用户可见提醒 | 同一 eventId 最多打扰用户一次 | 工程保证，非原子保证 |
 | 崩溃窗口 | 允许重复投递或重试，必须可观测 | 记入指标，不算缺陷 |
 
@@ -132,7 +134,7 @@ receipt_uploaded    -- 显示回执已送达 Bridge（允许显著延迟）
 
 - `display_requested` 不代表成功。渠道被关闭、权限被撤销、系统限流都可能让通知不可见。
 - `display_confirmed` 才计入 SLO 分子。
-- `receipt_uploaded` 只用于 LAN/FCM 仲裁和指标，**不参与 cursor 推进**，允许延迟数分钟。
+- `receipt_uploaded` 只用于 LAN/唤醒仲裁和指标，**不参与 cursor 推进**，允许延迟数分钟。
   理由见 §7.3：Android 16 起 FGS 内并发的 WorkManager/JobScheduler 作业仍受各自 job
   quota 约束，回执上传不能被当作可靠性前提。
 
@@ -144,7 +146,8 @@ receipt_uploaded    -- 显示回执已送达 Bridge（允许显著延迟）
 |---|---|---|
 | 事件不丢 | 保留期内 100% 可 cursor 补齐 | 已 fsync 且 App 再次连接 |
 | LAN 可见延迟 | P95 <= 1s，99% <= 5s | owner READY、权限正常、LAN 稳定 |
-| FCM 可见延迟 | P95 <= 10s，99% <= 60s | 设备在线、GMS 健康、权限正常 |
+| 唤醒+P2P 可见延迟 | P95 <= 15s，99% <= 60s | 设备在线、后台豁免有效、Rendezvous 可达 |
+| 轮询兜底延迟 | <= 15 分钟 | 进程已死、WorkManager 配额正常 |
 | 恢复延迟 | P95 <= 10s，99% <= 30s | 网络已可用、Bridge 可发现、凭据有效 |
 | 重复打扰率 | 稳态 0；崩溃窗口单独统计 | 稳定 ID + onlyAlertOnce |
 | 长时稳定 | 8h 无 silent stuck | Pixel / One UI / HyperOS 真机 |
@@ -273,7 +276,7 @@ adb reboot
 
 - receipt 上传必须按「可延迟、不保证及时」设计。
 - receipt 不得参与 cursor 推进（已在 §2.3 固化）。
-- LAN/FCM 仲裁不能依赖 receipt 及时返回（见 §8）。
+- LAN/唤醒仲裁不能依赖 receipt 及时返回（见 §8）。
 - 若确实需要及时的大流量传输，评估 user-initiated data transfer job，而不是普通 WorkManager。
 
 ## 5. 事件模型
@@ -393,7 +396,7 @@ SQLite 构建依赖：
 3. 未过期业务事件。
 4. installation ack 与 delivery state。
 5. LAN subscription 从空开始，等客户端重连后按 cursor 补齐。
-6. Relay/push pending 独立恢复，**不阻塞** LAN 与本地路径启动。
+6. 唤醒 pending 独立恢复，**不阻塞** LAN 与本地路径启动。
 
 ### 6.5 建议文件
 
@@ -502,7 +505,7 @@ notification_cursor_expired {
 - 权威 session snapshot 只能恢复当前状态，**不能声称恢复已过期的完成边沿**。
 - rebase 后本地 cursor 原子写入，不得在崩溃窗口跳过未处理事件。
 
-## 8. LAN / FCM 仲裁（承认竞态存在）
+## 8. LAN / 唤醒仲裁（承认竞态存在）
 
 ### 8.1 旧方案的问题
 
@@ -514,20 +517,21 @@ notification_cursor_expired {
 
 ### 8.2 新语义：竞态是允许的，重复不是缺陷
 
-明确承认：**LAN 已显示但 receipt 迟到时，FCM 仍可能被发送，这是允许的行为。**
+明确承认：**LAN 已显示但 receipt 迟到时，唤醒信号仍可能被发出，这是允许的行为。**
 
 Bridge 侧规则：
 
 - 对每个 `eventId + installationId + deliveryGeneration` 做**单飞调度**，同一组合永不并发
-  排两次 publish。
+  排两次唤醒。
 - 收到 `display_requested` 或 `display_confirmed` receipt 时，取消**尚未发出**的 fallback。
-- 已经发出的 fallback **不撤回**，也不视为错误。
+- 已经发出的唤醒**不撤回**，也不视为错误。
 - fallback 触发原因必须记录原因码：`no_ready_subscription` / `lan_send_failed` /
   `receipt_timeout` / `installation_offline`。
 
 Android 侧规则：
 
-- 迟到的 FCM 落到同一 `stableHash(eventId)` 通知 ID，配合 `onlyAlertOnce` 静默更新。
+- 迟到的唤醒只是多触发一次按需 P2P 回连与 cursor 拉取；事件落到同一
+  `stableHash(eventId)` 通知 ID，配合 `onlyAlertOnce` 静默更新。
 - 去重表命中 `display_confirmed` 时记 `suppressed_duplicate` 并跳过渲染。
 - 用户侧观测结果：一条通知、一次提醒。
 
@@ -537,19 +541,18 @@ Android 侧规则：
 
 - 初期设为 P95 LAN receipt 延迟的 3 倍，无数据时取 3 秒。
 - 有 1,000 个真机 LAN 事件样本后再收敛。
-- 窗口过短会增加无谓 FCM 配额消耗，过长会拖慢离网场景，两侧都要有指标。
+- 窗口过短会增加无谓的唤醒与 P2P 建连消耗，过长会拖慢离网场景，两侧都要有指标。
 
-### 8.4 不默认双发 high priority
+### 8.4 不默认双发
 
-LAN 正常时并行发送高优先级 FCM 会浪费配额与电量，并且大量高优先级消息因本地已显示而被
-去重，可能影响 FCM 对「是否产生可见通知」的评估，进而降级后续投递。因此采用 receipt 驱动
-的有界 fallback，而非永久双发。
+LAN 正常时并行发送唤醒信号会浪费 P2P 建连与电量，并且大量唤醒因本地已显示而只触发一次
+空拉取。因此采用 receipt 驱动的有界 fallback，而非永久双发。
 
 ## 9. Android 通知路径
 
 ### 9.1 统一渲染入口
 
-所有路径（原生 LAN、FCM、Dart）统一走同一入口，不再各自分配递增 ID：
+所有路径（原生 LAN、唤醒回连、Dart）统一走同一入口，不再各自分配递增 ID：
 
 ```text
 NotificationGate.deliver(event)
@@ -616,9 +619,9 @@ LAN_READY  --(dataSync 6h 配额耗尽, onTimeout)-->  QUOTA_EXHAUSTED
                                                         |
                           +-----------------------------+
                           |                             |
-                  已配置 FCM                      未配置 FCM
+                  Rendezvous 可达                 Rendezvous 不可达
                           v                             v
-                     PUSH_ONLY                     CURSOR_ONLY
+                     WAKE_ONLY                     CURSOR_ONLY
 ```
 
 `onTimeout()` 必须完成而不是简单 `stopSelf()`：
@@ -668,7 +671,7 @@ UI 文案必须与实际承诺一致。
 |---|---|---|---|---|---|
 | 恢复补偿 | 无持续后台 socket | outbox + cursor | 否 | 否 | 只承诺恢复后不漏 |
 | 纯 LAN 实时 | 原生 LAN owner | outbox + cursor | 否 | 是 | 无互联网下唯一可行的实时方案 |
-| 混合可靠 | LAN 优先，FCM 兜底 | outbox + cursor | 兜底需要 | 可选 | 默认推荐 |
+| 混合可靠 | LAN 优先，唤醒+P2P 兜底 | outbox + cursor | 兜底需要 | 可选 | 默认推荐 |
 
 ### 11.1 恢复补偿（Phase 1-2 的默认）
 
@@ -682,22 +685,24 @@ UI 文案必须与实际承诺一致。
 
 - 原生 Service 成为 LAN 通知连接 owner。
 - 需要合规的 `connectedDevice` FGS 与持续可见通知。
-- 不依赖 Relay、FCM、GMS 或 Flutter isolate。
+- 不依赖 Rendezvous、推送通道、GMS 或 Flutter isolate。
 - 被系统回收后按平台允许条件重启并 cursor 补偿。
 - force-stop、Active apps Stop、OEM 硬冻结仍不保证。
 
 ### 11.3 混合可靠（Phase 4，默认推荐）
 
 - LAN `READY` 时先走本地直连。
-- 无 ready subscription、发送失败或 receipt 超时时进入 FCM。
+- 无 ready subscription、发送失败或 receipt 超时时，Bridge 经 Rendezvous 发出唤醒信号，
+  手机按需 P2P 回连拉取事件。
 - 两条路径共用 eventId，由 §9 的统一入口去重。
-- 都失败时下次连接按 cursor 补齐。
-- Relay 不可用不影响本地 LAN 路径。
+- 都失败时下次连接按 cursor 补齐；进程已死时由 WorkManager 周期轮询兜底。
+- Rendezvous 不可用不影响本地 LAN 路径。
 
 ### 11.4 P2P 定位
 
-P2P 保持**前台/按需**数据面，默认不承诺后台持续 WebRTC。远程场景的后台通知由 FCM 兜底，
-而不是靠维持 DataChannel。这与 `p2p-plan.md` §10 的决策一致，本文不改变该结论。
+P2P 保持**按需**数据面：不承诺后台持续 WebRTC，但离网场景的后台通知内容由「唤醒 +
+按需 P2P 回连」拉取——唤醒信号只负责叫醒，DataChannel 在唤醒后临时建立、拉完即走。
+这是对 2026-08-01 之前「远程后台通知由 FCM 兜底」结论的显式修改，原因见 §G。
 
 ### 11.5 连接状态机
 
@@ -810,17 +815,29 @@ Gate：DHCP 换址、Wi-Fi 切换、Activity 销毁均无不可补偿空窗；�
 
 **决策点 B**：若纯 LAN 实时已满足需求且用户群不需要离网场景，可停止。
 
-### Phase 4：FCM / Relay 兜底
+### Phase 4：P2P 唤醒兜底（2026-08-01 重设计，废弃 Relay/FCM 方案）
 
-- [ ] 独立 `notification-relay/` 服务与最小 schema，不把 Firebase 凭据塞进 Rendezvous。
-- [ ] 一次性 bootstrap ticket + 长期 installation/publisher 凭据（细节见 `p2p-plan.md` §7.2）。
-- [ ] 最小 envelope 与 4 KiB 预算（§13）。
-- [ ] receipt 驱动的单飞 fallback 与竞态语义（§8.2）。
-- [ ] Keystore 锁定期行为（§13.2）。
-- [ ] 无 GMS installation 明确降级为纯 LAN/cursor，不套用 FCM SLO。
+设计转向的动机与决策记录见 §G。核心原则：**Rendezvous 只转发无内容的唤醒信号，
+事件内容永远走已有 P2P/LAN 加密通道拉取**——因此不需要 envelope 加密、密钥轮换、
+bootstrap ticket、FCM、或任何新建公网服务。
 
-Gate：LAN 正常时不常态双发；LAN 故障时达到推送 SLO；任意竞态下无重复打扰；Relay 看不到
-明文、pairing secret 与 hub token。
+- [ ] Rendezvous 唤醒路由：复用现有 host/guest 信令角色，Bridge 侧以 host 身份登记，
+  手机以后台 guest 长连登记；新增无内容 `wake` 帧（仅 eventId 短前缀 + bridgeId 短前缀 +
+  时间戳），不经过 source 选择与 pairing 内容。
+- [ ] Bridge fallback 触发器：无 READY 订阅 / 发送失败 / receipt 超时 → 发唤醒；
+  单飞与竞态语义同 §8.2，原因码不变。
+- [ ] Android 后台信令长连 owner：复用 Phase 3 的 ReconnectController / 网络回调 /
+  诊断模式；依赖「后台无限制」豁免保活（§F 已验证豁免后进程不冻结），豁免缺失时
+  明确降级为轮询。
+- [ ] 唤醒后按需 P2P 回连：走已有 WebRTC 配对通道连回 Bridge，用 cursor 从 outbox
+  拉取事件，经 NotificationGate 统一入口展示——这条链 Phase 1-3 已建好，**零新代码**。
+- [ ] WorkManager 周期轮询兜底（≥15 分钟间隔）：进程已死时也能补齐；醒来后同样走
+  P2P 拉取 + cursor。
+- [ ] 无 GMS 依赖：本设计天然不依赖 GMS，国内设备无需特殊处理。
+
+Gate：LAN 正常时不发唤醒；离网场景唤醒→P2P→展示端到端达到 §2.4 唤醒 SLO；
+进程死亡场景轮询在 15 分钟内补齐；任意竞态下无重复打扰；Rendezvous 看不到事件内容、
+pairing secret 与 hub token。
 
 ### Phase 5：Kotlin 原生 WebRTC owner（默认不做）
 
@@ -830,61 +847,50 @@ transport-neutral `BridgeChannel` 协议测试向量，让 Dart 与 Kotlin 共�
 
 Gate：MIUI/One UI/Pixel 8 小时锁屏测试满足 SLO 且功耗流量达标；否则不上线。
 
-## 13. FCM envelope 预算与密钥可用性
+## 13. 唤醒信号安全边界与锁定期行为
 
-### 13.1 最小 envelope 与 4 KiB 预算
+> 本节原为「FCM envelope 预算与密钥可用性」，随 Phase 4 重设计整体改写。
+> 原 4 KiB 预算、minimal envelope 降级、notification key 轮换体系不再需要：
+> 内容不经过任何第三方通道，唯一跨网传输的是无内容唤醒信号。
 
-`p2p-plan.md` §5.2 的 envelope 没给 `ciphertext` 上限。FCM data message 有 4 KiB 限制，
-`presentation.title/body` 经 AES-GCM 加密再 base64url 后膨胀约 1.4 倍，很容易撞线。
+### 13.1 唤醒信号内容上限
 
-固定预算：
+唤醒帧只允许携带：
 
-| 部分 | 预算 |
-|---|---|
-| routing metadata（schema/event_id/sequence/key_id/nonce 等） | <= 512 B |
-| ciphertext（base64url 后） | <= 2,560 B |
-| 安全余量 | >= 1 KiB |
+| 字段 | 上限 | 说明 |
+|---|---|---|
+| schema | 固定值 | 帧版本 |
+| eventId 短前缀 | 8 字符 | 用于去重与诊断，不含内容 |
+| bridgeId 短前缀 | 8 字符 | 用于路由核对 |
+| timestamp | 毫秒 | 用于过期丢弃 |
 
-超预算时的降级顺序，不允许静默截断：
+禁止出现：title/body、会话名、sourceId、token、任何 pairing 材料。唤醒信号泄密的最坏
+后果是「有人知道某时刻有个事件」，不泄露任何内容；伪造唤醒的最坏后果是手机多醒一次
+做一次空拉取，有速率限制兜底（§13.3）。
 
-1. 丢弃 `body`，只保留 `title`。
-2. 仍超限则整体降级为 **minimal envelope**：只带事件元数据与 `privacy: "generic"`，正文
-   通过 cursor 补齐。
-3. minimal envelope 显示为「PiPilot 有新事件」，用户点击后由 App 拉取完整内容。
-4. 记 `envelope_downgraded` 指标与原因码。
+### 13.2 锁定期与凭据不可用
 
-### 13.2 设备重启后 Keystore 不可用
+设备重启后首次解锁前，Keystore 包装的 P2P/LAN 凭据不可读，按需回连无法建立。处理规则：
 
-旧方案未覆盖这个真机上必然遇到的场景：设备重启后首次解锁前，若 notification key 由
-Keystore 以 `setUnlockedDeviceRequired` 或用户认证绑定保护，`PushMessagingService` 无法解密。
-
-处理规则：
-
-- 持久化**待解密的 routing metadata**（eventId、sequence、到达时间），**绝不落明文正文，
-  也不落 ciphertext 之外的任何解密中间态**。
+- 唤醒到达时只持久化 routing metadata（eventId 前缀、到达时间），**不落任何内容**。
 - 显示不含敏感内容的通用占位通知，或按产品选择先不显示。
-- 监听 `ACTION_USER_UNLOCKED`，解锁后重试解密并按 §9.1 走统一入口（稳定 ID 保证是更新而非
-  新增打扰）。
-- 重试仍失败则记 `decrypt_failed_after_unlock`，走 cursor 补偿。
-- 解密失败**不显示伪造内容**。
+- 监听 `ACTION_USER_UNLOCKED`，解锁后重试回连拉取，走 §9.1 统一入口（稳定 ID 保证是
+  更新而非新增打扰）。
+- WorkManager 轮询在凭据不可用时同样跳过并留待解锁后执行。
+- 凭据永久失效（撤销配对）时唤醒应被忽略，记 `wake_ignored_unpaired`。
 
-### 13.3 密钥与边界
+### 13.3 Rendezvous 侧边界
 
-- 每个 installation 独立随机 256-bit notification key，**不从 pairing secret 派生**——现有
-  pairing policy 只保证长度与字符类别，不能证明高熵。
-- key 只在 mobile token 完成 hub 鉴权后配置。
-- AES-256-GCM，nonce 随机 96 bit 且同 key 下绝不复用。
-- AAD 绑定 `schema + eventId + sequence + bridgeInstallationId + installationId +
-  eventType`（不含绝对过期时间，见 §5.4）。
-- envelope 带 `key_id`，轮换时保留前一 key 到最大事件 TTL 结束。
-- Relay 与 FCM 只能看到 routing metadata 与 ciphertext。
-- 严禁上传 hub token、pairing secret、notification key、会话正文或用户输入。
-- Firebase service account 只存在 Relay secret manager，最小 IAM，定期轮换。
+- Rendezvous 只做转发，不存储唤醒帧，不记录 eventId 之外的任何上下文。
+- 唤醒帧按 `installationId` 速率限制（如 30 次/小时），超限丢弃并记指标，防止伪造唤醒
+  耗尽手机电量。
+- guest 长连鉴权复用现有 P2P pairing 的设备身份，不新增凭据体系。
+- 严禁经 Rendezvous 传输 hub token、pairing secret、会话正文或用户输入。
 
 ## 14. 停止条件（本方案的核心约束）
 
 旧方案把 LAN owner、Relay、FCM 和 Kotlin WebRTC 重写绑成一条必须走完的路。本方案要求在每
-个决策点用**实测指标**决定是否继续投入。
+个决策点用**实测指标**决定是否继续投入（Phase 4 已于 2026-08-01 重设计为 P2P 唤醒，见 §G）。
 
 | 决策点 | 位置 | 若满足则 | 停止条件 |
 |---|---|---|---|
@@ -892,7 +898,7 @@ Keystore 以 `setUnlockedDeviceRequired` 或用户认证绑定保护，`PushMess
 | B | Phase 3 后 | 不做 Phase 4/5 | 纯 LAN 实时达标，且用户群不需要离网/远程通知 |
 | C | Phase 4 后 | 不做 Phase 5 | 混合模式达 SLO，无后台亚秒级双向操作需求 |
 
-**明确结论**：如果「持久事件 + cursor + 按需重连（含 FCM 唤醒）」已满足产品 SLO，就不实施
+**明确结论**：如果「持久事件 + cursor + 按需重连（含 Rendezvous 唤醒）」已满足产品 SLO，就不实施
 原生 WebRTC 后台 owner。Phase 5 的成本是双端协议漂移风险，收益仅在后台亚秒级双向交互这一
 个场景，绝大多数产品需求不在此列。
 
@@ -920,7 +926,7 @@ Android 侧：
 
 ### 15.2 竞态场景
 
-- LAN receipt 延迟到 fallback 窗口之后，FCM 与 LAN 同时到达（全部到达顺序组合）。
+- LAN receipt 延迟到 fallback 窗口之后，唤醒与 LAN 同时到达（全部到达顺序组合）。
 - 分页 catch-up 期间持续产生新事件，验证固定 tip 不被改写。
 - live buffer 溢出返回 `resync_required`，不静默丢头部。
 - 前后台 handoff 回调乱序、Activity 在 handoff 中被销毁。
@@ -957,7 +963,7 @@ App 升级、设备重启。
 - Samsung One UI：后台限制与通知渠道行为。
 - Xiaomi/Redmi HyperOS：wake lock 与 Dart 冻结重点对象。
 - 至少一台低内存设备。
-- 一台无 GMS 设备只验证明确降级，不套用 FCM SLO。
+- 无后台豁免设备只验证明确降级为轮询兜底，不套用唤醒 SLO。
 
 每个关键故障场景至少 100 个事件；发布候选累计至少 1,000 个高优先级事件；8h 场景连续 3 轮
 并记录电量、CPU、流量、socket、通知与 cursor。
@@ -977,7 +983,7 @@ App 升级、设备重启。
 通知路径：
 
 - [ ] Flutter engine 未启动时原生仍能显示。
-- [ ] 1,000 次 LAN/FCM/Dart 重复乱序注入无重复打扰。
+- [ ] 1,000 次 LAN/唤醒/Dart 重复乱序注入无重复打扰。
 - [ ] 崩溃窗口重复落在预算内且被单独统计。
 - [ ] ready 未达成时 Dart 兜底不被抑制。
 - [ ] 权限/渠道关闭有准确诊断，不滥发 high priority。
@@ -998,7 +1004,7 @@ FGS：
 
 工程质量：
 
-- [ ] Bridge、Rendezvous（及 Relay，若启用）typecheck/test 全绿。
+- [ ] Bridge、Rendezvous typecheck/test 全绿。
 - [ ] `flutter analyze` / `flutter test` 全绿。
 - [ ] Android JVM 单元测试全绿。
 - [ ] 日志与诊断通过敏感字段扫描。
@@ -1030,7 +1036,7 @@ state/generation/endpoint、NSD 与 NetworkCallback 事件、socket open/hello/a
 
 ### 16.3 用户诊断页
 
-每台设备展示：当前模式、当前 owner（Flutter / Native LAN / FCM / 无）、LAN 状态与最后 ready
+每台设备展示：当前模式、当前 owner（Flutter / Native LAN / 唤醒回连 / 无）、LAN 状态与最后 ready
 时间、已验证 endpoint 与 bridge identity、最后 event/display/receipt/cursor、通知与局域网
 权限阻塞原因、最近一次降级原因与恢复时间、FGS 配额剩余。
 
@@ -1044,7 +1050,7 @@ state/generation/endpoint、NSD 与 NetworkCallback 事件、socket open/hello/a
 2. Phase 2 统一入口内部启用，旧路径保留，通过 event ownership 仲裁确保单 owner 显示。
 3. 5% / 25% / 50% / 100% 逐步放量，每档至少 7 天或达到约定样本量（以较晚者为准）。
 4. Phase 3 的 FGS 生命周期独立放量，**禁止与通知路径同版本切换**。
-5. Phase 4 的 FCM 兜底再独立放量。
+5. Phase 4 的唤醒兜底再独立放量。
 
 ### 17.2 回滚
 
@@ -1066,7 +1072,7 @@ state/generation/endpoint、NSD 与 NetworkCallback 事件、socket open/hello/a
    key ID。
 4. 原生通知 client 使用只读 role，Bridge 拒绝其租约、prompt、abort、文件与 session 变更命令。
 5. 凭据用 Android Keystore 包装的不可导出 key，标记 no-backup，避免安装克隆身份。
-6. 日志只记 profileId/bridgeId 的短 hash，不记 token、完整 payload 或 FCM token。
+6. 日志只记 profileId/bridgeId 的短 hash，不记 token、完整 payload 或设备身份凭据。
 7. 帧大小、事件页、title/body 长度与 JSON 深度都有硬上限；解析失败不得让 Service 崩溃或
    进入快速重连循环。
 8. 删除设备时撤销 target、cursor、installation 与 publisher 凭据。
@@ -1078,11 +1084,12 @@ state/generation/endpoint、NSD 与 NetworkCallback 事件、socket open/hello/a
 | 1 | 默认模式是恢复补偿还是混合可靠；是否首次连接时让用户显式选择 | Phase 0 |
 | 2 | 通知默认只显示通用提示还是允许会话名 | Phase 0 |
 | 3 | `connectedDevice` 的 Play 合规结论与审核材料 | Phase 3 |
-| 4 | Relay 的部署主体、数据库、域名、TLS、备份与 on-call 归属 | Phase 4 |
-| 5 | 哪些渠道允许依赖 GMS；无 GMS 是否只提供纯 LAN 模式 | Phase 4 |
+| 4 | ~~Relay 的部署主体、数据库、域名、TLS、备份与 on-call 归属~~ **已解决**（2026-08-01）：Phase 4 重设计为 P2P 唤醒，复用现有 Rendezvous，不新建 Relay（§G） | Phase 4 |
+| 5 | ~~哪些渠道允许依赖 GMS；无 GMS 是否只提供纯 LAN 模式~~ **已解决**（2026-08-01）：新设计天然不依赖 GMS（§G） | Phase 4 |
 | 6 | `ws://` 的生产安全边界与 WSS pinning 排期 | Phase 3/4 |
 | 7 | 默认后台监控设备数与并发 socket 上限（旧方案的 4 未经实测） | Phase 3 |
 | 8 | fallback 窗口最终取值与调整责任人 | Phase 4 |
+| 11 | Rendezvous 部署的可用性 owner、唤醒帧速率限制取值与 guest 长连鉴权细节 | Phase 4 |
 | 9 | Bridge 全程离线时是否需要从 session/source 持久日志恢复完成事件 | 独立 Gate |
 | 10 | Android 17 走广泛 `ACCESS_LOCAL_NETWORK` 还是 NSD system picker | Android 17 前 |
 
@@ -1124,9 +1131,10 @@ rg -n "^## " docs/background-notification-optimization/stable-plan.md
 | LNP 路线 | 误用 `NEARBY_WIFI_DEVICES` | Android 16 compat opt-in，Android 17 `ACCESS_LOCAL_NETWORK` |
 | FGS timeout | 只说要测 | 显式 `QUOTA_EXHAUSTED -> PUSH_ONLY/CURSOR_ONLY` 状态机与文案更新 |
 | WorkManager | 假设 receipt 及时 | Android 16 job quota 约束，receipt 允许延迟且不推进 cursor |
-| FCM payload | 无上限 | 4 KiB 预算 + minimal envelope 降级 + Keystore 锁定期处理 |
+| FCM payload | 无上限 | 已废弃：内容不过第三方通道，唤醒信号无内容（§13） |
+| 离网兜底 | FCM + 新建 Relay + envelope 加密 | Rendezvous 唤醒 + 按需 P2P 拉取（§G） |
 | TTL | 绝对 `expiresAt` | 相对 `ttlSeconds`，不信任设备时钟 |
-| LAN/FCM 竞态 | 假设不发生 | 承认允许重复，单飞 + 稳定 ID 吸收 |
+| LAN/唤醒竞态 | 假设不发生 | 承认允许重复，单飞 + 稳定 ID 吸收 |
 | 分期 | 一条必经长路径 | 三个决策点，任一达标即停止 |
 | 原生 WebRTC | 终态目标 | 默认不做，仅在确有后台亚秒级需求时启动 |
 
@@ -1260,11 +1268,51 @@ V816 / Android 16 上它同时把包名写入 deviceidle 白名单（`user,com.p
   政策禁止不符合豁免条件者绕过电源管理，有真实拒审案例；只用不需权限的列表页 Intent。
 
 **对路线图的影响**：决策点 B 的第一条「纯 LAN 实时达标」在用户授权后即可满足，Phase 4
-（FCM/Relay 兜底）的定位从「绕过冻结」回归本来的「跨网络送达」（离网/远程/不同 LAN）。
+的定位从「绕过冻结」回归本来的「跨网络送达」（离网/远程/不同 LAN）。
 是否仍做 Phase 4 取决于产品是否需要跨网络通知，而非冻结问题。
+（编者注：Phase 4 已于同日晚些时候重设计为 P2P 唤醒兜底，见 §G。）
 
 **未验证**：三星/vivo/OPPO 等厂商组件名来自社区维护列表，新系统上存活率无真机可测，
 靠降级链宪底 + 层级名文案让用户自行辨认。荣耀 MagicOS 缺少一手证据（dontkillmyapp 无独立页）。
+
+### §G Phase 4 设计转向：废弃 Relay/FCM，改用 P2P 唤醒（2026-08-01）
+
+**起因**：用户明确否决原 Phase 4 的复杂度（「这些我都不想弄」），并要求通知必须由
+PiPilot 自己弹出（「我要的是我这个app通知」）。原设计复杂的根源是一个架构选择——
+让不可信的第三方 Relay 运送**加密内容**，因此才需要 envelope 加密、每设备密钥、
+密钥轮换、bootstrap ticket、PostgreSQL 与 Relay 运维。
+
+**新设计**（Rendezvous 只按门铃、不送信）：
+
+```text
+任务完成 → Bridge 先试 LAN（READY 订阅，秒级）
+              ↓ LAN 送不到（手机不在同一网络）
+         Bridge 经 Rendezvous 转发无内容唤醒信号（仅 eventId 短前缀）
+              ↓
+         手机被唤醒 → 走已有 WebRTC P2P 按需回连 Bridge
+              ↓
+         cursor 从 outbox 拉取事件（Phase 1）→ NotificationGate 展示（Phase 2）
+              ↓
+         通知自始至终由 PiPilot 自己发出
+```
+
+**砍掉的全部组件**：notification-relay 服务、PostgreSQL、Firebase/FCM、AES-GCM envelope
+与 4 KiB 预算、每设备 notification key 与轮换、bootstrap ticket 凭据体系、Keystore
+notification key 锁定期处理。内容不过任何第三方通道，加密层整个消失。
+
+**保留不变的**：§8 单飞/竞态语义、fallback 窗口与原因码、receipt 驱动仲裁；
+Phase 1-3 的全部代码（outbox、cursor、NotificationGate、原生 owner）零修改复用。
+
+**新增的三块**：Rendezvous 唤醒路由（复用 host/guest 信令角色，新增无内容 wake 帧）、
+Bridge fallback 触发器、Android 后台信令长连 owner（复用 Phase 3 ReconnectController
+模式）+ WorkManager 周期轮询兜底。
+
+**诚实代价**：唤醒+P2P 建连比 FCM 推送慢，SLO 从 P95 ≤10s 放宽到 P95 ≤15s（§2.4）；
+手机端保活依赖「后台无限制」豁免（§F 已验证豁免有效），豁免缺失或进程死亡时降级为
+≤15 分钟的 WorkManager 轮询；Rendezvous 需要公网可达（P2P 配对本来就用它，已存在）。
+
+**未决项变化**：#4（Relay 部署主体）与 #5（GMS 决策）随旧方案一并关闭；新增 #11
+（Rendezvous 可用性 owner、唤醒帧速率限制取值、guest 长连鉴权细节），阻塞 Phase 4 实施。
 
 ## 23. LAN 威胁模型与合规记录（Phase 0 治理欠债补账，2026-08-01）
 
