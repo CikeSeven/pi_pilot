@@ -1031,7 +1031,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     _intentionalDisconnect = true;
     _clearAllLeases();
     _tearDown();
-    _resetConversation();
+    _resetConversation(reason: 'disconnect');
     _leafId = null;
     _creds = null;
     _p2p = null;
@@ -1359,7 +1359,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     _activeSyncGeneration = gen;
     _bufferedSourceEvents.clear();
     _leafId = null;
-    _resetConversation();
+    _resetConversation(reason: 'open-session');
     state = state.copyWith(clearSource: true, sessionWaking: true);
 
     final resp = await _request('hub_open_session', {
@@ -1435,7 +1435,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     _activeSyncGeneration = gen;
     _bufferedSourceEvents.clear();
     _leafId = null;
-    _resetConversation();
+    _resetConversation(reason: 'select-source');
     state = state.copyWith(clearSource: true);
     state = state.copyWith(
       selectedSourceId: sourceId,
@@ -1691,7 +1691,7 @@ class PiSessionNotifier extends Notifier<PiState> {
         connectionScope: connectionScope,
       );
     } else if (_connectionScopeCurrent(connectionScope)) {
-      _resetConversation();
+      _resetConversation(reason: 'connect-no-source');
       state = state.copyWith(clearSource: true, sources: available);
     }
   }
@@ -1797,7 +1797,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
     unawaited(ref.read(settingsProvider.notifier).touchRecentDir(cwd));
     _leafId = null;
-    _resetConversation();
+    _resetConversation(reason: 'open-dir');
     await _sync(forceFull: true);
     return true;
   }
@@ -2030,7 +2030,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     final data = resp?['data'];
     if (data is Map && data['cancelled'] == true) return false;
     _leafId = null;
-    _resetConversation();
+    _resetConversation(reason: 'after-switch');
     await _sync(forceFull: true);
     return true;
   }
@@ -2966,7 +2966,7 @@ class PiSessionNotifier extends Notifier<PiState> {
           final cached = await store.loadRecentEntries(sourceKey);
           if (stale()) return;
           if (cached.isNotEmpty) {
-            _resetConversation();
+            _resetConversation(reason: 'cache-render');
             for (final entry in cached) {
               _ingestEntry(entry);
             }
@@ -3189,7 +3189,7 @@ class PiSessionNotifier extends Notifier<PiState> {
         sessionId == state.sessionId &&
         leafId != null &&
         _seenEntryIds.contains(leafId);
-    if (!sameBranch) _resetConversation();
+    if (!sameBranch) _resetConversation(reason: 'snapshot-rebuild');
     if (stateData is Map) {
       _applyStateData(Map<String, dynamic>.from(stateData));
     }
@@ -3313,15 +3313,27 @@ class PiSessionNotifier extends Notifier<PiState> {
     var incremental = false;
     final leafId = forceFull ? null : _leafId;
     if (leafId != null) {
-      entriesResp = await _request('get_entries', {'since': leafId});
+      entriesResp = await syncRequest('get_entries', {'since': leafId});
       if (stale()) return;
       incremental = entriesResp != null && entriesResp['success'] == true;
     }
     if (!incremental) {
       if (stale()) return;
-      _resetConversation();
-      entriesResp = await _request('get_entries');
+      // staged replacement:先拉到完整数据再替换。「先清后拉」遇上网络抖动
+      // 会把空白列表直接 emit 出去,且这条路径自己不安排补货 —— 列表一直
+      // 空到下次碰巧触发重同步(严重时只能重启 App)。失败就保留现有列表,
+      // 交给退避重试兜底。
+      final fullResp = await syncRequest('get_entries');
       if (stale()) return;
+      if (fullResp == null || fullResp['success'] != true) {
+        _logP2p(
+          'get_entries 全量失败(success=${fullResp?['success']}),保留现有列表并调度重试',
+        );
+        scheduleSyncRecovery(reason: 'entries-fetch-failed');
+        return;
+      }
+      _resetConversation(reason: 'full-sync');
+      entriesResp = fullResp;
     }
 
     final data = entriesResp?['data'] as Map?;
@@ -3436,6 +3448,26 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 无上限等待:一个永远满不了的传输(对端反复重发同一页)会一直有数据进度,
   /// 却永远不完成。按 50KB/s 估,20MB 会话大约 7 分钟,给 10 分钟余量。
   static const _hardRequestTimeout = Duration(minutes: 10);
+
+  /// 测试缝隙:get_entries 走这里,便于脚本化失败/成功。
+  @visibleForTesting
+  Future<Map<String, dynamic>?> syncRequest(
+    String type, [
+    Map<String, dynamic> extra = const {},
+  ]) => _request(type, extra);
+
+  /// 测试缝隙:同步失败后的兜底重试(生产:退避重同步;测试:记录后手动驱动)。
+  @visibleForTesting
+  void scheduleSyncRecovery({required String reason}) =>
+      _scheduleSourceResync(reason: reason);
+
+  /// 测试缝隙:直接驱动一次 _sync。
+  @visibleForTesting
+  Future<void> debugSync({bool forceFull = false}) => _sync(forceFull: forceFull);
+
+  /// 测试缝隙:设置本地 leaf(决定 _sync 走增量还是全量)。
+  @visibleForTesting
+  set debugLeafId(String? value) => _leafId = value;
 
   Future<Map<String, dynamic>?> _request(
     String type, [
@@ -3690,7 +3722,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       // 换 epoch 只是事件流重来了;hub 现在会保留租约,所以这里也不丢
       _leafId = null;
       _bufferedSourceEvents.clear();
-      _resetConversation();
+      _resetConversation(reason: 'epoch-changed');
       state = state.copyWith(
         sources: parsed,
         cwd: selected?.cwd,
@@ -3949,17 +3981,23 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 单飞 + 指数退避(250ms→8s, ±20% 抖动)。
   /// 旧实现每个被拒事件都触发一次全量重拉,峰值 ~40 次/秒。
   void _scheduleSourceResync({required String reason}) {
-    if (!_hubV2 || _disposed || _resyncTimer != null || _resyncRunning) return;
+    if (_disposed || _resyncTimer != null || _resyncRunning) return;
     // 断线期间重同步只会空转失败:重连流程自己会触发首次同步。
     if (_conn?.isOpen != true) return;
     final base = math.min(8000, 250 * math.pow(2, _resyncAttempt).toInt());
     final delay = (base * (0.8 + _jitterRandom.nextDouble() * 0.4)).round();
     _resyncAttempt++;
+    _logP2p('调度兜底重同步(reason=$reason, delay=${delay}ms, hub=$_hubV2)');
     _resyncTimer = Timer(Duration(milliseconds: delay), () async {
       _resyncTimer = null;
       _resyncRunning = true;
       try {
-        await _syncSelectedSource(reconcile: true);
+        // hub 模式走源级对账;直连模式重跑一次全量 _sync。
+        if (_hubV2) {
+          await _syncSelectedSource(reconcile: true);
+        } else {
+          await _sync(forceFull: true);
+        }
       } finally {
         _resyncRunning = false;
       }
@@ -3980,7 +4018,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     if (leaf == _leafId) return;
     _leafId = leaf;
-    _resetConversation();
+    _resetConversation(reason: 'branch-fallback');
     _addSystem('会话已回退到另一个分支');
     unawaited(_syncSelectedSource(forceFull: true));
   }
@@ -4117,7 +4155,7 @@ class PiSessionNotifier extends Notifier<PiState> {
             isStreaming: false,
           );
           _leafId = null;
-          _resetConversation();
+          _resetConversation(reason: 'session-changed');
           unawaited(
             _hubV2
                 ? _syncSelectedSource(forceFull: true)
@@ -4842,7 +4880,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
   }
 
-  void _resetConversation() {
+  void _resetConversation({required String reason}) {
+    // 列表清空的全部触发点都过这里,带原因进诊断日志 —— 「消息列表突然
+    // 没了」类事故的取证就靠这行。
+    _logP2p('清空对话列表(reason=$reason, items=${_items.length})');
     _items.clear();
     _itemsByKey.clear();
     _seenEntryIds.clear();
