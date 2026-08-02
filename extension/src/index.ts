@@ -6,7 +6,7 @@ import type {
 import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { loadRelayConfig, RELAY_CONFIG_PATH } from "./config.js";
 import { NavCommandContextCache, registerNavCommands } from "./nav_commands.js";
-import { DesktopRelay } from "./relay.js";
+import { DesktopRelay, sessionTreeFrame } from "./relay.js";
 
 /**
  * 让每个事件 ctx 都带上 `navigateTree`。
@@ -128,7 +128,12 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   pi.on("model_select", emitAndSnapshot);
   pi.on("thinking_level_select", emitAndSnapshot);
   pi.on("session_info_changed", emitAndSnapshot);
-  pi.on("session_tree", emitAndSnapshot);
+  pi.on("session_tree", (event, ctx) => {
+    // pi 原生字段是 newLeafId,手机端协议认 leafId —— 不归一化手机端
+    // 永远读不到 leaf,回退后消息列表不会重置重建(旧分支消息一直挂着)。
+    relay?.emitBoundary(sessionTreeFrame(event), ctx);
+    relay?.snapshot(ctx);
+  });
   pi.on("session_before_compact", (event, ctx) => {
     relay?.setCompacting(true, ctx);
     relay?.emitBoundary(event, ctx);

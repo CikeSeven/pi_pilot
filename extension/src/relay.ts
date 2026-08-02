@@ -21,6 +21,24 @@ import { cloneForWire, encodeForWire, MAX_SNAPSHOT_BYTES } from "./serialization
 
 type JsonObject = Record<string, unknown>;
 
+/**
+ * pi 原生 session_tree 事件 → 手机端协议帧。
+ *
+ * pi 的字段是 newLeafId(SessionTreeEvent),而手机端协议认 leafId(和无头
+ * 源、快照帧一致)。不做这层归一化,手机端永远读不到 leaf,回退后消息
+ * 列表不会重置重建 —— 旧分支的消息会一直挂着。(2026-08 真实事故)
+ */
+export function sessionTreeFrame(event: {
+  newLeafId: string | null;
+  oldLeafId: string | null;
+}): JsonObject {
+  return {
+    type: "session_tree",
+    leafId: event.newLeafId ?? "",
+    ...(event.oldLeafId ? { oldLeafId: event.oldLeafId } : {}),
+  };
+}
+
 const MAX_SOCKET_BUFFER = 2 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;

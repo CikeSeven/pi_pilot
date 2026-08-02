@@ -3,7 +3,7 @@ import { once } from "node:events";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DesktopRelay } from "../src/relay.js";
+import { DesktopRelay, sessionTreeFrame } from "../src/relay.js";
 
 type Frame = Record<string, any>;
 
@@ -16,6 +16,27 @@ async function waitFor<T>(read: () => T | undefined, timeoutMs = 2_000): Promise
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("sessionTreeFrame 把 pi 的 newLeafId 归一化成手机端协议的 leafId", () => {
+  // pi 原生 SessionTreeEvent 的字段是 newLeafId,而手机端协议认 leafId。
+  // 2026-08 真实事故:没人做这层映射,手机端回退后消息列表不重建。
+  assert.deepEqual(sessionTreeFrame({ newLeafId: "abc", oldLeafId: "def" }), {
+    type: "session_tree",
+    leafId: "abc",
+    oldLeafId: "def",
+  });
+  // 回到根:newLeafId 为 null → leafId 空串(手机端据此重置重建)。
+  assert.deepEqual(sessionTreeFrame({ newLeafId: null, oldLeafId: "def" }), {
+    type: "session_tree",
+    leafId: "",
+    oldLeafId: "def",
+  });
+  // oldLeafId 为 null 时不带这个字段。
+  assert.deepEqual(sessionTreeFrame({ newLeafId: "abc", oldLeafId: null }), {
+    type: "session_tree",
+    leafId: "abc",
+  });
+});
 
 test("relay registers, coalesces updates, and fences commands", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });

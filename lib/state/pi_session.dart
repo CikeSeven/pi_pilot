@@ -4187,10 +4187,21 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 不去猜要删哪几条 —— 直接按新的 leaf 全量重建。回退在会话文件里是
   /// append-only 的"移动 leaf",本地增量推演一定会跟真实分支跑偏。
   void _onSessionTree(Map<String, dynamic> event) {
-    final leaf = event['leafId'];
-    // 事件没带 leafId 时**不能**把 _leafId 清成 null:那样下一条 session_tree
-    // 又会判成"变了",于是每条事件都触发一次清空+全量重同步,永远收敛不了。
-    if (leaf is! String || leaf.isEmpty) {
+    // 桌面扩展归一化后带 leafId;pi 原生事件(未归一化的旧扩展、无头源
+    // 直通)带的是 newLeafId。两个键都认 —— 手机 APK 和桌面扩展各自独立
+    // 更新,哪侧旧都得能收敛。
+    final explicit = event.containsKey('leafId') || event.containsKey('newLeafId');
+    final raw = event['leafId'] ?? event['newLeafId'];
+    final leaf = raw is String && raw.isNotEmpty ? raw : null;
+    if (leaf == null) {
+      // 显式给了空 leaf = 回到了根(目标消息的 parent 是根):同样是分支
+      // 变了,必须重置重建。只有事件完全没带 leaf 字段(不该发生)才不清
+      // —— 否则每条事件都触发一次清空+全量重同步,永远收敛不了。
+      if (explicit) {
+        _leafId = null;
+        _resetConversation(reason: 'branch-fallback');
+        _addSystem('会话已回退到另一个分支');
+      }
       unawaited(_syncSelectedSource(forceFull: true));
       return;
     }
