@@ -138,6 +138,7 @@ test("pong echo, desktop snapshot reads, and extension_ui_response gating", asyn
             "set_model",
             "set_thinking_level",
             "set_session_name",
+            "navigate_tree",
             "tree-summary-on-demand",
           ],
         },
@@ -218,6 +219,34 @@ test("pong echo, desktop snapshot reads, and extension_ui_response gating", asyn
     const failed = await failPromise;
     assert.equal(failed.success, false);
     assert.match(failed.error, /stale_ctx/);
+
+    // navigate_tree 必须过 desktop 变更命令门:桌面 relay 早就支持它,
+    // bridge 这张表漏了会把手机回退全部拦成 "not supported by the desktop relay"。
+    const navLease = await phone.request("hub_acquire_owner", { ttlMs: 10_000 });
+    assert.equal(navLease.success, true);
+    const navMeta = {
+      _hub: { leaseId: navLease.data.leaseId, fence: navLease.data.fence },
+    };
+    const navPromise = phone.request("navigate_tree", {
+      entryId: "leaf-1",
+      ...navMeta,
+    });
+    const navForward = await desktop.waitFor(
+      (frame) => frame.type === "remote_command" && frame.command?.type === "navigate_tree",
+    );
+    assert.equal(navForward.command.entryId, "leaf-1");
+    // hub 元数据不得漏进转发帧。
+    assert.equal(navForward.command._hub, undefined);
+    desktop.ws.send(
+      JSON.stringify({
+        type: "remote_result",
+        requestId: navForward.requestId,
+        success: true,
+        data: { ok: true },
+      }),
+    );
+    const nav = await navPromise;
+    assert.equal(nav.success, true);
 
     // extension_ui_response:无 lease 拒绝
     const noLease = await phone.request("extension_ui_response", {

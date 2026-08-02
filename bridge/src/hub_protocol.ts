@@ -101,6 +101,12 @@ const DESKTOP_MUTATION_COMMANDS = new Set([
   "set_session_name",
   // 压缩上下文是纯粹的会话内操作,不会把电脑上正在用的会话抽走
   "compact",
+  // 会话内回退(会话树导航)。relay 侧 SAFE_REMOTE_COMMANDS 一直放行它,
+  // 这张表漏了,手机回退全被 bridge 拦成 "not supported by the desktop relay"。
+  // 注意**不要**顺手加进 server.ts 的 SESSION_MUTATING_COMMANDS:
+  // runNavigate 自己 abort()+waitForIdle(),生成中回退就该走这条路,
+  // 加过去反而被流式守卫提前拒掉。
+  "navigate_tree",
 ]);
 
 export function isReadOnlySourceCommand(type: string): boolean {

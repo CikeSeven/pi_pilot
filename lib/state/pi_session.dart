@@ -282,6 +282,10 @@ class SessionTreeNode {
   final List<SessionTreeNode> children;
 
   /// 能否作为回退目标。
+  ///
+  /// 注意与入表类型(_navigableTreeTypes)刻意不同:compaction 会显示在
+  /// 树里当锚点,但不是可落脚的回合边界(落到压缩点上,之前的明细在
+  /// 当前分支里就只剩摘要了),所以它不可点。
   bool get canNavigate => type == 'message' || type == 'branch_summary';
 }
 

@@ -8,6 +8,7 @@ import '../../state/pi_session.dart';
 import '../common/tool_avatar.dart';
 import '../theme/semantic_colors.dart';
 import '../theme/shapes.dart';
+import 'tree_layout.dart';
 
 String relativeTime(DateTime? t) {
   if (t == null) return '未知时间';
@@ -37,14 +38,15 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
   final ScrollController _scroll = ScrollController();
   final GlobalKey _leafKey = GlobalKey();
   SessionTree? _treeSnapshot;
-  List<_TreeRow>? _rows;
+  List<TreeRowLayout>? _rows;
   int? _leafIndex;
   int _locateToken = 0;
 
   @override
   void initState() {
     super.initState();
-    _future = ref.read(piSessionNotifierProvider)?.getTree() ??
+    _future =
+        ref.read(piSessionNotifierProvider)?.getTree() ??
         Future<SessionTree?>.value(null);
   }
 
@@ -60,7 +62,8 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
     _rows = null;
     _leafIndex = null;
     setState(() {
-      _future = ref.read(piSessionNotifierProvider)?.getTree() ??
+      _future =
+          ref.read(piSessionNotifierProvider)?.getTree() ??
           Future<SessionTree?>.value(null);
     });
   }
@@ -134,22 +137,10 @@ class _SessionTreeScreenState extends ConsumerState<SessionTreeScreen> {
             );
           }
           final path = tree.currentPath;
-          // 展平成行。**迭代而非递归**:会话树是一条长单链(没有分叉时
+          // 展平成行:与桌面 pi 的 /tree 同一套语义(当前分支优先、分叉
+          // 缩进+连接线)。**迭代而非递归**:会话树是一条长单链(没有分叉时
           // 深度 == 消息数),千条会话按 children 递归会爆栈。
-          final rows = <_TreeRow>[];
-          final stack = <(SessionTreeNode, int)>[];
-          for (final root in tree.roots.reversed) {
-            stack.add((root, 0));
-          }
-          while (stack.isNotEmpty) {
-            final (node, depth) = stack.removeLast();
-            rows.add(_TreeRow(node, depth));
-            // 只有分叉才加缩进,线性链保持齐平 —— 否则单链会一路缩到屏幕外
-            final childDepth = depth + (node.children.length > 1 ? 1 : 0);
-            for (final child in node.children.reversed) {
-              stack.add((child, childDepth));
-            }
-          }
+          final rows = buildTreeRows(tree.roots, tree.leafId);
 
           // 同一份树快照只在第一次构建时接入定位:_rows 每次 build 都会
           // 重建,不做快照守卫会让 post-frame 的 setState 触发无限循环。
@@ -232,12 +223,6 @@ int locateCurrentRow(List<String> rowIds, String? leafId, Set<String> pathIds) {
   return -1;
 }
 
-class _TreeRow {
-  const _TreeRow(this.node, this.depth);
-  final SessionTreeNode node;
-  final int depth;
-}
-
 /// 节点的视觉身份。色相本身就是语义 —— 同一个色块头像里的 bg/fg 是主题
 /// 保证过对比度的一对,不能拆开用。
 class _NodeLook {
@@ -265,7 +250,7 @@ class _TreeNodeTile extends ConsumerWidget {
     required this.onChanged,
   });
 
-  final _TreeRow row;
+  final TreeRowLayout row;
   final bool onCurrentPath;
   final bool isLeaf;
   final VoidCallback onChanged;
@@ -363,7 +348,11 @@ class _TreeNodeTile extends ConsumerWidget {
     );
     final look = _lookOf(colors, piColors);
 
-    final indent = 16.0 + math.min(row.depth, 10) * 18;
+    // 连接线的绘制宽度按渲染缩进给,并封顶:分叉树的 depth 没有上界,
+    // 线性增长的宽度会把负约束喂给布局,窄屏上直接 assert 崩溃
+    final guideLevel = math.min(row.displayIndent, 8);
+    final guideWidth = guideLevel * _TreeGuidePainter.levelWidth;
+    final guideColor = colors.outlineVariant.withValues(alpha: 0.9);
     final tile = InkWell(
       onTap: canNavigate && !onCurrentPath
           ? () => _confirmNavigate(context, ref, node)
@@ -384,109 +373,129 @@ class _TreeNodeTile extends ConsumerWidget {
               ? Border(left: BorderSide(color: colors.primary, width: 3))
               : null,
         ),
-        padding: EdgeInsets.only(
-          // 缩进必须封顶:分叉树的 depth 没有上界,线性增长的 padding
-          // 会把负约束喂给 Padding,窄屏上直接 assert 崩溃
-          left: indent,
-          right: 12,
-          top: 6,
-          bottom: 6,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Stack(
           children: [
-            // 色块头像:色相本身就是语义,比单色描边图标好区分得多
-            Container(
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                color: look.bg,
-                borderRadius: BorderRadius.circular(PiShape.sm),
+            // 分支连接线层:与桌面 /tree 同语义(├ └ │),铺满整行高,
+            // 行间自然拼成连续的竖线。
+            if (guideWidth > 0)
+              Positioned(
+                left: 8,
+                top: 0,
+                bottom: 0,
+                width: guideWidth,
+                child: CustomPaint(
+                  painter: _TreeGuidePainter(layout: row, color: guideColor),
+                ),
               ),
-              child: Center(child: Icon(look.icon, size: 13, color: look.fg)),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
+            Padding(
+              padding: EdgeInsets.only(
+                left: 8 + guideWidth + (guideWidth > 0 ? 4 : 0),
+                right: 12,
+                top: 6,
+                bottom: 6,
+              ),
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    look.title.isEmpty ? node.type : look.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: onCurrentPath
-                          ? colors.onSurface
-                          : colors.onSurfaceVariant,
-                      fontWeight: isLeaf ? FontWeight.w600 : FontWeight.normal,
+                  // 色块头像:色相本身就是语义,比单色描边图标好区分得多
+                  Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      color: look.bg,
+                      borderRadius: BorderRadius.circular(PiShape.sm),
+                    ),
+                    child: Center(
+                      child: Icon(look.icon, size: 13, color: look.fg),
                     ),
                   ),
-                  const SizedBox(height: 1),
-                  Row(
-                    children: [
-                      // 角色名放在最前:扫一眼就知道这行是谁说的
-                      Text(
-                        look.roleName,
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: look.fg,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (node.label != null) ...[
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Text(
-                          ' · ',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: colors.onSurfaceVariant,
+                          look.title.isEmpty ? node.type : look.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: onCurrentPath
+                                ? colors.onSurface
+                                : colors.onSurfaceVariant,
+                            fontWeight: isLeaf
+                                ? FontWeight.w600
+                                : FontWeight.normal,
                           ),
                         ),
-                        Icon(
-                          Icons.bookmark_outline,
-                          size: 12,
-                          color: colors.tertiary,
-                        ),
-                        // 书签标签是用户自己起的,长度不可控
-                        Flexible(
-                          child: Text(
-                            node.label!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: colors.tertiary,
+                        const SizedBox(height: 1),
+                        Row(
+                          children: [
+                            // 角色名放在最前:扫一眼就知道这行是谁说的
+                            Text(
+                              look.roleName,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: look.fg,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
-                          ),
+                            if (node.label != null) ...[
+                              Text(
+                                ' · ',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                              Icon(
+                                Icons.bookmark_outline,
+                                size: 12,
+                                color: colors.tertiary,
+                              ),
+                              // 书签标签是用户自己起的,长度不可控
+                              Flexible(
+                                child: Text(
+                                  node.label!,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: colors.tertiary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                            if (node.time != null)
+                              Text(
+                                ' · ${relativeTime(node.time)}',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                            if (isLeaf)
+                              Text(
+                                ' · 当前位置',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.primary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                          ],
                         ),
                       ],
-                      if (node.time != null)
-                        Text(
-                          ' · ${relativeTime(node.time)}',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: colors.onSurfaceVariant,
-                          ),
-                        ),
-                      if (isLeaf)
-                        Text(
-                          ' · 当前位置',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: colors.primary,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                    ],
+                    ),
                   ),
+                  if (node.children.length > 1)
+                    SizedBox(
+                      height: 20,
+                      child: Center(
+                        child: Icon(
+                          Icons.fork_right,
+                          size: 14,
+                          color: colors.tertiary,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
-            if (node.children.length > 1)
-              SizedBox(
-                height: 20,
-                child: Center(
-                  child: Icon(
-                    Icons.fork_right,
-                    size: 14,
-                    color: colors.tertiary,
-                  ),
-                ),
-              ),
           ],
         ),
       ),
@@ -499,7 +508,12 @@ class _TreeNodeTile extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: EdgeInsets.only(left: indent, right: 12, top: 4, bottom: 4),
+          padding: EdgeInsets.only(
+            left: 8 + guideWidth + (guideWidth > 0 ? 4 : 0),
+            right: 12,
+            top: 4,
+            bottom: 4,
+          ),
           child: Row(
             children: [
               SizedBox(
@@ -571,11 +585,18 @@ class _TreeNodeTile extends ConsumerWidget {
     if (notifier == null) return;
     final ok = await notifier.navigateTo(node.id);
     if (!context.mounted) return;
-    // 回退成功就退回对话页看结果;失败留在树上让用户重试
+    // 回退成功就退回对话页看结果;失败留在树上让用户重试。
+    // 失败原因要透传(navCache 冷启动那句「先在电脑上跑一次 /pipilot-undo」
+    // 就是靠这里到达用户),一句「回退失败」会让人以为功能整个没了。
     if (ok) Navigator.of(context).pop();
+    final failure = ref.read(piSessionProvider).error;
     messenger.showSnackBar(
       SnackBar(
-        content: Text(ok ? '已回到该节点' : '回退失败'),
+        content: Text(
+          ok
+              ? '已回到该节点'
+              : '回退失败${failure != null && failure.isNotEmpty ? ':$failure' : ''}',
+        ),
         action: ok
             ? null
             : SnackBarAction(
@@ -628,9 +649,58 @@ class _TreeNodeTile extends ConsumerWidget {
     if (!context.mounted) return;
     if (ok == true) Navigator.of(context).pop();
     messenger.showSnackBar(
-      SnackBar(
-        content: Text(ok == true ? '已另开一个会话' : '操作失败或被取消'),
-      ),
+      SnackBar(content: Text(ok == true ? '已另开一个会话' : '操作失败或被取消')),
     );
   }
+}
+
+/// 分支连接线绘制:与桌面 /tree 同一套视觉语言。
+///
+/// - 分叉的直接子代:拐点竖线 + 横线拐向内容(├ / └ 的等价物);
+///   最后一个分支(└)竖线止于横线,否则通到行底(├ 下方还有同支内容)。
+/// - 祖先 gutter:分支未结束时画 │ 贯通整行,行间相邻自然拼成连续竖线。
+class _TreeGuidePainter extends CustomPainter {
+  const _TreeGuidePainter({required this.layout, required this.color});
+
+  final TreeRowLayout layout;
+  final Color color;
+
+  static const double levelWidth = 16.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    // 横线对准内容头像的中线:行上 padding 6 + 头像半径 11 ≈ 17。
+    final midY = size.height < 17.0 ? size.height / 2 : 17.0;
+
+    for (final gutter in layout.gutters) {
+      if (!gutter.show) continue;
+      final x = gutter.level * levelWidth + 1.0;
+      if (x > size.width) continue;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+
+    if (layout.connector && layout.displayIndent > 0) {
+      final x = (layout.displayIndent - 1) * levelWidth + 1.0;
+      if (x <= size.width) {
+        canvas.drawLine(
+          Offset(x, 0),
+          Offset(x, layout.isLast ? midY : size.height),
+          paint,
+        );
+        canvas.drawLine(
+          Offset(x, midY),
+          Offset(math.min(x + levelWidth - 5, size.width), midY),
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_TreeGuidePainter oldDelegate) =>
+      oldDelegate.layout != layout || oldDelegate.color != color;
 }

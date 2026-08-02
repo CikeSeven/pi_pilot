@@ -2,12 +2,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/state/pi_session.dart';
 import 'package:pi_pilot/ui/sessions/session_tree_screen.dart'
     show locateCurrentRow;
+import 'package:pi_pilot/ui/sessions/tree_layout.dart'
+    show TreeRowLayout, buildTreeRows;
 
 void main() {
   SessionTreeNode node(
     String id, {
     List<SessionTreeNode> children = const [],
-  }) => SessionTreeNode(id: id, type: 'message', children: children);
+    String type = 'message',
+  }) => SessionTreeNode(id: id, type: type, children: children);
 
   test('currentPath 从根走到 leaf', () {
     final tree = SessionTree(
@@ -140,6 +143,108 @@ void main() {
   });
 
   locateRowCases();
+  layoutCases(node);
+}
+
+void layoutCases(
+  SessionTreeNode Function(
+    String, {
+    List<SessionTreeNode> children,
+    String type,
+  })
+  node,
+) {
+  group('buildTreeRows(对齐桌面 /tree 语义)', () {
+    test('单链全部顶格、无连接线', () {
+      final rows = buildTreeRows([
+        node(
+          'a',
+          children: [
+            node('b', children: [node('c')]),
+          ],
+        ),
+      ], 'c');
+      expect(rows.map((r) => r.node.id), ['a', 'b', 'c']);
+      expect(rows.map((r) => r.indent), [0, 0, 0]);
+      expect(rows.every((r) => !r.connector), isTrue);
+    });
+
+    test('含 leaf 的分支排最前,分叉子代带连接线与缩进', () {
+      // root -> fork -> [inactive(声明在前), active(含 leaf)]
+      final rows = buildTreeRows([
+        node(
+          'root',
+          children: [
+            node(
+              'fork',
+              children: [
+                node('inactive', children: [node('x')]),
+                node('active', children: [node('leaf')]),
+              ],
+            ),
+          ],
+        ),
+      ], 'leaf');
+      expect(rows.map((r) => r.node.id), [
+        'root',
+        'fork',
+        'active',
+        'leaf',
+        'inactive',
+        'x',
+      ]);
+      final byId = {for (final r in rows) r.node.id: r};
+      // 分叉子代:缩进 +1、带连接线;active 在前为 ├(isLast=false),另一个为 └。
+      expect(byId['active']!.indent, 1);
+      expect(byId['active']!.connector, isTrue);
+      expect(byId['active']!.isLast, isFalse);
+      expect(byId['inactive']!.indent, 1);
+      expect(byId['inactive']!.connector, isTrue);
+      expect(byId['inactive']!.isLast, isTrue);
+      // 分叉后的第一代再缩进一级(视觉分组),active 分支的 gutter 延续。
+      expect(byId['leaf']!.indent, 2);
+      expect(
+        byId['leaf']!.gutters.any((g) => g.level == 0 && g.show),
+        isTrue,
+        reason: 'active 分支还没结束,其后代要带延续竖线',
+      );
+      // inactive 是最后一个分支(└):其后代的 gutter 不再延续。
+      expect(byId['x']!.gutters.any((g) => g.level == 0 && g.show), isFalse);
+      expect(byId['x']!.indent, 2);
+    });
+
+    test('leaf 为空时保持声明顺序', () {
+      final rows = buildTreeRows([
+        node('fork', children: [node('b1'), node('b2')]),
+      ], null);
+      expect(rows.map((r) => r.node.id), ['fork', 'b1', 'b2']);
+    });
+
+    test('多 root 当作虚拟根的子代:抬一级、active root 在前', () {
+      final rows = buildTreeRows([
+        node('r1'),
+        node('r2', children: [node('leaf')]),
+      ], 'leaf');
+      expect(rows.map((r) => r.node.id), ['r2', 'leaf', 'r1']);
+      // 桌面端多 root 只抬缩进,不画连接线(虚拟根不可见)。
+      expect(rows.first.indent, 1);
+      expect(rows.first.connector, isFalse);
+      // 分叉后的第一代再抬一级(虚拟根分叉 → justBranched)。
+      expect(rows[1].node.id, 'leaf');
+      expect(rows[1].indent, 2);
+    });
+
+    test('长单链不爆栈且全程顶格', () {
+      var current = node('n2500');
+      for (var i = 2499; i >= 1; i--) {
+        current = node('n$i', children: [current]);
+      }
+      final rows = buildTreeRows([current], 'n2500');
+      expect(rows.length, 2500);
+      expect(rows.every((r) => r.indent == 0), isTrue);
+      expect(rows.last.node.id, 'n2500');
+    });
+  });
 }
 
 void locateRowCases() {

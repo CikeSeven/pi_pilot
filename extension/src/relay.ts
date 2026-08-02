@@ -1269,7 +1269,7 @@ export class DesktopRelay {
         );
       }
       throw new Error(
-        "rollback needs the desktop command context; run /pipilot-undo once on the computer",
+        "需要先在电脑端的这个会话里执行一次 /pipilot-undo(每个 pi 进程只需一次),然后重试",
       );
     }
     const result = await runNavigate(navRuntimeFor(cached), entryId);
