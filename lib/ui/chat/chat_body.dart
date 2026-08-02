@@ -732,11 +732,12 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                 ),
               // 渐变遮罩:紧贴输入卡顶部(_composerHeight 已含手势条,
               // 不要再加 bottomInset,否则渐变悬空、和输入卡之间露出空隙)。
+              // 高度 14:28 的渐隐带太抢,文字还没滚到输入卡就化没了。
               Positioned(
                 left: 0,
                 right: 0,
                 bottom: _composerHeight,
-                height: 28,
+                height: 14,
                 child: IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(

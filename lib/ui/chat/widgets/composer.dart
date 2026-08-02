@@ -153,8 +153,11 @@ class _ComposerState extends State<Composer> {
                   : const SizedBox(width: double.infinity),
             ),
             // 悬浮输入卡:液态玻璃,两行布局。
+            // top 必须是 0:外层(chat_body)给整个编辑区包的是不透明底色,
+            // 这里若留上 padding,会被填成一条不透明背景悬在卡片上边框外,
+            // 把从底下滚过的文字齐边截断 —— 渐隐带白做了。
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 curve: Curves.easeOut,
