@@ -118,7 +118,6 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
       setState(() => _error = 'Token 含有空格或中文——多半是把别的内容粘进了密码框,请清空后重新粘贴');
       return;
     }
-    final wantsP2p = _transport != DeviceTransport.lan;
     final rendezvous = _rendezvous.text.trim();
     final p2pDeviceId = _p2pDeviceId.text.trim();
     final p2pSecret = _secret.text.trim();
@@ -128,12 +127,10 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
       setState(() => _error = '仅 P2P 模式下,信令服 / 设备名 / 配对密钥都要填');
       return;
     }
-    // 半成品三要素必须拦下:静默丢弃的话用户以为存上了,重开一看全没了。
-    // 信令服有默认值预填,所以「想配 P2P」的信号看设备名/密钥两栏;
-    // 两栏都空 = 不要 P2P(自动 = 仅直连),正常放行。
-    if (wantsP2p &&
-        (p2pDeviceId.isNotEmpty || p2pSecret.isNotEmpty) &&
-        !p2pComplete) {
+    // 半成品三要素必须拦下(任何模式都拦):静默丢弃的话用户以为存上了,
+    // 重开一看全没了。信令服有默认值预填,所以「想配 P2P」的信号看
+    // 设备名/密钥两栏;两栏都空 = 不要 P2P,正常放行。
+    if ((p2pDeviceId.isNotEmpty || p2pSecret.isNotEmpty) && !p2pComplete) {
       setState(() => _error = 'P2P 三要素要填全:信令服 / 设备名 / 配对密钥缺一不可,否则不会保存');
       return;
     }
@@ -147,10 +144,13 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
       port: parsed.port ?? port,
       token: token,
       transport: _transport,
-      // 填全了才存;设备名/密钥两栏都空视为不要 P2P(半成品已被上面拦下)。
-      p2pRendezvous: wantsP2p && p2pComplete ? rendezvous : null,
-      p2pDeviceId: wantsP2p && p2pComplete ? p2pDeviceId : null,
-      p2pSecret: wantsP2p && p2pComplete ? p2pSecret : null,
+      // 填全了就存——连接策略(仅局域网/自动/仅 P2P)只决定连的时候
+      // 用不用,不决定存不存。按策略清掉已配好的三要素,就是「仅局域网
+      // 保存后切回自动,P2P 信息消失」的 bug。要删 P2P 信息:清空
+      // 设备名/密钥两栏再存。
+      p2pRendezvous: p2pComplete ? rendezvous : null,
+      p2pDeviceId: p2pComplete ? p2pDeviceId : null,
+      p2pSecret: p2pComplete ? p2pSecret : null,
       lastHubId: widget.existing?.lastHubId ?? widget.discovered?.hubId,
     );
     Navigator.of(context).pop(DeviceEditSheetResult.saved(device));
@@ -269,7 +269,8 @@ class _DeviceEditSheetState extends State<_DeviceEditSheet> {
               title: '仅 P2P 远程',
               subtitle: '经信令服打洞;局域网里也不直连',
             ),
-            // P2P 字段区:仅直连时整段收起(那台设备不需要)。
+            // P2P 字段区:仅直连时整段收起(收起只是不展示;已填的三要素
+            // 在 _save 里照常保留——连接策略不再决定数据存不存)。
             if (_transport != DeviceTransport.lan) ...[
               const SizedBox(height: 14),
               _field(
