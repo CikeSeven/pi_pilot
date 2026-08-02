@@ -51,6 +51,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     BuildContext context,
     String text, {
     bool hasTimer = false,
+    double clusterW = 0,
   }) {
     final tp = TextPainter(
       text: TextSpan(text: text, style: Theme.of(context).textTheme.labelLarge),
@@ -58,10 +59,10 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
       textDirection: TextDirection.ltr,
     )..layout();
     final screenW = MediaQuery.sizeOf(context).width;
-    // Timer 也占位置:不算它的话文案会被它挤成 ellipsis。
+    // Timer 和左侧连接状态簇都占位置:不算它们的话文案会被挤成 ellipsis。
     final timerW = hasTimer ? 68.0 : 0.0;
     // 36 = 水平 padding 18*2;最窄 120,最宽屏宽 78%(留位置给右侧内容)。
-    return (tp.width + 36 + timerW).clamp(120.0, screenW * 0.78);
+    return (tp.width + 36 + timerW + clusterW).clamp(120.0, screenW * 0.78);
   }
 
   void _toggle() {
@@ -143,6 +144,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
       context,
       _workStatus(state) ?? _title(state),
       hasTimer: state.isStreaming && state.activityStatus == null,
+      clusterW: _connClusterW(context, state),
     );
 
     return Stack(
@@ -248,6 +250,79 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     );
   }
 
+  /// 收起态左侧连接状态簇的文案:已连接是延迟;其余是状态词。
+  String? _connLabel(PiState state) {
+    switch (state.status) {
+      case PiConnStatus.connected:
+        final rtt = state.rttMs;
+        return rtt == null ? null : '${rtt}ms';
+      case PiConnStatus.connecting:
+        // 有过会话的连接中 = 断线重连;首次连接才叫连接中。
+        return state.hasSession ? '重连中' : '连接中';
+      case PiConnStatus.failed:
+        return '连接失败';
+      case PiConnStatus.disconnected:
+        return '已断开';
+    }
+  }
+
+  /// 状态簇的宽度估算:不在收起态宽度里给它留位,中间文案会被挤成省略号。
+  double _connClusterW(BuildContext context, PiState state) {
+    final label = _connLabel(state);
+    // 图标 13 + 与中间文案的间距 8。
+    if (label == null) return 13 + 8;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: Theme.of(context).textTheme.labelSmall,
+      ),
+      maxLines: 1,
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return 13 + 4 + tp.width + 8;
+  }
+
+  /// 左侧连接状态簇:通道图标(局域网/P2P)+ 延迟;连接/断开/失败各有其态。
+  Widget _connCluster(BuildContext context, PiState state) {
+    final colors = Theme.of(context).colorScheme;
+    final (IconData? icon, Color color) = switch (state.status) {
+      PiConnStatus.connected => (
+        state.activeTransport == PiActiveTransport.p2p
+            ? Icons.public
+            : Icons.wifi,
+        colors.tertiary,
+      ),
+      // 连接中用 spinner 而不是静态图标:转圈本身就是「正在连」。
+      PiConnStatus.connecting => (null, colors.primary),
+      PiConnStatus.failed => (Icons.error_outline, colors.error),
+      PiConnStatus.disconnected => (Icons.wifi_off, colors.outline),
+    };
+    final label = _connLabel(state);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (icon == null)
+          SizedBox(
+            width: 11,
+            height: 11,
+            child: CircularProgressIndicator(strokeWidth: 1.5, color: color),
+          )
+        else
+          Icon(icon, size: 13, color: color),
+        if (label != null) ...[
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(color: color),
+          ),
+        ],
+        const SizedBox(width: 8),
+      ],
+    );
+  }
+
   /// 收起态:只显示标题(生成中多一个迷你停止键)。
   Widget _buildCollapsed(
     BuildContext context,
@@ -262,6 +337,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            _connCluster(context, state),
             Flexible(
               child: Text(
                 // 生成中显示工作状态(思考中/回复中/调用 read),
