@@ -39,6 +39,16 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    testOptions {
+        unitTests {
+            // android.util.Log / org.json 在 JVM 单元测试里只有 stub,直接调用会抛
+            // "not mocked"。通知去重与状态机是纯逻辑,却因为夹着几行 Log 就无法测试。
+            // 让 stub 返回默认值而不是抛异常,这样纯逻辑部分可以在不引入
+            // Robolectric 的前提下被覆盖。
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 flutter {

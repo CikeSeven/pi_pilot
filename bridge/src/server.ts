@@ -39,9 +39,81 @@ import {
   type SourceDescriptor,
   type SourceSnapshot,
 } from "./source_registry.js";
+import { loadBridgeIdentity } from "./notification_identity.js";
+import { NotificationEventStore } from "./notification_event_store.js";
+import { NotificationDetector } from "./notification_detector.js";
+import {
+  NotificationSubscriptionManager,
+  parseAckRequest,
+  parseReceiptRequest,
+  parseSubscribeRequest,
+} from "./notification_protocol.js";
+import { NotificationReceiptStore } from "./notification_receipts.js";
+import type { NotificationEventV1 } from "./notification_event.js";
 
 const config = loadConfig();
 const sources = new SourceRegistry(config.replayCapacity, config.replayByteBudget);
+
+// ---------------------------------------------------------------------------
+// 通知事件层(stable-plan.md Phase 1)
+//
+// 与 hubId 严格分工:hubId 是进程级的,继续服务旧 source cursor;
+// bridgeInstallationId 跨重启稳定,只给通知 cursor 用。两者并存,
+// 避免升级即断链 —— 见 stable-plan.md §3.2。
+//
+// 本期是 shadow 模式:只生成事件与指标,不改变任何现有客户端行为。
+// ---------------------------------------------------------------------------
+
+const bridgeIdentity = loadBridgeIdentity().identity;
+const notificationStore = new NotificationEventStore();
+notificationStore.load();
+const notificationDetector = new NotificationDetector({
+  bridgeInstallationId: bridgeIdentity.bridgeInstallationId,
+  eventEpoch: bridgeIdentity.eventEpoch,
+  store: notificationStore,
+});
+const notificationSubscriptions = new NotificationSubscriptionManager(
+  notificationStore,
+  bridgeIdentity.bridgeInstallationId,
+  bridgeIdentity.eventEpoch,
+);
+const notificationReceipts = new NotificationReceiptStore();
+
+/// 声明给客户端的通知能力。旧客户端看不懂就忽略,
+/// 新客户端靠它判定能不能发通知帧。
+const NOTIFICATION_CAPABILITIES = ["notification_events_v1", "notification_receipts_v1"];
+
+/// 事件已落盘后推给已 ready 的订阅。persisted 为 false 时绝不推 ——
+/// 未落盘的事件不得进任何发送队列,否则客户端会 ack 一个
+/// Bridge 重启后并不存在的 sequence。
+function publishNotificationEvent(result: { event: NotificationEventV1; persisted: boolean } | undefined): void {
+  if (result === undefined) return;
+  if (!result.persisted) {
+    console.error(
+      `[notify] event ${result.event.eventId.slice(0, 8)} not persisted; withholding delivery`,
+    );
+    return;
+  }
+  const deliverable = notificationSubscriptions.onEvent(result.event);
+  if (deliverable.size === 0) return;
+  for (const client of mobileClients.values()) {
+    const events = deliverable.get(notificationSubscriptionIdFor(client.clientId));
+    if (events === undefined || events.length === 0) continue;
+    sendObject(client.ws, {
+      type: "notification_events",
+      eventEpoch: bridgeIdentity.eventEpoch,
+      bridgeNow: new Date().toISOString(),
+      events,
+      skippedRanges: [],
+      live: true,
+    });
+  }
+}
+
+/// 订阅 id 绑 clientId:一个手机连接只维护一条通知订阅。
+function notificationSubscriptionIdFor(clientId: string): string {
+  return `notify:${clientId}`;
+}
 /// 兼容别名:老版 App 仍会选这个 sourceId,解析到引导会话。
 const HEADLESS_SOURCE_ID = config.headlessSourceId;
 
@@ -631,9 +703,44 @@ function noteStreamingFromEvent(sourceId: string, eventType: unknown): void {
   // 值没真翻就不广播 —— 每个 desktop_event 都会过这里,不能每次都刷。
   if ((streamingBySource.get(sourceId) ?? false) === next) return;
   streamingBySource.set(sourceId, next);
+  // 通知事件挂在这个权威边沿上,而不是相信手机上报的 isStreaming ——
+  // 手机的状态会因进程冻结、socket 半开、状态防抖而落后甚至永久错位。
+  // agent_end 与 agent_settled 都会走到这里,靠 taskGenerationId 去重成一条。
+  if (next) {
+    notificationDetector.onTaskStart(sourceId);
+  } else {
+    const snapshot = sources.getSnapshot(sourceId);
+    const sessionId =
+      typeof snapshot?.state.sessionId === "string" ? snapshot.state.sessionId : undefined;
+    publishNotificationEvent(
+      notificationDetector.onTaskEnd(sourceId, {
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      }),
+    );
+  }
   // streaming 翻转要改变手机常驻通知上的「工作中」计数(也会刷新
   // App 侧 state.sessions 的 streaming 标记,后台会话完成检测靠它)。
   notifySessionsChanged();
+}
+
+/// 权威快照显示某个源正在工作时,同步内存边沿状态并让 detector 领养代次。
+///
+/// 为什么必须领养:noteStreamingFromEvent 只认 desktop_event 的
+/// agent_start/agent_end,而 Bridge 在任务中途重启后,内存里的
+/// streamingBySource 与 detector 代次表都是空的,pi 重连只补发快照、
+/// 不会重发 agent_start。此时若不建立代次归属,后续 agent_end 到达时
+/// onTaskEnd 找不到在飞代次,按约定返回 undefined(绝不凭空造完成事件),
+/// 于是那条完成通知整个消失。
+///
+/// 症状极具误导性:常驻通知的「工作中」计数直读快照(见 isSourceStreaming),
+/// 与 detector 无关,所以会话状态会如实更新成空闲,只有通知不来 ——
+/// 看起来像投递失败,实际是生成端从未产出。
+///
+/// 领养只建立「recovery-」前缀的代次归属,自己不发通知;
+/// 已有在飞代次时幂等(直接返回原代次 id)。
+function adoptStreamingFromSnapshot(sourceId: string): void {
+  streamingBySource.set(sourceId, true);
+  notificationDetector.adoptStreamingSource(sourceId);
 }
 
 /// op 幂等注册表:clientId 级 opId → 状态。内存表 + 侧车 JSONL
@@ -1874,6 +1981,94 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
       return;
     }
     switch (msg.type) {
+      // --- 通知事件协议(stable-plan.md §7)------------------------------
+      // 这条链路与 UI 的 hub_sync 完全独立:hub_sync 面向 source 状态,
+      // 通知 cursor 面向「用户该被提醒什么」。混用会让一次改动同时
+      // 影响两条链路,所以刻意不复用 parseCursor。
+      case "notification_subscribe": {
+        const request = parseSubscribeRequest({
+          ...msg,
+          id: notificationSubscriptionIdFor(client.clientId),
+        });
+        if (request === undefined) {
+          respond(client.ws, msg, false, undefined, "invalid notification_subscribe");
+          return;
+        }
+        const result = notificationSubscriptions.subscribe(request);
+        respond(client.ws, msg, true, result);
+        // catch-up 已在首页返回;若一次就追平,排空 live buffer 后立刻宣布 ready。
+        // ready 绝不能在 socket 打开时就发 —— 那正是当前实现过早抑制兜底通知的缺陷。
+        if (result.type === "notification_events" && !result.hasMore) {
+          const drained = notificationSubscriptions.drainLiveBuffer(request.id);
+          if (Array.isArray(drained) && drained.length > 0) {
+            sendObject(client.ws, {
+              type: "notification_events",
+              eventEpoch: bridgeIdentity.eventEpoch,
+              bridgeNow: new Date().toISOString(),
+              events: drained,
+              skippedRanges: [],
+              live: true,
+            });
+          }
+          const ready = notificationSubscriptions.markReady(request.id);
+          if (ready !== undefined) sendObject(client.ws, ready);
+        }
+        return;
+      }
+
+      case "notification_next_page": {
+        const subscriptionId = notificationSubscriptionIdFor(client.clientId);
+        const scopeVersion =
+          typeof msg.scopeVersion === "number" ? msg.scopeVersion : undefined;
+        const page = notificationSubscriptions.nextPage(subscriptionId, scopeVersion);
+        if (page === undefined) {
+          respond(client.ws, msg, false, undefined, "no active notification subscription");
+          return;
+        }
+        respond(client.ws, msg, true, page);
+        if (page.type === "notification_events" && !page.hasMore) {
+          const drained = notificationSubscriptions.drainLiveBuffer(subscriptionId);
+          if (Array.isArray(drained) && drained.length > 0) {
+            sendObject(client.ws, {
+              type: "notification_events",
+              eventEpoch: bridgeIdentity.eventEpoch,
+              bridgeNow: new Date().toISOString(),
+              events: drained,
+              skippedRanges: [],
+              live: true,
+            });
+          }
+          const ready = notificationSubscriptions.markReady(subscriptionId);
+          if (ready !== undefined) sendObject(client.ws, ready);
+        }
+        return;
+      }
+
+      case "notification_ack": {
+        const request = parseAckRequest(msg);
+        if (request === undefined) {
+          respond(client.ws, msg, false, undefined, "invalid notification_ack");
+          return;
+        }
+        const result = notificationSubscriptions.ack(request);
+        if (result.ok) respond(client.ws, msg, true, { through: request.through });
+        else respond(client.ws, msg, false, undefined, result.error);
+        return;
+      }
+
+      case "notification_receipt": {
+        const request = parseReceiptRequest(msg);
+        if (request === undefined) {
+          respond(client.ws, msg, false, undefined, "invalid notification_receipt");
+          return;
+        }
+        // receipt 只服务仲裁与指标,不推进 cursor(§7.4)。允许显著延迟到达,
+        // 所以这里只记录,不因它做任何状态推进。
+        notificationReceipts.record(request);
+        respond(client.ws, msg, true, { recorded: true });
+        return;
+      }
+
       case "hub_list_sources":
         respond(client.ws, msg, true, { hubId: sources.hubId, sources: sources.list(client.clientId) });
         return;
@@ -2657,6 +2852,9 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
     );
     sources.setSnapshot(sourceId, snapshot);
     desktopOfflineSince.delete(sourceId);
+    // 注册路径同样要领养。Bridge 在任务中途重启后,pi 重连走的是
+    // desktop_register(不是 desktop_snapshot),这才是现实中最常见的入口。
+    if (snapshot.state.isStreaming === true) adoptStreamingFromSnapshot(sourceId);
     sendObject(desktop.ws, {
       type: "desktop_registered",
       hubId: sources.hubId,
@@ -2693,7 +2891,7 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
         desktop.claimedSessionId = nextSessionId;
         void reconcileDesktopClaim(sourceId, nextSessionId);
       }
-      if (snapshot.state.isStreaming === true) streamingBySource.set(sourceId, true);
+      if (snapshot.state.isStreaming === true) adoptStreamingFromSnapshot(sourceId);
       broadcastSnapshotAnnounce(sourceId, snapshot);
       notifySourcesChanged();
       return;
@@ -2999,6 +3197,10 @@ function acceptMobileClient(
     type: "bridge_hello",
     version: HUB_PROTOCOL_VERSION,
     hubId: sources.hubId,
+    // 双字段过渡:hubId 保留给旧客户端与旧 source cursor,
+    // bridgeInstallationId 跨重启稳定,只给通知 cursor 用。见 stable-plan.md §3.2。
+    bridgeInstallationId: bridgeIdentity.bridgeInstallationId,
+    eventEpoch: bridgeIdentity.eventEpoch,
     clientId: client.clientId,
     capabilities: [
       "sources",
@@ -3009,6 +3211,7 @@ function acceptMobileClient(
       "sessions",
       "concurrent-sessions",
       "navigate-tree",
+      ...NOTIFICATION_CAPABILITIES,
       ...(ws instanceof DataChannelSocket && ws.supportsChunking
         ? [P2P_CHUNK_CAPABILITY, P2P_CHUNK_V2_CAPABILITY]
         : []),
@@ -3032,7 +3235,13 @@ function acceptMobileClient(
       respond(ws, msg, false, undefined, "message type is required");
       return;
     }
-    if (msg.type.startsWith("hub_")) {
+    if (msg.type.startsWith("hub_") || msg.type.startsWith("notification_")) {
+      // notification_* 与 hub_* 同走 hub 分支。
+      //
+      // 通知链路刻意不依赖「已选 source」:它的作用域是整个 Bridge,
+      // 手机在后台时根本没有选中的 source,而那正是最需要收到通知的时刻。
+      // 漏掉这个前缀会让通知帧落到 handleSourceCommand,被
+      // requireSelectedSource 以 "select a source first" 拒掉。
       void handleHubCommand(client, msg);
     } else if (msg.type.startsWith("bridge_")) {
       void handleBridgeCommand(client, msg);
@@ -3076,7 +3285,8 @@ const pingTimer = setInterval(() => {
       pingMisses.set(socket, misses);
       if (misses >= MOBILE_PING_MAX_MISS) {
         console.error(
-          `[hub] 手机连接连续 ${misses} 次未回 pong(约 ${misses * 10}s),判定半开并断开`,
+          `[hub] 手机连接连续 ${misses} 次未回 pong(约 ${misses * 10}s),判定半开并断开` +
+            ` clientId=${mobileClients.get(socket)?.clientId ?? "?"}`,
         );
         socket.terminate();
         continue;
@@ -3176,6 +3386,8 @@ const stopAnnounce =
         hubId: sources.hubId,
         protocolVersion: HUB_PROTOCOL_VERSION,
         name: config.p2p.deviceId,
+        bridgeInstallationId: bridgeIdentity.bridgeInstallationId,
+        notificationEvents: true,
       });
 
 // P2P(打洞)远程通道:作为 WebRTC host 挂到信令服,手机叫进来后在

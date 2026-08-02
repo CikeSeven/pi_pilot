@@ -12,6 +12,12 @@ export interface AnnounceOptions {
   protocolVersion: number;
   /** mDNS 实例名,默认主机名(「书房的 Mac」)。 */
   name?: string;
+  /// 跨重启稳定的 Bridge 身份。hubId 每次启动都变,手机在 DHCP 换址后
+  /// 需要一个稳定值确认「还是原来那台机器」。两者并存,见 stable-plan.md §3.2。
+  bridgeInstallationId?: string;
+  /// 是否支持通知事件协议。旧客户端看不懂就忽略,新客户端靠它决定
+  /// 能不能发通知帧,避免对旧 Bridge 发未知帧。
+  notificationEvents?: boolean;
 }
 
 export type AnnounceNetworkInterfaces = Record<
@@ -97,6 +103,13 @@ export function startAnnounce(options: AnnounceOptions): () => void {
         hubId: options.hubId,
         v: String(options.protocolVersion),
         auth: "token",
+        // 双字段过渡:旧客户端只读 hubId,行为完全不变;
+        // 新客户端优先读 bridgeId,但必须在已鉴权的 bridge_hello 里复核 ——
+        // mDNS TXT 可被同网设备伪造,它只是发现提示,不是信任根。
+        ...(options.bridgeInstallationId !== undefined
+          ? { bridgeId: options.bridgeInstallationId }
+          : {}),
+        ...(options.notificationEvents === true ? { notify: "1" } : {}),
         // bonjour-service 会把所有 Docker/VPN 地址都放进 A 记录。
         // App 端优先读这个明确的物理 LAN 地址,避免 Android NSD 选错。
         ipv4: lanIpv4,

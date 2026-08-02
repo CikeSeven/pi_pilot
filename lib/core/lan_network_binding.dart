@@ -28,14 +28,23 @@ final class LanNetworkBinding {
 
   /// Runs [action] with future Android sockets routed over Wi-Fi when possible.
   /// Non-Android targets and unavailable platform bindings retain old behavior.
-  static Future<T> withWifiBinding<T>(Future<T> Function() action) async {
+  ///
+  /// [host] 必须传:原生侧要按目标地址挑能路由到它的那张 Wi-Fi。手机同时挂
+  /// 两张 Wi-Fi(例如 192.168.1.x 与 10.183.39.x)时,盲选第一张会把整个进程
+  /// 钉在到不了 Bridge 的网卡上,socket 创建即无路由,连 SYN 都发不出去。
+  static Future<T> withWifiBinding<T>(
+    Future<T> Function() action, {
+    String? host,
+  }) async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
       return action();
     }
 
     var bound = false;
     try {
-      bound = await _channel.invokeMethod<bool>('bindWifiForLan') ?? false;
+      bound =
+          await _channel.invokeMethod<bool>('bindWifiForLan', {'host': host}) ??
+          false;
     } catch (error, stackTrace) {
       debugPrint('LAN Wi-Fi binding unavailable: $error');
       debugPrintStack(stackTrace: stackTrace);

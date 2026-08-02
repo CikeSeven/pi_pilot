@@ -8,6 +8,7 @@ import '../theme/semantic_colors.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
 import '../shell/liquid_nav_bar.dart' show kLiquidNavBarHeight;
+import 'diagnostics_page.dart';
 import 'settings_sections.dart';
 import '../theme/squircle.dart';
 
@@ -66,6 +67,14 @@ class SettingsScreen extends ConsumerWidget {
         title: '关于',
         summary: 'PiPilot · 手机远程驾驶 pi',
         builder: (_) => const AboutPage(),
+      ),
+      // 诊断是第 6 个入口:通知没来/延迟时的自助排查,
+      // 也是导出脱敏 JSON 给 issue 的入口(stable-plan.md §16.3)。
+      _SettingsEntry(
+        icon: Icons.troubleshoot,
+        title: '诊断',
+        summary: '后台连接 · 权限 · 指标',
+        builder: (_) => const DiagnosticsPage(),
       ),
     ];
 

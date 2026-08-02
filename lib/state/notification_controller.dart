@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/notification_p2p_client.dart';
 import '../core/notification_service.dart';
 import 'device_alerts.dart';
 import 'device_manager.dart';
@@ -162,7 +163,27 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   bool _watcherActive = false;
   final _connectionNotificationOperations = NotificationOperationSequencer();
 
+  /// 断线提醒的防抖定时器。
+  ///
+  /// 断线**立即**弹通知是错的:实测原生 owner 从断连到重连成功只要约 1 秒
+  /// (冻结解冻后 onFailure 迟到 → 重连 → READY 216ms),而这条通知带震动、
+  /// 用固定 id=2,于是每次瞬态重连都白打扰用户一次。真机验收里用户明确
+  /// 反馈「还有连接失败重连的通知」。
+  ///
+  /// 改为宽限期内不打扰:超过 _connectionLostGrace 仍未恢复才提醒,
+  /// 期间恢复就直接取消,用户完全无感。
+  Timer? _connectionLostTimer;
+
+  /// 宽限期。取 20s:大于 Bridge 判半开的 30s 一半、也大于退避首档 1s 与
+  /// 冻结解冻后的典型重连耗时,足以滤掉全部瞬态断连;真正断网/关机等
+  /// 长时间失联仍会如实提醒。
+  static const _connectionLostGrace = Duration(seconds: 20);
+
   int _watcherRequestGeneration = 0;
+
+  /// remote_hint_v1:P2P 路径的通知协议穿梭。只在「后台 && transport==p2p
+  /// && 连接在」时活跃;帧处理全在原生引擎,这里只管传输生命周期。
+  final NotificationP2pClient _p2pClient = NotificationP2pClient();
 
   bool get _inBackground => _lifecycle != AppLifecycleState.resumed;
   bool get _enabled => ref.read(settingsProvider).notificationsEnabled;
@@ -172,6 +193,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 原生接管状态由回调驱动,必须在这里就订阅:startWatcher 提交后
+    // ready 可能很快到达,晚订阅会漏掉那一次通知。
+    NotificationService.instance.watcherReady.addListener(_onWatcherReadyChanged);
     // 初始化完成后立即同步当前连接态。不能只等待 status 下一次变化:
     // 自动连接可能在通知权限请求期间已经完成,connected 不会再次重放。
     unawaited(_initializeNotifications());
@@ -189,10 +213,17 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // 防抖定时器必须随组件销毁一起取消,否则回调会打到已 dispose 的 ref 上。
+    _connectionLostTimer?.cancel();
+    _connectionLostTimer = null;
+    NotificationService.instance.watcherReady.removeListener(
+      _onWatcherReadyChanged,
+    );
     _watcherRequestGeneration++;
     // A startWatcher MethodChannel call can still be in flight when the
     // widget is disposed. Always issue the matching stop to close that race.
     unawaited(NotificationService.instance.stopWatcher());
+    unawaited(_p2pClient.stop());
     super.dispose();
   }
 
@@ -205,9 +236,13 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       _streamingWhenBackgrounded = ref.read(piSessionProvider).isStreaming;
       // 把后台的连接与通知交给原生线程(Dart isolate 会被 MIUI 停止调度)
       unawaited(_startWatcher());
+      // P2P 通道上的通知穿梭(Dart 持有 socket,原生引擎处理帧)
+      unawaited(_syncP2pNotificationClient());
     } else {
       // 回前台:先收回原生观察连接,避免与 Dart 连接重复收事件
       unawaited(_stopWatcher());
+      // 回前台:P2P 穿梭也收回,弹过的通知一并撤掉
+      unawaited(_p2pClient.reset());
       // 回前台:逐个取消任务通知(用户已回到 app),但绝不碰 FGS 常驻通知
       _cancelTaskNotifications();
       // 回前台且已连着:确保 FGS 在跑(可能因后台断连被停过)
@@ -220,6 +255,58 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     );
   }
 
+  /// remote_hint_v1:按当前状态决定 P2P 通知穿梭的起停。
+  /// 与 LAN watcher 互斥——transport==p2p 时原生 watcher 本来就不启动
+  /// (resolveWatcherConnectionTarget 返回 null),两条路径不会同时接管。
+  Future<void> _syncP2pNotificationClient() async {
+    final session = ref.read(piSessionProvider);
+    final shouldRun = _inBackground &&
+        _enabled &&
+        session.status == PiConnStatus.connected &&
+        session.activeTransport == PiActiveTransport.p2p;
+    unawaited(
+      NotificationService.instance.logDiagnostic(
+        'p2p sync: bg=$_inBackground en=$_enabled st=${session.status.name} '
+        'tr=${session.activeTransport?.name} active=${_p2pClient.isActive} run=$shouldRun',
+      ),
+    );
+    if (!shouldRun) {
+      if (_p2pClient.isActive) await _p2pClient.stop();
+      return;
+    }
+    if (_p2pClient.isActive) return;
+    final notifier = ref.read(piSessionNotifierProvider);
+    final conn = notifier?.activeConnection;
+    if (conn == null) {
+      unawaited(NotificationService.instance.logDiagnostic('p2p sync: conn=null'));
+      return;
+    }
+    final deviceId = ref.read(deviceManagerProvider).activeDeviceId;
+    if (deviceId == null) {
+      unawaited(NotificationService.instance.logDiagnostic('p2p sync: deviceId=null'));
+      return;
+    }
+    final settings = ref.read(settingsProvider);
+    final hello = notifier?.lastHelloFrame;
+    unawaited(
+      NotificationService.instance.logDiagnostic(
+        'p2p sync: start hello=${hello != null}',
+      ),
+    );
+    _p2pClient.start(
+      connection: conn,
+      // 与 LAN watcher 同一个 installationId:Bridge 按它记 cursor,
+      // 两条路径共享同一份进度与去重表。
+      installationId: nativeWatcherClientId(
+        appClientId: settings.clientId,
+        deviceId: deviceId,
+      ),
+      vibrate: settings.notificationVibrationEnabled,
+      // 前台连上→后退后台时 hello 已被消费,拿缓存重放给引擎。
+      cachedHello: hello,
+    );
+  }
+
   /// 交接给原生层。缺少任一连接参数(未连接/未选 source)时不启动,
   /// 此时仍由 Dart 的回前台兜底路径负责通知。
   Future<void> _startWatcher() async {
@@ -229,6 +316,9 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       if (requestGeneration == _watcherRequestGeneration) {
         _watcherActive = false;
         await NotificationService.instance.stopWatcher();
+        // 与 LAN 路径对齐:通知开关关掉时 P2P 穿梭也得停,否则引擎
+        // 会继续在原生弹通知,绕过 Dart 的开关检查。
+        await _p2pClient.stop();
       }
       return;
     }
@@ -240,12 +330,19 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     );
     if (target == null) {
       if (requestGeneration != _watcherRequestGeneration) return;
-      _watcherActive = false;
+      // stopWatcher 照发:原生 watcher 若还在跑(LAN→P2P 切换途中)必须停;
+      // 仲裁器下它不会再误伤 P2P 引擎的 ready。
       await NotificationService.instance.stopWatcher();
+      // 但 _watcherActive 不能无条件清:P2P 穿梭活跃时通知归它的引擎管,
+      // 所有权由引擎 ready 驱动。实测这里清掉后,Dart 兜底与原生引擎
+      // 对同一事件各弹一条(重复通知)。
+      if (!_p2pClient.isActive) {
+        _watcherActive = false;
+      }
       return;
     }
     final settings = ref.read(settingsProvider);
-    final started = await NotificationService.instance.startWatcher(
+    final submitted = await NotificationService.instance.startWatcher(
       host: target.host,
       port: target.port,
       token: target.token,
@@ -259,13 +356,35 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       wasStreaming: target.wasStreaming,
     );
     if (!mounted || requestGeneration != _watcherRequestGeneration) return;
-    if (_inBackground) {
-      _watcherActive = started;
-    } else if (started) {
-      // The app returned to the foreground while startWatcher was awaiting
-      // the platform channel. Do not leave a second connection behind.
-      await NotificationService.instance.stopWatcher();
+    if (!_inBackground) {
+      // 回前台了。startWatcher 只是「已提交」,无论如何都要收回,
+      // 否则会留下第二条连接。
+      if (submitted) await NotificationService.instance.stopWatcher();
+      return;
     }
+    // 关键:不再用 submitted 推断接管成功。
+    //
+    // startWatcher 返回 true 只代表原生受理了启动请求,此时 socket 可能
+    // 还没连上、没鉴权、没追平事件。真正的接管由原生的 watcherReady 回调
+    // 宣布,_onWatcherReadyChanged 会在那时把 _watcherActive 置为 true。
+    // 在此之前 Dart 必须保留兜底通知所有权,否则就是通知空窗。
+  }
+
+  /// 原生接管状态变化。只有它能把 _watcherActive 置为 true。
+  void _onWatcherReadyChanged() {
+    if (!mounted) return;
+    final ready = NotificationService.instance.watcherReady.value;
+    // 已回前台时忽略迟到的 ready:此时 Dart 自己在连,不该让出所有权。
+    final next = ready && _inBackground;
+    unawaited(
+      NotificationService.instance.logDiagnostic(
+        'readyChanged: ready=$ready bg=$_inBackground $_watcherActive->$next',
+      ),
+    );
+    if (_watcherActive == next) return;
+    setState(() {
+      _watcherActive = next;
+    });
   }
 
   Future<void> _stopWatcher() async {
@@ -312,6 +431,10 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   void _notify(String title, [String? body]) {
     if (!_enabled) return;
     if (!_inBackground) return;
+    // 原生引擎(watcher/coordinator/P2P)已接管后台通知时不能再弹:
+    // 引擎订阅全量 bridge 事件,后台会话完成与输入请求它都会弹,
+    // 这里不检查就会对同一事件重复通知(实测复现:id=100 与引擎各一条)。
+    if (_watcherActive) return;
     final id = ++_notificationId;
     unawaited(
       NotificationService.instance.show(
@@ -325,19 +448,30 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   void _notifyConnectionLost() {
     if (!_enabled || !_inBackground) return;
-    unawaited(
-      _connectionNotificationOperations.enqueue(
-        () => NotificationService.instance.show(
-          id: connectionLostNotificationId,
-          title: '与 bridge 的连接已断开',
-          body: '将自动重连',
-          vibrate: _vibrate,
+    // 防抖:先起定时器,宽限期内恢复就不打扰。重复断线只保留最后一次计时。
+    _connectionLostTimer?.cancel();
+    _connectionLostTimer = Timer(_connectionLostGrace, () {
+      _connectionLostTimer = null;
+      // 到点再确认一次:期间可能已恢复,或应用已回前台。
+      if (!mounted || !_enabled || !_inBackground) return;
+      if (ref.read(piSessionProvider).status == PiConnStatus.connected) return;
+      unawaited(
+        _connectionNotificationOperations.enqueue(
+          () => NotificationService.instance.show(
+            id: connectionLostNotificationId,
+            title: '与 bridge 的连接已断开',
+            body: '将自动重连',
+            vibrate: _vibrate,
+          ),
         ),
-      ),
-    );
+      );
+    });
   }
 
   void _cancelConnectionLostNotification() {
+    // 计时中的提醒一并取消,否则重连成功后宽限期到点仍会弹出来。
+    _connectionLostTimer?.cancel();
+    _connectionLostTimer = null;
     unawaited(
       _connectionNotificationOperations.enqueue(
         () => NotificationService.instance.cancelById(
@@ -396,6 +530,8 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     ref.listen(_watcherIdentityProvider, (previous, next) {
       if (previous == null || previous == next) return;
       if (_inBackground) unawaited(_startWatcher());
+      // transport 也在身份元组里:LAN ↔ P2P 切换时穿梭要跟着起停。
+      unawaited(_syncP2pNotificationClient());
     });
 
     // 常驻通知文案:连接状态或会话计数变化时推给原生刷新。
@@ -441,7 +577,27 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       if (next == PiConnStatus.connected) {
         _cancelConnectionLostNotification();
         _syncForeground();
+        // 后台重连成功后补拉一次原生 owner,作为显式恢复信号。
+        //
+        // 先说清一个容易误判的点:_startWatcher 只在生命周期切换与
+        // watcher 身份变化两处被调,而身份监听器**确实**覆盖
+        // selectedSourceId 的 null -> 原值 回归(那也是一次身份变化),
+        // 所以「源没了又回来」这类恢复本就有人管,此处不是为它兜底。
+        //
+        // 加这一路的真正理由:「owner 已停」与「Dart 已连上」之间没有任何
+        // 直接联系。任何停掉 owner 却不伴随后续身份变化的路径(例如通知
+        // 开关关掉再打开、或身份稳定期间下发的停止),都会让 owner 一直
+        // 停着,而应用全程在后台又没有生命周期切换可依赖。连接恢复是
+        // 最可靠的「该重新交接了」信号,直接用它,不再只依赖间接信号。
+        //
+        // 重复调用安全:coordinator 的 start(sameTarget=true) 快速路径保留
+        // 现有 socket,不重建连接、不递增世代。
+        if (_inBackground) unawaited(_startWatcher());
+        // P2P 通道刚连上:后台期间把通知穿梭挂上。
+        unawaited(_syncP2pNotificationClient());
       } else if (prev == PiConnStatus.connected) {
+        // 断线:P2P 穿梭立刻停,引擎 ready 由 p2pNotificationClosed 收回。
+        unawaited(_p2pClient.stop());
         unawaited(
           NotificationService.instance.logDiagnostic(
             'bridge disconnected: next=${next.name} background=$_inBackground',

@@ -792,6 +792,16 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 本实例负责的 roster 设备 id(保活/账本对账用)。
   String get deviceId => _deviceId;
 
+  /// remote_hint_v1:通知协议穿梭用的活动连接只读视图。
+  /// 生命周期仍由 notifier 管理,调用方不得持有它跨重连使用。
+  PiConnection? get activeConnection => _conn;
+
+  /// remote_hint_v1:当前连接上收到的 bridge_hello 原文。
+  /// 后台才启动的通知穿梭等不到下一条 hello(每连接只发一次),
+  /// 启动时拿这份缓存先重放给原生引擎,否则引擎无法订阅。
+  Map<String, dynamic>? get lastHelloFrame => _lastHelloFrame;
+  Map<String, dynamic>? _lastHelloFrame;
+
   PiConnection? _conn;
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<PiConnStatus>? _statusSub;
@@ -936,6 +946,8 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 快照——用户在设备页改了配置,要显式再调 connect 才生效,重连不会
   /// 悄悄换参数。
   Future<void> connect(DeviceProfile device) async {
+    // 新连接尝试:旧 hello 属于旧连接,作废,等新连接的 hello 再写。
+    _lastHelloFrame = null;
     // clientId 是「这台手机」的全局身份(与设备无关),仍从设置读。
     final clientId = ref.read(settingsProvider).clientId;
     // token 两条路都要:直连经 ?token= 鉴权,打洞经首帧 auth 鉴权。
@@ -996,6 +1008,11 @@ class PiSessionNotifier extends Notifier<PiState> {
         status: PiConnStatus.failed,
         error: '连接失败或鉴权被拒,请检查地址与 token',
       );
+      // 首连失败也必须进入重试。原来这里直接 return,而 _onConnStatus 开头有
+      // `!state.hasSession` 提前返回,于是自动重连只在「曾经连上过」之后才存在:
+      // 冷启动时 Bridge 没就绪、Wi-Fi 刚切换、DHCP 还没拿到地址等任何瞬时失败,
+      // 都会被固化成永久失败态,用户只能反复手动点重试(实测正是这个体感)。
+      _scheduleReconnect();
       return;
     }
     state = state.copyWith(status: PiConnStatus.connected, hasSession: true);
@@ -2245,6 +2262,7 @@ class PiSessionNotifier extends Notifier<PiState> {
               capabilities: const [msgDeltaCapability],
               timeout: const Duration(seconds: 12),
             ),
+            host: creds.host,
           );
           if (!currentAttempt()) {
             await conn.disconnectAndWait(notify: false);
@@ -2319,6 +2337,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   }
 
   void _applyHello(Map<String, dynamic> hello) {
+    _lastHelloFrame = hello;
     final version = hello['version'] as int? ?? 1;
     final hubId = hello['hubId'] as String?;
     _hubV2 = version >= 2 && hubId != null;
@@ -2389,6 +2408,7 @@ class PiSessionNotifier extends Notifier<PiState> {
             return null;
           }
           return LanNetworkBinding.withWifiBinding(
+            host: creds.host,
             () => probe.connect(
               host: creds.host,
               port: creds.port,
@@ -2605,7 +2625,10 @@ class PiSessionNotifier extends Notifier<PiState> {
       return;
     }
     _reconnectAttempt = 0;
-    state = state.copyWith(status: PiConnStatus.connected);
+    // hasSession 必须一起置真。首连失败后是这条路径把连接建起来的,若只置
+    // status,_onConnStatus 开头的 `!state.hasSession` 守卫会继续拦着,之后
+    // 真掉线又不会重连 —— 等于把首连失败的设备永久留在「一次性连接」状态。
+    state = state.copyWith(status: PiConnStatus.connected, hasSession: true);
     await _initializeAfterConnect(generation);
   }
 
