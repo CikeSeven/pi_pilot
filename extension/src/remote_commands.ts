@@ -26,12 +26,44 @@ export interface RemoteCommand {
   instructions?: unknown;
 }
 
+export interface InterruptibleContext {
+  abort(): void;
+  isIdle(): boolean;
+  abortCompaction?: () => void;
+  isCompacting?: () => boolean;
+}
+
+/** 中断生成或压缩,并等宿主真正退出忙碌态后再允许下一条命令。 */
+export async function abortRemoteOperation(
+  ctx: InterruptibleContext,
+  options: { expectCompacting?: boolean; timeoutMs?: number } = {},
+): Promise<{ compaction: boolean }> {
+  const compacting = ctx.isCompacting?.() === true || options.expectCompacting === true;
+  if (compacting && typeof ctx.abortCompaction !== "function") {
+    throw new Error("desktop runtime cannot abort compaction");
+  }
+
+  // 两个控制器彼此独立:普通 abort 停 agent/retry,abortCompaction 停摘要模型。
+  ctx.abort();
+  ctx.abortCompaction?.();
+
+  const deadline = Date.now() + (options.timeoutMs ?? 25_000);
+  while (!ctx.isIdle() || ctx.isCompacting?.() === true) {
+    if (Date.now() >= deadline) throw new Error("desktop did not stop in time");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return { compaction: compacting };
+}
+
 export interface CommandRuntime {
   pi: Pick<
     ExtensionAPI,
     "sendUserMessage" | "setModel" | "getThinkingLevel" | "setThinkingLevel" | "setSessionName"
   >;
-  ctx: Pick<ExtensionContext, "abort" | "isIdle" | "modelRegistry" | "compact">;
+  ctx: Pick<ExtensionContext, "abort" | "isIdle" | "modelRegistry" | "compact"> &
+    Partial<Pick<InterruptibleContext, "abortCompaction" | "isCompacting">>;
+  /// 中断必须等待宿主退出忙碌态;relay 在这里补压缩状态事件的收口。
+  abortCurrent?: () => Promise<unknown>;
   /// 会话回退:relay 用缓存的命令上下文执行(普通 ExtensionContext 上没有 navigateTree)。
   navigate?: (entryId: string | undefined) => Promise<unknown>;
   /// 压缩出错时告知手机。ctx.compact() 不 await,错误只会走 onError 回调,
@@ -49,14 +81,16 @@ export async function executeRemoteCommand(
         throw new Error("prompt message must be a non-empty string");
       }
       if (command.message.length > 100_000) throw new Error("prompt message is too large");
+      if (runtime.ctx.isCompacting?.() === true) {
+        throw new Error("desktop is compacting; abort first");
+      }
       if (runtime.ctx.isIdle()) {
         runtime.pi.sendUserMessage(command.message);
         return { accepted: true, delivery: "immediate" };
       }
-      // 忙但客户端没指定投递方式:以前直接抛错,消息就丢了。
-      // 压缩上下文期间 isIdle() 为 false,而客户端看到的 isStreaming 是 false ——
-      // 双方对「忙」的判断必然错开,这个竞态不该由用户承担。
-      // 排队是无损的:兜底成 followUp,而不是丢消息。
+      // 普通忙碌(生成/retry)但客户端没指定投递方式时兜底排队。
+      // 压缩已在上面单独拒绝:pi 0.82.1 没有压缩消息队列,不能把
+      // followUp 当成「压缩后发送」。
       const delivery =
         command.streamingBehavior === "steer" || command.streamingBehavior === "followUp"
           ? command.streamingBehavior
@@ -66,8 +100,9 @@ export async function executeRemoteCommand(
     }
 
     case "abort":
-      runtime.ctx.abort();
-      return { aborted: true };
+      return runtime.abortCurrent
+        ? await runtime.abortCurrent()
+        : await abortRemoteOperation(runtime.ctx);
 
     case "compact": {
       // pi 确实把 compact 挂在 ExtensionContext 上(types.d.ts:240),

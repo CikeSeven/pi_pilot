@@ -21,6 +21,7 @@ import {
   isReadOnlySourceCommand,
   parseCursor,
   translateCompactPrompt,
+  translateHeadlessCommand,
   withoutHubMetadata,
   type BridgeMessage,
   type JsonObject,
@@ -676,6 +677,7 @@ function broadcastSnapshotAnnounce(sourceId: string, snapshot: SourceSnapshot): 
     leafId: snapshot.leafId,
     sessionId: typeof state.sessionId === "string" ? state.sessionId : null,
     isStreaming: state.isStreaming === true,
+    isCompacting: state.isCompacting === true,
     hasInFlightMessage: snapshot.inFlightMessage !== undefined,
   };
   for (const client of mobileClients.values()) {
@@ -970,6 +972,10 @@ function failPendingForSource(sourceId: string, error: string): void {
   }
 }
 
+function visibleCommands(commands: JsonObject[] | undefined): JsonObject[] {
+  return (commands ?? []).filter((entry) => entry.name !== "pipilot-abort");
+}
+
 /// 转发型只读响应的字节预算。
 ///
 /// 为什么必须有这一层:`handleDesktopRead` 里的页预算与单条硬上限**只作用于
@@ -987,6 +993,9 @@ function clipForwardedReadData(
 ): unknown {
   if (data === null || typeof data !== "object" || Array.isArray(data)) return data;
   const obj = data as JsonObject;
+  if (command === "get_commands") {
+    return { ...obj, commands: visibleCommands(Array.isArray(obj.commands) ? obj.commands : []) };
+  }
   const entries = obj.entries;
   if (!Array.isArray(entries)) return data;
 
@@ -1074,6 +1083,7 @@ function resolvePending(
 
 // 长耗时命令的转发超时(毫秒);未列出的命令用默认 30s。
 const SOURCE_COMMAND_TIMEOUTS: Record<string, number> = {
+  abort: 30_000,
   compact: 300_000,
   export_html: 60_000,
 };
@@ -1082,18 +1092,9 @@ const DEFAULT_SOURCE_COMMAND_TIMEOUT = 30_000;
 /**
  * headless(`pi --mode rpc`)的命令翻译。
  *
- * pi 的 RPC 协议里没有 `navigate_tree`(只读的 `get_tree`,和另开文件的 `fork`),
- * 唯一能原地移动 leaf 的入口是扩展命令。RPC 的 `prompt` **会**展开扩展命令,
- * 而扩展在 rpc 模式下同样加载,所以这里翻译成一条斜杠命令。
+ * pi 的 RPC 协议没有 `navigate_tree`,原生 `abort` 也只停 agent、不停独立的
+ * 压缩控制器。两者由 translateHeadlessCommand 翻译成 PiPilot 内部扩展命令。
  */
-function translateForHeadless(command: JsonObject): JsonObject {
-  if (command.type !== "navigate_tree") return command;
-  const entryId = typeof command.entryId === "string" ? command.entryId : "";
-  return {
-    type: "prompt",
-    message: entryId ? `/pipilot-nav ${entryId}` : "/pipilot-undo",
-  };
-}
 
 /// 手机不能借 prompt 通道执行任意斜杠命令:pi 会静默把它当扩展命令跑掉。
 /// 只放行 PiPilot 自己注册的两个。
@@ -1198,7 +1199,7 @@ function dispatchSourceCommand(
             fence: msg._hub?.fence,
             command,
           })
-        : transport?.send({ ...translateForHeadless(command), id: requestId });
+        : transport?.send({ ...translateHeadlessCommand(command), id: requestId });
     if (!sent) {
       clearTimeout(timeout);
       pending.delete(requestId);
@@ -1735,7 +1736,7 @@ function handleDesktopRead(client: MobileClient, source: SourceDescriptor, msg: 
       respond(client.ws, msg, true, snapshot.stats);
       return;
     case "get_commands":
-      respond(client.ws, msg, true, { commands: snapshot.commands ?? [] });
+      respond(client.ws, msg, true, { commands: visibleCommands(snapshot.commands) });
       return;
     case "get_available_thinking_levels":
       respond(client.ws, msg, true, {

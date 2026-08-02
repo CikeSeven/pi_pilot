@@ -32,6 +32,22 @@ class DynamicIslandBar extends ConsumerStatefulWidget {
   ConsumerState<DynamicIslandBar> createState() => DynamicIslandBarState();
 }
 
+/// 压缩是独立于 streaming 的忙碌态,必须先判;否则旧的 Working 文案
+/// 或 `isStreaming == false` 会把「压缩中」整个遮掉。
+String? islandWorkStatus(PiState state) {
+  if (state.isCompacting) return '压缩中';
+  if (state.activityStatus != null) return state.activityStatus;
+  if (!state.isStreaming) return null;
+  if (state.items.isEmpty) return '生成中';
+  final last = state.items.last;
+  if (last is AssistantItem) {
+    return last.thinking.isNotEmpty ? '思考中' : '回复中';
+  }
+  if (last is ToolItem) return '调用 ${last.name}';
+  if (last is BashItem) return '执行命令';
+  return '生成中';
+}
+
 /// public 状态类:_ChatTab 通过 GlobalKey 调 collapse()(滚动列表时自动收起)。
 class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     with SingleTickerProviderStateMixin {
@@ -130,23 +146,6 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     return state.selectedSource?.label ?? 'PiPilot';
   }
 
-  /// 工作状态:优先用桌面 working-activity 插件推过来的实时状态
-  /// (TUI Working 行同源,等待首 token/思考/工具执行都有明确文案,
-  /// 还自带「· 总30s」这类节奏);插件没跑时回落到本地推导。
-  String? _workStatus(PiState state) {
-    if (state.activityStatus != null) return state.activityStatus;
-    if (!state.isStreaming) return null;
-    if (state.isCompacting) return '压缩中';
-    if (state.items.isEmpty) return '生成中';
-    final last = state.items.last;
-    if (last is AssistantItem) {
-      return last.thinking.isNotEmpty ? '思考中' : '回复中';
-    }
-    if (last is ToolItem) return '调用 ${last.name}';
-    if (last is BashItem) return '执行命令';
-    return '生成中';
-  }
-
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(piSessionProvider);
@@ -160,7 +159,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     // 收起态宽度随文案自适应(working-activity 长文案不被截断)。
     final collapsedW = _measureCollapsedW(
       context,
-      _workStatus(state) ?? _title(state),
+      islandWorkStatus(state) ?? _title(state),
       hasTimer: state.isStreaming && state.activityStatus == null,
       clusterW: _connClusterW(context, state),
     );
@@ -376,7 +375,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               child: Text(
                 // 生成中显示工作状态(思考中/回复中/调用 read),
                 // 非生成中显示会话名。
-                _workStatus(state) ?? _title(state),
+                islandWorkStatus(state) ?? _title(state),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelLarge,
@@ -508,7 +507,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               Expanded(
                 child: Text(
                   // 生成中时副行前面加工作状态,一眼看出模型在干什么。
-                  [?_workStatus(state), _subtitle(state)].join(' · '),
+                  [?islandWorkStatus(state), _subtitle(state)].join(' · '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.labelSmall?.copyWith(

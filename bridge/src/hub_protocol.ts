@@ -103,6 +103,19 @@ export function translateCompactPrompt(
   return translated;
 }
 
+/** 将 Bridge 扩展命令翻译为 headless RPC 能执行的内部斜杠命令。 */
+export function translateHeadlessCommand(command: JsonObject): JsonObject {
+  if (command.type === "abort") {
+    return { type: "prompt", message: "/pipilot-abort" };
+  }
+  if (command.type !== "navigate_tree") return command;
+  const entryId = typeof command.entryId === "string" ? command.entryId : "";
+  return {
+    type: "prompt",
+    message: entryId ? `/pipilot-nav ${entryId}` : "/pipilot-undo",
+  };
+}
+
 const READ_ONLY_SOURCE_COMMANDS = new Set([
   "get_state",
   "get_entries",

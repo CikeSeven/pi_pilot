@@ -61,46 +61,66 @@ void main() {
     expect(find.text('中断并发送'), findsOneWidget);
   });
 
-  // 压缩期间桌面 ctx.isIdle() 也是 false,消息同样要选投递方式。
-  // 以前输入框完全不知道自己在忙,发出去直接被桌面报
-  // "busy desktop source requires steer or followUp delivery"。
-  testWidgets('压缩中且已输入内容时,给插队/排队但不给中断', (tester) async {
-    final controller = TextEditingController(text: '压缩完再干这个');
+  // pi 0.82.1 没有「压缩后发送」队列。压缩态只能明确中断,
+  // 不能展示看似可用、实际会绕过压缩控制器的插队/排队入口。
+  testWidgets('压缩中且已输入内容时,只提供中断并发送', (tester) async {
+    final controller = TextEditingController(text: '先停压缩再干这个');
     await tester.pumpWidget(
       wrap(controller: controller, streaming: false, compacting: true),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('插队'), findsOneWidget);
-    expect(find.text('排队'), findsOneWidget);
-    // 中断打断的是生成 —— 拿它去中断压缩只会让上下文停在半路
-    expect(find.text('中断并发送'), findsNothing);
+    expect(find.text('插队'), findsNothing);
+    expect(find.text('排队'), findsNothing);
+    expect(find.text('中断并发送'), findsOneWidget);
   });
 
-  testWidgets('压缩中的输入框占位文案说清会排队', (tester) async {
+  testWidgets('压缩中的输入框提示可中断后发送', (tester) async {
     final controller = TextEditingController();
     await tester.pumpWidget(
       wrap(controller: controller, streaming: false, compacting: true),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('压缩中 · 发送会排队'), findsOneWidget);
+    expect(find.text('压缩中 · 可中断后发送'), findsOneWidget);
   });
 
-  testWidgets('压缩中且输入框为空时,发送键不变成停止键', (tester) async {
+  testWidgets('压缩中且输入框为空时,发送键变成可中断的停止键', (tester) async {
     final controller = TextEditingController();
+    var aborted = 0;
     await tester.pumpWidget(
       wrap(
         controller: controller,
         streaming: false,
         compacting: true,
-        onAbort: () {},
+        onAbort: () => aborted++,
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.byIcon(Icons.stop_rounded), findsNothing);
-    expect(find.byIcon(Icons.arrow_upward_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_upward_rounded), findsNothing);
+    await tester.tap(find.byIcon(Icons.stop_rounded));
+    await tester.pump();
+    expect(aborted, 1);
+  });
+
+  testWidgets('压缩中有输入时,主发送键也走中断确认回调', (tester) async {
+    final controller = TextEditingController(text: '先停再发');
+    var interrupted = 0;
+    await tester.pumpWidget(
+      wrap(
+        controller: controller,
+        streaming: false,
+        compacting: true,
+        onInterruptAndSend: () => interrupted++,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.pump();
+    expect(interrupted, 1);
   });
 
   testWidgets('三个投递芯片各自触发对应回调', (tester) async {

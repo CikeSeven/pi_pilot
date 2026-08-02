@@ -3,31 +3,27 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
+import { AgentSession, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { loadRelayConfig, RELAY_CONFIG_PATH } from "./config.js";
 import { NavCommandContextCache, registerNavCommands } from "./nav_commands.js";
+import { abortRemoteOperation } from "./remote_commands.js";
 import { DesktopRelay, sessionTreeFrame } from "./relay.js";
 
 /**
- * 让每个事件 ctx 都带上 `navigateTree`。
+ * 给普通事件 ctx 补上 PiPilot 远程控制需要的会话级能力。
  *
- * pi 只把它挂在命令上下文上(createCommandContext),但真正实现
- * (`runner.navigateTreeHandler`)在会话建立时就通过 bindCommandContext
- * 绑好,且整个会话期间不会被解绑。手机发起的远程回退走的是 WebSocket
- * 事件,永远拿不到命令上下文 —— 老方案(navCache)要求用户先在电脑端
- * 跑一次 /pipilot,人在外面远程操控时这就是一道回家的门槛。
- *
- * 这里直接给宿主 ExtensionRunner 原型打补丁(扩展经 jiti 别名加载,
- * 与宿主共享同一个模块实例,补丁即生效于宿主),完全复刻
- * createCommandContext 里 navigateTree 的接法。特性探测失败就静默
- * 放弃,relay 会退回 navCache 老路径。
+ * `navigateTree` 和 `abortCompaction` 都是 AgentSession 的公开能力,但 pi
+ * 没把它们放进普通 ExtensionContext。手机命令来自 WebSocket,只能拿到
+ * 普通 ctx,所以在宿主创建 ctx 时补上受 assertActive 保护的薄委托。
  */
-function patchRunnerNavigateTree(): void {
+function patchRunnerContext(): void {
   try {
     const proto = (ExtensionRunner as unknown as { prototype?: Record<string, unknown> })
       ?.prototype;
     if (!proto || typeof proto.createContext !== "function") return;
-    if ((proto.createContext as { __pipilotNavPatched?: boolean }).__pipilotNavPatched) return;
+    if ((proto.createContext as { __pipilotContextPatched?: boolean }).__pipilotContextPatched) {
+      return;
+    }
     const original = proto.createContext as (this: unknown) => Record<string, unknown>;
     const patched = function (this: {
       assertActive?: () => void;
@@ -35,28 +31,76 @@ function patchRunnerNavigateTree(): void {
         targetId: string,
         options?: unknown,
       ) => Promise<unknown>;
+      __pipilotAbortCompaction?: () => void;
+      __pipilotIsCompacting?: () => boolean;
     }): Record<string, unknown> {
       const ctx = original.call(this);
+      const runner = this;
       if (
         ctx &&
         typeof ctx.navigateTree !== "function" &&
-        typeof this.navigateTreeHandler === "function"
+        typeof runner.navigateTreeHandler === "function"
       ) {
-        const runner = this;
         ctx.navigateTree = (targetId: string, options?: unknown) => {
           runner.assertActive?.();
           return runner.navigateTreeHandler!(targetId, options);
         };
       }
+      if (ctx && typeof runner.__pipilotAbortCompaction === "function") {
+        ctx.abortCompaction = () => {
+          runner.assertActive?.();
+          runner.__pipilotAbortCompaction!();
+        };
+        ctx.isCompacting = () => {
+          runner.assertActive?.();
+          return runner.__pipilotIsCompacting?.() === true;
+        };
+      }
       return ctx;
     };
-    (patched as { __pipilotNavPatched?: boolean }).__pipilotNavPatched = true;
+    (patched as { __pipilotContextPatched?: boolean }).__pipilotContextPatched = true;
     proto.createContext = patched;
   } catch {
-    // 补丁失败就保持原样(navCache 兜底),绝不能让扩展加载挂掉
+    // 补丁失败就保持原样;relay 会对回退走缓存兜底,压缩中断则明确报不可用。
   }
 }
-patchRunnerNavigateTree();
+
+/** 把当前 AgentSession 的压缩控制器绑定到它自己的 ExtensionRunner。 */
+function patchAgentSessionCompactionControl(): void {
+  try {
+    const proto = (AgentSession as unknown as { prototype?: Record<string, unknown> })
+      ?.prototype;
+    if (!proto || typeof proto._bindExtensionCore !== "function") return;
+    if (
+      (proto._bindExtensionCore as { __pipilotCompactionPatched?: boolean })
+        .__pipilotCompactionPatched
+    ) {
+      return;
+    }
+    const original = proto._bindExtensionCore as (
+      this: unknown,
+      runner: unknown,
+    ) => void;
+    const patched = function (
+      this: { abortCompaction?: () => void; isCompacting?: boolean },
+      runner: {
+        __pipilotAbortCompaction?: () => void;
+        __pipilotIsCompacting?: () => boolean;
+      },
+    ): void {
+      original.call(this, runner);
+      runner.__pipilotAbortCompaction = () => this.abortCompaction?.();
+      runner.__pipilotIsCompacting = () => this.isCompacting === true;
+    };
+    (patched as { __pipilotCompactionPatched?: boolean }).__pipilotCompactionPatched = true;
+    proto._bindExtensionCore = patched;
+  } catch {
+    // 宿主版本没有对应公开控制器时保持兼容,不阻止扩展启动。
+  }
+}
+
+patchAgentSessionCompactionControl();
+patchRunnerContext();
 
 export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   let relay: DesktopRelay | undefined;
@@ -112,6 +156,10 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   });
   pi.on("agent_settled", (event, ctx) => {
     relay?.setStreaming(false, ctx);
+    // 自动压缩/失败/中断都必须在 settled 时收口。成功路径会更早收到
+    // session_compact;这里负责补上「没有 session_compact」的失败分支,
+    // 并保证手机收到明确的中断事件而不是只看到标志突然消失。
+    relay?.finishCompaction(ctx, { aborted: true });
     // 一轮彻底跑完,队列必然清空 —— 镜像跟着归零,免得越积越多
     relay?.clearQueueMirror(ctx);
     relay?.emitBoundary(event, ctx);
@@ -190,6 +238,20 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
 
   registerNavCommands(pi, navCache, (result, ctx) => {
     relay?.emitNavResult(result, ctx);
+  });
+
+  // Bridge 给 headless RPC 的 abort 会翻译到这个内部命令。RPC 原生 abort()
+  // 只停 agent,不会停独立的压缩控制器;这里与桌面 Esc 使用同一能力。
+  pi.registerCommand("pipilot-abort", {
+    description: "PiPilot: 中断当前生成或压缩",
+    handler: async (_args, ctx) => {
+      await abortRemoteOperation(
+        ctx as ExtensionContext & {
+          abortCompaction?: () => void;
+          isCompacting?: () => boolean;
+        },
+      );
+    },
   });
 
   pi.registerCommand("pipilot", {

@@ -491,17 +491,22 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     setState(() => _inputText = '');
   }
 
-  /// 中断当前生成再发送。桌面端的中断会把未发送的排队消息回填到电脑输入框,
-  /// 这个副作用必须如实告知,不能藏。
+  /// 中断当前生成或压缩再发送。生成中断会把电脑端未发送的排队消息
+  /// 回填到输入框,这个副作用必须如实告知。
   Future<void> _interruptAndSend() async {
-    final desktop =
-        ref.read(piSessionProvider).selectedSource?.isDesktop == true;
+    final session = ref.read(piSessionProvider);
+    final desktop = session.selectedSource?.isDesktop == true;
+    final compacting = session.isCompacting;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('中断当前生成?'),
+        title: Text(compacting ? '中断当前压缩?' : '中断当前生成?'),
         content: Text(
-          desktop
+          compacting
+              ? desktop
+                    ? '会停止电脑端正在进行的上下文压缩,然后发送你的消息。'
+                    : '会停止正在进行的上下文压缩,然后发送你的消息。'
+              : desktop
               ? '会停止电脑端正在进行的这一轮,然后发送你的消息。\n'
                     '电脑端尚未发送的排队消息会被放回它的输入框。'
               : '会停止正在进行的这一轮,然后发送你的消息。',

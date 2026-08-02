@@ -4,7 +4,11 @@ import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
-import { HUB_PROTOCOL_VERSION, translateCompactPrompt } from "../src/hub_protocol.js";
+import {
+  HUB_PROTOCOL_VERSION,
+  translateCompactPrompt,
+  translateHeadlessCommand,
+} from "../src/hub_protocol.js";
 
 test("translates an exact compact prompt and preserves request metadata", () => {
   const input = {
@@ -56,6 +60,25 @@ test("rejects non-exact compact prompts", () => {
     translateCompactPrompt({ type: "message", message: "/compact" }),
     undefined,
   );
+});
+
+test("translates headless-only commands into internal slash commands", () => {
+  // RPC 原生 abort 停不了压缩控制器,必须走扩展注册的 /pipilot-abort。
+  assert.deepEqual(translateHeadlessCommand({ type: "abort" }), {
+    type: "prompt",
+    message: "/pipilot-abort",
+  });
+  assert.deepEqual(translateHeadlessCommand({ type: "navigate_tree" }), {
+    type: "prompt",
+    message: "/pipilot-undo",
+  });
+  assert.deepEqual(translateHeadlessCommand({ type: "navigate_tree", entryId: "e9" }), {
+    type: "prompt",
+    message: "/pipilot-nav e9",
+  });
+  // 其他命令原样透传,且不改原对象。
+  const plain = { type: "prompt", message: "hello" };
+  assert.equal(translateHeadlessCommand(plain), plain);
 });
 
 type Frame = Record<string, any>;
@@ -337,6 +360,126 @@ test("Source Hub isolates clients and fences desktop mutations", async () => {
       ttlMs: 10_000,
     });
     assert.equal(renewed.success, true);
+  } finally {
+    for (const peer of peers) peer.ws.close();
+    child.kill("SIGTERM");
+    await Promise.race([
+      onceExit(child),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`hub did not exit; stderr: ${stderr}`)), 3_000),
+      ),
+    ]);
+  }
+});
+
+test("desktop 快照公告透传压缩态,get_commands 隐藏内部中断命令", async () => {
+  const port = await freePort();
+  const bridgeRoot = path.resolve(import.meta.dirname, "..");
+  const child = spawn(path.join(bridgeRoot, "node_modules", ".bin", "tsx"), ["src/server.ts"], {
+    cwd: bridgeRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PIPILOT_HOST: "127.0.0.1",
+      PIPILOT_PORT: String(port),
+      PIPILOT_TOKEN: "mobile-test-token",
+      PIPILOT_DESKTOP_TOKEN: "desktop-test-token",
+      PIPILOT_HEADLESS_AUTO_START: "false",
+      PI_CWD: bridgeRoot,
+    },
+  });
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const peers: Peer[] = [];
+  try {
+    await waitForHealth(port, child);
+    const desktop = await open(
+      `ws://127.0.0.1:${port}/desktop?token=desktop-test-token`,
+    );
+    peers.push(desktop);
+    await desktop.waitFor((frame) => frame.type === "desktop_hello");
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_register",
+        source: {
+          sourceId: "desktop:compact",
+          label: "Compact desktop",
+          cwd: "/tmp/pipilot-compact",
+          sessionId: "session-compact",
+          capabilities: ["prompt", "abort"],
+        },
+        snapshot: {
+          epoch: "epoch-compact",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-compact", isStreaming: false, isCompacting: true },
+          entries: [],
+          leafId: null,
+          commands: [
+            { name: "pipilot-abort", description: "internal", source: "extension" },
+            { name: "pipilot", description: "status", source: "extension" },
+          ],
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_registered");
+
+    const phone = await open(`ws://127.0.0.1:${port}?token=mobile-test-token`);
+    peers.push(phone);
+    await phone.waitFor((frame) => frame.type === "bridge_hello");
+    assert.equal(
+      (await phone.request("hub_select_source", { sourceId: "desktop:compact" })).success,
+      true,
+    );
+
+    // 注册快照里的命令表:内部中断命令必须被过滤,普通的留着。
+    const commands = await phone.request("get_commands");
+    assert.equal(commands.success, true);
+    assert.deepEqual(
+      commands.data.commands.map((command: Frame) => command.name),
+      ["pipilot"],
+      "pipilot-abort 是 headless 中断的内部通道,不能出现在手机命令面板",
+    );
+
+    // 自动压缩进行中拍下的快照:公告帧必须把 isCompacting 带给手机。
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_snapshot",
+        snapshot: {
+          epoch: "epoch-compact",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-compact", isStreaming: false, isCompacting: true },
+          entries: [],
+          leafId: null,
+        },
+      }),
+    );
+    await desktop.waitFor((frame) => frame.type === "desktop_ack");
+    const announce = await phone.waitFor((frame) => frame.type === "hub_source_snapshot");
+    assert.equal(announce.isCompacting, true);
+
+    // 压缩结束后的下一份快照:false 也要原样透传,手机才能收起停止态。
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_snapshot",
+        snapshot: {
+          epoch: "epoch-compact",
+          baseSeq: 0,
+          capturedAt: Date.now(),
+          state: { sessionId: "session-compact", isStreaming: false, isCompacting: false },
+          entries: [],
+          leafId: null,
+        },
+      }),
+    );
+    await desktop.waitFor(
+      (frame) => frame.type === "desktop_ack" && desktop.frames.indexOf(frame) > 0,
+    );
+    await phone.waitFor(
+      (frame) => frame.type === "hub_source_snapshot" && frame.isCompacting === false,
+    );
   } finally {
     for (const peer of peers) peer.ws.close();
     child.kill("SIGTERM");

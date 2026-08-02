@@ -1063,13 +1063,14 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// 发送一条用户消息。
   ///
-  /// **任何时刻都可以发** —— 不再有"没有控制权"的早退。三种投递语义:
+  /// **任何时刻都可以输入**,但压缩期间 pi 0.82.1 没有消息队列,
+  /// 必须先中断压缩才能发送。生成期间支持三种投递语义:
   /// - [PiDelivery.steer]  插队:当前这一轮结束后立刻处理(pi 的 steer)。**不是中断。**
   /// - [PiDelivery.followUp] 排队:全部处理完之后再处理。
-  /// - [PiDelivery.interrupt] 中断当前生成,然后发送。
+  /// - [PiDelivery.interrupt] 中断当前生成或压缩,然后发送。
   ///
-  /// 不传 [delivery] 时:空闲直接发,忙(生成中**或压缩中**)默认 [PiDelivery.steer]
-  /// (旧代码硬编码 followUp,导致"插队"其实要等整轮跑完)。
+  /// 不传 [delivery] 时:空闲直接发,生成中默认 [PiDelivery.steer];
+  /// 压缩中拒绝普通发送,由 UI 引导用户明确选择「中断并发送」。
   Future<void> sendPrompt(String text, {PiDelivery? delivery}) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
@@ -1103,11 +1104,19 @@ class PiSessionNotifier extends Notifier<PiState> {
       return;
     }
 
+    final compacting = state.isCompacting;
+    if (compacting && delivery != PiDelivery.interrupt) {
+      _failSend(trimmed, '压缩中,请先中断再发送');
+      return;
+    }
     final streaming = state.isStreaming;
     final mode =
         delivery ?? (streaming ? PiDelivery.steer : PiDelivery.followUp);
-    if (mode == PiDelivery.interrupt && streaming) {
-      await abort(sourceId: sourceId);
+    if (mode == PiDelivery.interrupt && (streaming || compacting)) {
+      if (!await abort(sourceId: sourceId)) {
+        _failSend(trimmed, '中断没能送达,消息没有发出');
+        return;
+      }
     }
     if (!await _sendMutating({
       'type': 'prompt',
@@ -1119,12 +1128,19 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
   }
 
-  /// 中断当前生成。**任意一端、任意时刻都能打断**,所以这里强制取租约。
-  Future<void> abort({String? sourceId}) async {
+  /// 中断当前生成或压缩。请求必须等桌面端确认操作已经停下:
+  /// 「中断并发送」随后才能安全地开始新一轮。
+  Future<bool> abort({String? sourceId}) async {
     final target = sourceId ?? state.selectedSourceId;
-    if (!await _sendMutating({'type': 'abort'}, target)) {
-      _write(state.copyWith(error: '中断没能送达,请重试'));
-    }
+    if (target != null && target != state.selectedSourceId) return false;
+    final resp = await _mutatingRequest(
+      'abort',
+      const {},
+      const Duration(seconds: 35),
+    );
+    if (resp?['success'] == true) return true;
+    _write(state.copyWith(error: '中断没能送达,请重试'));
+    return false;
   }
 
   /// 发一条 fire-and-forget 的写命令:确保租约 → 发送;
@@ -2792,20 +2808,31 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 只要 baseSeq 领先于本地已应用序号,就重新同步一次。
   void _onSourceSnapshotAnnounced(Map<String, dynamic> event) {
     if (event['sourceId'] != state.selectedSourceId) return;
+    final epoch = event['epoch'];
+    final baseSeq = event['baseSeq'];
+    final currentEpoch = state.sourceEpoch;
+    final epochChanged =
+        epoch is String && currentEpoch != null && epoch != currentEpoch;
+    final stale = baseSeq is int && baseSeq < state.lastSourceSeq;
+    // 快照提示和事件流走同一条 socket,但重同步/重连会让旧提示晚到。
+    // 旧的「压缩中」绝不能盖回已经应用的 compaction_end。
+    if (epochChanged || stale) {
+      if (epochChanged) _scheduleSourceResync(reason: 'announce');
+      return;
+    }
     if (event['isStreaming'] is bool) {
       _snapshotStreaming = event['isStreaming'] as bool;
       _syncStreamingFlag();
     }
-    final epoch = event['epoch'];
-    final epochChanged =
-        epoch is String &&
-        state.sourceEpoch != null &&
-        epoch != state.sourceEpoch;
-    final behind = (event['baseSeq'] as int? ?? 0) > state.lastSourceSeq;
+    if (event['isCompacting'] is bool &&
+        event['isCompacting'] != state.isCompacting) {
+      state = state.copyWith(isCompacting: event['isCompacting'] as bool);
+    }
+    final behind = (baseSeq as int? ?? 0) > state.lastSourceSeq;
     final leafMoved = event['leafId'] is String && event['leafId'] != _leafId;
     final sessionMoved =
         event['sessionId'] is String && event['sessionId'] != state.sessionId;
-    if (epochChanged || behind || leafMoved || sessionMoved) {
+    if (behind || leafMoved || sessionMoved) {
       _scheduleSourceResync(reason: 'announce');
     }
   }
@@ -3594,6 +3621,15 @@ class PiSessionNotifier extends Notifier<PiState> {
     entriesOldestId: entriesOldestId,
   );
 
+  /// 测试缝隙:直接喂一条轻量快照通知,验证压缩状态与序号防倒灌。
+  @visibleForTesting
+  void debugApplySourceSnapshotAnnouncement(Map<String, dynamic> event) =>
+      _onSourceSnapshotAnnounced(event);
+
+  /// 测试缝隙:直接喂一条 pi 事件,验证压缩成功/失败/中断的 UI 收口。
+  @visibleForTesting
+  void debugApplyPiEvent(Map<String, dynamic> event) => _applyPiEvent(event);
+
   /// 测试缝隙:读往前分页游标(断言「标志为真时游标必须存在」)。
   @visibleForTesting
   String? get debugOldestEntryId => _oldestEntryId;
@@ -4251,11 +4287,19 @@ class PiSessionNotifier extends Notifier<PiState> {
         _eventStreaming = true;
         _syncStreamingFlag();
       case 'agent_end':
+        _eventStreaming = false;
+        _snapshotStreaming = false;
+        _sawInFlightMessage = false;
+        _syncStreamingFlag();
+        _scheduleContextRefresh();
       case 'agent_settled':
         _eventStreaming = false;
         _snapshotStreaming = false;
         _sawInFlightMessage = false;
         _syncStreamingFlag();
+        // compaction_end 可能在断线窗口丢失;settled 是宿主确认所有自动压缩、
+        // 重试和排队工作都结束的最终边界,不能让按钮永久停在停止态。
+        if (state.isCompacting) state = state.copyWith(isCompacting: false);
         _scheduleContextRefresh();
       case 'extension_ui_answered':
         if (state.pendingUiRequest?.id == event['requestId']) {
@@ -4296,12 +4340,21 @@ class PiSessionNotifier extends Notifier<PiState> {
       case 'session_before_compact':
         if (!state.isCompacting) {
           state = state.copyWith(isCompacting: true);
-          _addSystem('桌面端正在压缩上下文,消息会排队等它完成…');
+          _addSystem('桌面端正在压缩上下文,可随时中断');
         }
       case 'compaction_end':
       case 'session_compact':
         final wasCompacting = state.isCompacting;
         state = state.copyWith(isCompacting: false);
+        if (event['aborted'] == true) {
+          if (wasCompacting) _addSystem('上下文压缩已中断');
+          break;
+        }
+        final errorMessage = event['errorMessage'];
+        if (errorMessage is String && errorMessage.isNotEmpty) {
+          _addSystem('上下文压缩失败:$errorMessage', SystemKind.error);
+          break;
+        }
         final result = event['result'];
         if (result is Map<String, dynamic>) {
           final before = result['tokensBefore'];

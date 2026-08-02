@@ -76,11 +76,7 @@ void main() {
         'entries': <dynamic>[],
       });
 
-      expect(
-        notifier.state.items,
-        hasLength(2),
-        reason: '空快照不能把已有消息清掉',
-      );
+      expect(notifier.state.items, hasLength(2), reason: '空快照不能把已有消息清掉');
       expect(notifier.resyncReasons, ['empty-snapshot']);
     });
 
@@ -115,11 +111,7 @@ void main() {
         isEmpty,
         reason: '换会话时保留旧列表 = 用上一个会话的消息冒充新会话内容',
       );
-      expect(
-        notifier.resyncReasons,
-        isEmpty,
-        reason: '换会话是正常清空,不该触发补货重试',
-      );
+      expect(notifier.resyncReasons, isEmpty, reason: '换会话是正常清空,不该触发补货重试');
     });
 
     test('本地本来就空 + 空快照:照常走清空路径,不刷无用重试', () {
@@ -137,11 +129,7 @@ void main() {
       });
 
       expect(notifier.state.items, isEmpty);
-      expect(
-        notifier.resyncReasons,
-        isEmpty,
-        reason: '本来就没内容,没什么可保护的,不该排重试',
-      );
+      expect(notifier.resyncReasons, isEmpty, reason: '本来就没内容,没什么可保护的,不该排重试');
     });
 
     test('非空快照:正常替换成新内容', () {
@@ -165,16 +153,11 @@ void main() {
       final notifier = _seeded(container);
 
       // reconcile + leafId 已在本地 → sameBranch 成立,就地对账补一条。
-      notifier.debugApplyHubSnapshot(
-        {
-          'state': {'sessionId': 's1'},
-          'leafId': 'e2',
-          'entries': [
-            _userEntry('e3', '2026-08-02T12:02:00.000Z', '增量来的第三条'),
-          ],
-        },
-        reconcile: true,
-      );
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'leafId': 'e2',
+        'entries': [_userEntry('e3', '2026-08-02T12:02:00.000Z', '增量来的第三条')],
+      }, reconcile: true);
 
       expect(
         notifier.state.items,
@@ -319,16 +302,11 @@ void main() {
       final notifier = _seeded(container);
 
       // 同一会话的对账式快照:sameBranch 成立 → 不清空,就地补齐。
-      notifier.debugApplyHubSnapshot(
-        {
-          'state': {'sessionId': 's1'},
-          'leafId': 'e2',
-          'entries': [
-            _userEntry('e3', '2026-08-02T12:02:00.000Z', '第三条'),
-          ],
-        },
-        reconcile: true,
-      );
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'leafId': 'e2',
+        'entries': [_userEntry('e3', '2026-08-02T12:02:00.000Z', '第三条')],
+      }, reconcile: true);
       final before = notifier.debugEmittedLengths.length;
 
       // 流式 token 到达。
@@ -352,22 +330,13 @@ void main() {
       final notifier = _seeded(container);
       notifier.debugSetEarlierCursor('e1', hasMore: true);
 
-      notifier.debugApplyHubSnapshot(
-        {
-          'state': {'sessionId': 's1'},
-          'leafId': 'e2',
-          'entries': [
-            _userEntry('e3', '2026-08-02T12:02:00.000Z', '第三条'),
-          ],
-        },
-        reconcile: true,
-      );
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'leafId': 'e2',
+        'entries': [_userEntry('e3', '2026-08-02T12:02:00.000Z', '第三条')],
+      }, reconcile: true);
 
-      expect(
-        notifier.debugOldestEntryId,
-        'e1',
-        reason: '对账只是补尾部,既有游标必须留住',
-      );
+      expect(notifier.debugOldestEntryId, 'e1', reason: '对账只是补尾部,既有游标必须留住');
       expect(notifier.state.hasMoreHistory, isTrue);
     });
 
@@ -380,9 +349,7 @@ void main() {
       notifier.debugApplyHubSnapshot(
         {
           'state': {'sessionId': 's2'},
-          'entries': [
-            _userEntry('e90', '2026-08-02T13:00:00.000Z', '新会话尾巴'),
-          ],
+          'entries': [_userEntry('e90', '2026-08-02T13:00:00.000Z', '新会话尾巴')],
         },
         entriesHasMore: true,
         entriesOldestId: 'e90',
@@ -401,14 +368,94 @@ void main() {
       // 换会话重建,且桥这次整份都塞得进预算(不下发 entriesHasMore)。
       notifier.debugApplyHubSnapshot({
         'state': {'sessionId': 's2'},
-        'entries': [
-          _userEntry('e90', '2026-08-02T13:00:00.000Z', '新会话尾巴'),
-        ],
+        'entries': [_userEntry('e90', '2026-08-02T13:00:00.000Z', '新会话尾巴')],
       });
 
       // 标志必须为假:游标已随清空作废,留着 true 就是永久转圈。
       expect(notifier.state.hasMoreHistory, isFalse);
       expect(notifier.state.loadingEarlier, isFalse);
+    });
+  });
+
+  group('压缩状态必须可恢复且防倒灌', () {
+    test('旧快照提示不能把已经结束的压缩重新盖回 true', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        selectedSourceId: 'desktop:1',
+        sourceEpoch: 'epoch-1',
+        lastSourceSeq: 10,
+      );
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplySourceSnapshotAnnouncement({
+        'type': 'hub_source_snapshot',
+        'sourceId': 'desktop:1',
+        'epoch': 'epoch-1',
+        'baseSeq': 9,
+        'isCompacting': true,
+      });
+
+      expect(notifier.state.isCompacting, isFalse);
+      expect(notifier.resyncReasons, isEmpty);
+    });
+
+    test('同序号快照提示可以恢复漏掉的压缩开始状态', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        selectedSourceId: 'desktop:1',
+        sourceEpoch: 'epoch-1',
+        lastSourceSeq: 10,
+      );
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplySourceSnapshotAnnouncement({
+        'type': 'hub_source_snapshot',
+        'sourceId': 'desktop:1',
+        'epoch': 'epoch-1',
+        'baseSeq': 10,
+        'isCompacting': true,
+      });
+
+      expect(notifier.state.isCompacting, isTrue);
+    });
+
+    test('agent_settled 清掉漏收 compaction_end 后残留的压缩态', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        isCompacting: true,
+      );
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({'type': 'agent_settled'});
+
+      expect(notifier.state.isCompacting, isFalse);
+    });
+
+    test('压缩中断与失败分别给出准确收口提示', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({'type': 'compaction_start'});
+      notifier.debugApplyPiEvent({'type': 'compaction_end', 'aborted': true});
+      expect(notifier.state.isCompacting, isFalse);
+      expect((notifier.state.items.last as SystemItem).text, '上下文压缩已中断');
+
+      notifier.debugApplyPiEvent({'type': 'compaction_start'});
+      notifier.debugApplyPiEvent({
+        'type': 'compaction_end',
+        'errorMessage': 'summary failed',
+      });
+      expect(notifier.state.isCompacting, isFalse);
+      expect(
+        (notifier.state.items.last as SystemItem).text,
+        '上下文压缩失败:summary failed',
+      );
+      expect((notifier.state.items.last as SystemItem).kind, SystemKind.error);
     });
   });
 }

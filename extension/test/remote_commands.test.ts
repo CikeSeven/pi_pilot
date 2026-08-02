@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executeRemoteCommand, type CommandRuntime } from "../src/remote_commands.js";
+import {
+  abortRemoteOperation,
+  executeRemoteCommand,
+  type CommandRuntime,
+} from "../src/remote_commands.js";
 
 function runtime(idle: boolean, modelResult = true) {
   const calls: Array<{ name: string; value?: unknown }> = [];
@@ -46,8 +50,7 @@ test("idle prompt starts immediately", async () => {
   assert.deepEqual(calls[0], { name: "message", value: { message: "hello", options: undefined } });
 });
 
-// 以前这里抛错,消息直接丢掉。压缩上下文期间 isIdle() 为 false 而客户端
-// 看到的 isStreaming 是 false,双方对「忙」的判断必然错开 —— 兜底排队而不是丢。
+// 普通生成期间客户端漏传投递模式时,仍用 followUp 兜底避免消息丢失。
 test("busy prompt without delivery mode falls back to followUp", async () => {
   const { value, calls } = runtime(false);
   const result = await executeRemoteCommand({ type: "prompt", message: "hello" }, value);
@@ -81,6 +84,68 @@ test("busy prompt forwards steer exactly", async () => {
     name: "message",
     value: { message: "correct this", options: { deliverAs: "steer" } },
   });
+});
+
+test("compacting prompt is rejected instead of pretending followUp will queue it", async () => {
+  const { value, calls } = runtime(true);
+  value.ctx.isCompacting = () => true;
+
+  await assert.rejects(
+    executeRemoteCommand(
+      { type: "prompt", message: "after compaction", streamingBehavior: "followUp" },
+      value,
+    ),
+    /compacting; abort first/,
+  );
+  assert.equal(calls.some((call) => call.name === "message"), false);
+});
+
+test("abort stops generation and compaction, then waits for both to settle", async () => {
+  const calls: string[] = [];
+  let idle = false;
+  let compacting = true;
+  const result = await abortRemoteOperation(
+    {
+      abort() {
+        calls.push("abort");
+        setTimeout(() => {
+          idle = true;
+        }, 5);
+      },
+      abortCompaction() {
+        calls.push("abortCompaction");
+        setTimeout(() => {
+          compacting = false;
+        }, 10);
+      },
+      isIdle: () => idle,
+      isCompacting: () => compacting,
+    },
+    { timeoutMs: 200 },
+  );
+
+  assert.deepEqual(calls, ["abort", "abortCompaction"]);
+  assert.deepEqual(result, { compaction: true });
+  assert.equal(idle, true);
+  assert.equal(compacting, false);
+});
+
+test("compaction abort fails explicitly when the host capability is unavailable", async () => {
+  let aborted = false;
+  await assert.rejects(
+    abortRemoteOperation(
+      {
+        abort() {
+          aborted = true;
+        },
+        isIdle: () => true,
+        isCompacting: () => true,
+      },
+      { timeoutMs: 20 },
+    ),
+    /cannot abort compaction/,
+  );
+  assert.equal(aborted, false);
 });
 
 test("model and thinking controls are allowlisted", async () => {

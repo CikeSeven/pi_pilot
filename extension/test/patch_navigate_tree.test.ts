@@ -13,6 +13,8 @@ import "../src/index.js";
 type RunnerLike = {
   bindCommandContext: (actions: Record<string, unknown>) => void;
   createContext: () => Record<string, unknown>;
+  __pipilotAbortCompaction?: () => void;
+  __pipilotIsCompacting?: () => boolean;
 };
 
 function fakeRunner(): RunnerLike {
@@ -49,6 +51,25 @@ test("补丁后普通事件 ctx 自带 navigateTree 并委托到会话级 handle
   assert.equal(typeof ctx.navigateTree, "function");
   await (ctx.navigateTree as (id: string) => Promise<unknown>)("entry-1");
   assert.deepEqual(calls, ["navigateTree:entry-1"]);
+});
+
+test("补丁后普通事件 ctx 委托压缩状态与中断控制器", () => {
+  const runner = fakeRunner();
+  let compacting = true;
+  let aborted = 0;
+  runner.__pipilotAbortCompaction = () => {
+    aborted++;
+    compacting = false;
+  };
+  runner.__pipilotIsCompacting = () => compacting;
+
+  const ctx = runner.createContext();
+  assert.equal(typeof ctx.abortCompaction, "function");
+  assert.equal(typeof ctx.isCompacting, "function");
+  assert.equal((ctx.isCompacting as () => boolean)(), true);
+  (ctx.abortCompaction as () => void)();
+  assert.equal(aborted, 1);
+  assert.equal((ctx.isCompacting as () => boolean)(), false);
 });
 
 test("补丁不覆盖 createCommandContext 已接好的 navigateTree", async () => {

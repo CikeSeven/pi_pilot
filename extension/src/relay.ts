@@ -16,7 +16,12 @@ import {
   type NavResult,
 } from "./nav_commands.js";
 import { sourceLabel } from "./git_branch.js";
-import { executeRemoteCommand, SAFE_REMOTE_COMMANDS, type RemoteCommand } from "./remote_commands.js";
+import {
+  abortRemoteOperation,
+  executeRemoteCommand,
+  SAFE_REMOTE_COMMANDS,
+  type RemoteCommand,
+} from "./remote_commands.js";
 import { cloneForWire, encodeForWire, MAX_SNAPSHOT_BYTES } from "./serialization.js";
 
 type JsonObject = Record<string, unknown>;
@@ -697,6 +702,24 @@ export class DesktopRelay {
     this.compacting = value;
   }
 
+  /** 压缩成功、失败或中断的统一收口。 */
+  finishCompaction(
+    ctx: ExtensionContext,
+    options: { aborted?: boolean; error?: string } = {},
+  ): void {
+    if (!this.isCurrent(ctx) || !this.compacting) return;
+    this.compacting = false;
+    this.emitBoundary(
+      {
+        type: "compaction_end",
+        aborted: options.aborted === true,
+        ...(options.error ? { errorMessage: options.error } : {}),
+      },
+      ctx,
+    );
+    this.snapshot(ctx);
+  }
+
   /// agent_start / agent_settled 驱动。流式期间定期自发快照,
   /// 这样中途加入的手机端拿到的快照带得上 isStreaming 与 inFlightMessage。
   setStreaming(value: boolean, ctx: ExtensionContext): void {
@@ -1246,11 +1269,16 @@ export class DesktopRelay {
         const result = await executeRemoteCommand(command, {
           pi: this.pi,
           ctx,
+          abortCurrent: () => this.abortCurrent(ctx),
           navigate: (entryId) => this.navigate(entryId, ctx),
-          // ctx.compact() 不 await,失败只会走 onError 回调 ——
-          // 不把它转给手机的话,手机会永远停在「正在压缩」。
-          onCompactError: (message) =>
-            this.emitEvent({ type: "system_message", level: "error", text: `压缩失败:${message}` }, ctx),
+          // ctx.compact() 不 await,失败只会走 onError 回调。
+          onCompactError: (message) => {
+            const aborted = /abort|cancel/i.test(message);
+            this.finishCompaction(ctx, {
+              aborted,
+              ...(aborted ? {} : { error: message }),
+            });
+          },
         });
         const delivery = (result as { delivery?: unknown } | undefined)?.delivery;
         if (delivery === "steer" || delivery === "followUp") {
@@ -1272,6 +1300,22 @@ export class DesktopRelay {
         this.activeRequests.delete(requestId);
         this.commandDepth--;
       });
+  }
+
+  /** 中断普通生成或压缩,并在回复手机前确认宿主已经退出忙碌态。 */
+  private async abortCurrent(ctx: ExtensionContext): Promise<unknown> {
+    const wasCompacting = this.compacting;
+    const result = await abortRemoteOperation(
+      ctx as ExtensionContext & {
+        abortCompaction?: () => void;
+        isCompacting?: () => boolean;
+      },
+      { expectCompacting: wasCompacting },
+    );
+    if (wasCompacting && this.compacting) {
+      this.finishCompaction(ctx, { aborted: true });
+    }
+    return { aborted: true, compaction: result.compaction };
   }
 
   /**
@@ -1447,11 +1491,14 @@ export class DesktopRelay {
     }
     let commands: JsonObject[] | undefined;
     try {
-      commands = this.pi.getCommands().map((command) => ({
-        name: command.name,
-        description: command.description ?? null,
-        source: command.source,
-      }));
+      commands = this.pi
+        .getCommands()
+        .filter((command) => command.name !== "pipilot-abort")
+        .map((command) => ({
+          name: command.name,
+          description: command.description ?? null,
+          source: command.source,
+        }));
       // pi 的 22 个内置斜杠命令住在 dist/core/slash-commands.js,只给交互模式的
       // 自动补全用,getCommands() 拿不到 —— 所以手机上以前根本看不见 /compact,
       // 硬敲进去也只会当普通文本发给模型。

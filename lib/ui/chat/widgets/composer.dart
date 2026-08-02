@@ -39,18 +39,18 @@ class Composer extends StatefulWidget {
   final bool enabled;
   final bool streaming;
 
-  /// 桌面端正在压缩上下文:它也是「忙」,但不是流式 ——
-  /// 没有打字指示器、没有中断按钮,输入框必须自己说清楚消息会排队。
+  /// 桌面端正在压缩上下文:与生成一样属于可中断的忙碌状态。
   final bool compacting;
   final VoidCallback onSend;
 
   /// 生成中的三种投递方式(输入框有内容时才展示)。
+  /// 压缩期间 pi 没有消息队列,只允许明确中断后发送。
   /// 注意 steer 叫「插队」而不是「打断」—— 它不会中断当前这一轮。
   final VoidCallback? onSteer;
   final VoidCallback? onFollowUp;
   final VoidCallback? onInterruptAndSend;
 
-  /// 流式且输入框为空时,发送键变为停止键。
+  /// 忙碌且输入框为空时,发送键变为停止键。
   final VoidCallback? onAbort;
   final ValueChanged<String>? onChanged;
 
@@ -82,12 +82,10 @@ class _ComposerState extends State<Composer> {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final showStop =
-        widget.streaming &&
-        widget.onAbort != null &&
-        widget.controller.text.trim().isEmpty;
-    final sendEnabled = widget.enabled || showStop;
     final busy = widget.streaming || widget.compacting;
+    final showStop =
+        busy && widget.onAbort != null && widget.controller.text.trim().isEmpty;
+    final sendEnabled = widget.enabled || showStop;
 
     return Material(
       color: Colors.transparent,
@@ -103,7 +101,7 @@ class _ComposerState extends State<Composer> {
               child:
                   widget.quickPanel ?? const SizedBox(width: double.infinity),
             ),
-            // 生成中且已经写了内容:让用户明确选投递方式,而不是猜发送键的语义
+            // 生成时提供三种投递方式;压缩时只能明确中断后发送。
             AnimatedSize(
               duration: PiMotion.quick,
               curve: PiMotion.enter,
@@ -116,36 +114,39 @@ class _ComposerState extends State<Composer> {
                         padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
                         child: Row(
                           children: [
-                            ActionChip(
-                              avatar: const Icon(Icons.bolt_outlined, size: 18),
-                              label: const Text('插队'),
-                              tooltip: widget.compacting
-                                  ? '压缩结束后立刻处理'
-                                  : '本轮结束后立刻处理',
-                              onPressed: widget.onSteer,
-                            ),
-                            const SizedBox(width: 8),
-                            ActionChip(
-                              avatar: const Icon(
-                                Icons.playlist_add_outlined,
-                                size: 18,
-                              ),
-                              label: const Text('排队'),
-                              tooltip: '全部处理完之后再处理',
-                              onPressed: widget.onFollowUp,
-                            ),
                             if (widget.streaming) ...[
+                              ActionChip(
+                                avatar: const Icon(
+                                  Icons.bolt_outlined,
+                                  size: 18,
+                                ),
+                                label: const Text('插队'),
+                                tooltip: '本轮结束后立刻处理',
+                                onPressed: widget.onSteer,
+                              ),
                               const SizedBox(width: 8),
                               ActionChip(
                                 avatar: const Icon(
-                                  Icons.stop_circle_outlined,
+                                  Icons.playlist_add_outlined,
                                   size: 18,
                                 ),
-                                label: const Text('中断并发送'),
-                                tooltip: '停止当前这一轮,然后发送',
-                                onPressed: widget.onInterruptAndSend,
+                                label: const Text('排队'),
+                                tooltip: '全部处理完之后再处理',
+                                onPressed: widget.onFollowUp,
                               ),
+                              const SizedBox(width: 8),
                             ],
+                            ActionChip(
+                              avatar: const Icon(
+                                Icons.stop_circle_outlined,
+                                size: 18,
+                              ),
+                              label: const Text('中断并发送'),
+                              tooltip: widget.compacting
+                                  ? '停止当前压缩,然后发送'
+                                  : '停止当前这一轮,然后发送',
+                              onPressed: widget.onInterruptAndSend,
+                            ),
                           ],
                         ),
                       ),
@@ -220,7 +221,7 @@ class _ComposerState extends State<Composer> {
                         onChanged: widget.onChanged,
                         decoration: InputDecoration(
                           hintText: widget.compacting
-                              ? '压缩中 · 发送会排队'
+                              ? '压缩中 · 可中断后发送'
                               : widget.streaming
                               ? '生成中 · 发送会插队'
                               : null,
@@ -255,6 +256,12 @@ class _ComposerState extends State<Composer> {
                                   if (showStop) {
                                     HapticFeedback.mediumImpact();
                                     widget.onAbort!();
+                                  } else if (widget.compacting &&
+                                      widget.controller.text
+                                          .trim()
+                                          .isNotEmpty) {
+                                    HapticFeedback.mediumImpact();
+                                    widget.onInterruptAndSend?.call();
                                   } else {
                                     HapticFeedback.lightImpact();
                                     widget.onSend();

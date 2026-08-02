@@ -75,6 +75,10 @@ test("relay registers, coalesces updates, and fences commands", async () => {
   });
   const pi = {
     getThinkingLevel: () => "high",
+    getCommands: () => [
+      { name: "pipilot-abort", description: "internal", source: "extension" },
+      { name: "visible", description: "visible", source: "extension" },
+    ],
     sendUserMessage(message: string, options?: unknown) {
       sentMessages.push({ message, options });
     },
@@ -157,7 +161,53 @@ test("relay registers, coalesces updates, and fences commands", async () => {
       frames.find((frame) => frame.type === "desktop_register"),
     );
     assert.equal(registration.snapshot.entries[0].id, "entry-1");
+    assert.deepEqual(
+      registration.snapshot.commands.map((command: Frame) => command.name),
+      ["visible", "compact"],
+      "内部 pipilot-abort 不能出现在手机快捷命令列表",
+    );
     await waitFor(() => frames.find((frame) => frame.type === "desktop_snapshot"));
+
+    relay.setCompacting(true, ctx);
+    relay.snapshot(ctx);
+    const compactingSnapshot = await waitFor(() =>
+      frames.find(
+        (frame) =>
+          frame.type === "desktop_snapshot" && frame.snapshot?.state?.isCompacting === true,
+      ),
+    );
+    const compactingSnapshotIndex = frames.indexOf(compactingSnapshot);
+    relay.finishCompaction(ctx, { aborted: true });
+    const compactionEnd = await waitFor(() =>
+      frames.find(
+        (frame) =>
+          frames.indexOf(frame) > compactingSnapshotIndex &&
+          frame.type === "desktop_event" &&
+          frame.event?.type === "compaction_end",
+      ),
+    );
+    assert.equal(compactionEnd.event.aborted, true);
+    const settledSnapshot = await waitFor(() =>
+      frames.find(
+        (frame) =>
+          frames.indexOf(frame) > compactingSnapshotIndex &&
+          frame.type === "desktop_snapshot" &&
+          frame.snapshot?.state?.isCompacting === false,
+      ),
+    );
+    assert.ok(settledSnapshot);
+    const endCount = frames.filter(
+      (frame) => frame.type === "desktop_event" && frame.event?.type === "compaction_end",
+    ).length;
+    relay.finishCompaction(ctx, { aborted: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      frames.filter(
+        (frame) => frame.type === "desktop_event" && frame.event?.type === "compaction_end",
+      ).length,
+      endCount,
+      "重复收口不能再发第二条 compaction_end",
+    );
 
     // 会话树走独立按需帧,不依赖快照里的可选 treeSummary 字段。
     sourceSocket!.send(
