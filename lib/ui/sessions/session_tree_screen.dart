@@ -340,12 +340,14 @@ class _TreeNodeTile extends ConsumerWidget {
     final piColors = PiColors.of(context);
     final theme = Theme.of(context);
     final node = row.node;
-    // 任何消息都能跳过去 —— 这就是"分支间自由切换"。
-    // fork(另开一个会话文件)降为长按里的次要动作。
     final canNavigate = node.canNavigate;
     final isHeadless = ref.watch(
       piSessionProvider.select((s) => s.selectedSource?.isHeadless == true),
     );
+    // 点按 = 回退/跳到这条消息。当前路径上的祖先同样是正经回退目标
+    // (从树上回退正是主用例,桌面 /tree 也是哪里都能跳),只有 leaf
+    // 本身是无操作。原来挡成 !onCurrentPath,把当前分支的回退全堵死了。
+    final canRollBack = canNavigate && !isLeaf;
     final look = _lookOf(colors, piColors);
 
     // 连接线的绘制宽度按渲染缩进给,并封顶:分叉树的 depth 没有上界,
@@ -354,12 +356,15 @@ class _TreeNodeTile extends ConsumerWidget {
     final guideWidth = guideLevel * _TreeGuidePainter.levelWidth;
     final guideColor = colors.outlineVariant.withValues(alpha: 0.9);
     final tile = InkWell(
-      onTap: canNavigate && !onCurrentPath
-          ? () => _confirmNavigate(context, ref, node)
-          : null,
-      onLongPress: canNavigate && isHeadless
-          ? () => _confirmFork(context, ref, node)
-          : null,
+      onTap: canRollBack ? () => _confirmNavigate(context, ref, node) : null,
+      // 长按:headless 源弹「回退/分叉」菜单;桌面源 fork 不可用
+      // (relay 不支持),长按直接弹回退确认 —— 和点按同一个提示,
+      // 就是用户直觉里「长按应该有反应」的那个动作。
+      onLongPress: isHeadless
+          ? (canNavigate
+                ? () => _showNodeActions(context, ref, node, canRollBack)
+                : null)
+          : (canRollBack ? () => _confirmNavigate(context, ref, node) : null),
       child: Container(
         decoration: BoxDecoration(
           // 当前路径链铺一层极浅的底:一眼看出“现在在哪条分支上”;
@@ -606,6 +611,46 @@ class _TreeNodeTile extends ConsumerWidget {
       ),
     );
     if (!ok) onChanged();
+  }
+
+  /// 长按弹出的节点操作菜单(headless 源):回退 + 分叉。
+  /// 桌面源不经过这里 —— fork 在桌面 relay 上不可用,长按直接弹回退确认。
+  Future<void> _showNodeActions(
+    BuildContext context,
+    WidgetRef ref,
+    SessionTreeNode node,
+    bool canRollBack,
+  ) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canRollBack)
+              ListTile(
+                leading: const Icon(Icons.undo_rounded),
+                title: const Text('回到这里重新开始'),
+                subtitle: const Text('这之后的内容会从当前分支移开(不会被删掉)'),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  unawaited(_confirmNavigate(context, ref, node));
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.fork_right_rounded),
+              title: const Text('从此处另开一个会话'),
+              subtitle: const Text('新建会话文件,当前会话保持原样'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                unawaited(_confirmFork(context, ref, node));
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _confirmFork(
