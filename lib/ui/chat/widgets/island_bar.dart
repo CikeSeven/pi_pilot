@@ -60,9 +60,27 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     )..layout();
     final screenW = MediaQuery.sizeOf(context).width;
     // Timer 和左侧连接状态簇都占位置:不算它们的话文案会被挤成 ellipsis。
-    final timerW = hasTimer ? 68.0 : 0.0;
+    // Timer 按「00:00」等宽实测预留——之前拍脑袋 68,是收起态
+    // 「内容很小、岛却很宽」的主要来源。
+    final timerW = hasTimer ? _measureTimerW(context) : 0.0;
     // 36 = 水平 padding 18*2;最窄 120,最宽屏宽 78%(留位置给右侧内容)。
     return (tp.width + 36 + timerW + clusterW).clamp(120.0, screenW * 0.78);
+  }
+
+  /// 计时器宽度:等宽数字按「00:00」实测(覆盖到 59:59),+8 是与左侧文案的间距。
+  double _measureTimerW(BuildContext context) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: '00:00',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          fontFamily: 'monospace',
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      ),
+      maxLines: 1,
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return tp.width + 8;
   }
 
   void _toggle() {
@@ -169,77 +187,82 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               // 收起内容:前 35% 淡出;展开内容:后 45% 淡入。
               final collapsedOpacity = 1 - (t / 0.35).clamp(0.0, 1.0);
               final expandedOpacity = ((t - 0.55) / 0.45).clamp(0.0, 1.0);
-              return Container(
-                width: collapsedW + (screenW - 24 - collapsedW) * t,
-                height: _collapsedH + (_expandedH - _collapsedH) * t,
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  // 圆角和输入卡、PiShape.lg 统一。
-                  borderRadius: BorderRadius.circular(PiShape.lg),
-                  // 液态玻璃:和输入框同一套语言。
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color.lerp(
+              return TweenAnimationBuilder<double>(
+                tween: Tween<double>(end: collapsedW),
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOutCubic,
+                builder: (context, animW, _) => Container(
+                  width: animW + (screenW - 24 - animW) * t,
+                  height: _collapsedH + (_expandedH - _collapsedH) * t,
+                  clipBehavior: Clip.antiAlias,
+                  decoration: BoxDecoration(
+                    // 圆角和输入卡、PiShape.lg 统一。
+                    borderRadius: BorderRadius.circular(PiShape.lg),
+                    // 液态玻璃:和输入框同一套语言。
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Color.lerp(
+                          colors.surfaceContainerLow,
+                          Colors.white,
+                          isDark ? 0.06 : 0.15,
+                        )!,
                         colors.surfaceContainerLow,
-                        Colors.white,
-                        isDark ? 0.06 : 0.15,
-                      )!,
-                      colors.surfaceContainerLow,
-                      Color.lerp(
-                        colors.surfaceContainerLow,
-                        Colors.black,
-                        isDark ? 0.08 : 0.04,
-                      )!,
-                    ],
-                    stops: const [0.0, 0.5, 1.0],
-                  ),
-                  border: Border.all(
-                    color: colors.outlineVariant.withValues(alpha: 0.3),
-                    width: 0.5,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: colors.shadow.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
+                        Color.lerp(
+                          colors.surfaceContainerLow,
+                          Colors.black,
+                          isDark ? 0.08 : 0.04,
+                        )!,
+                      ],
+                      stops: const [0.0, 0.5, 1.0],
                     ),
-                  ],
-                ),
-                // Material 提供 InkWell 水波宿主(transparent 不盖渐变)。
-                child: Material(
-                  color: Colors.transparent,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (collapsedOpacity > 0)
-                        Opacity(
-                          opacity: collapsedOpacity,
-                          child: IgnorePointer(
-                            ignoring: t > 0.1,
-                            child: _buildCollapsed(
-                              context,
-                              state,
-                              colors,
-                              notifier,
-                            ),
-                          ),
-                        ),
-                      if (expandedOpacity > 0)
-                        Opacity(
-                          opacity: expandedOpacity,
-                          child: IgnorePointer(
-                            ignoring: t < 0.9,
-                            child: _buildExpanded(
-                              context,
-                              state,
-                              colors,
-                              notifier,
-                            ),
-                          ),
-                        ),
+                    border: Border.all(
+                      color: colors.outlineVariant.withValues(alpha: 0.3),
+                      width: 0.5,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: colors.shadow.withValues(alpha: 0.08),
+                        blurRadius: 16,
+                        offset: const Offset(0, 4),
+                      ),
                     ],
+                  ),
+                  // Material 提供 InkWell 水波宿主(transparent 不盖渐变)。
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (collapsedOpacity > 0)
+                          Opacity(
+                            opacity: collapsedOpacity,
+                            child: IgnorePointer(
+                              ignoring: t > 0.1,
+                              child: _buildCollapsed(
+                                context,
+                                state,
+                                colors,
+                                notifier,
+                              ),
+                            ),
+                          ),
+                        if (expandedOpacity > 0)
+                          Opacity(
+                            opacity: expandedOpacity,
+                            child: IgnorePointer(
+                              ignoring: t < 0.9,
+                              child: _buildExpanded(
+                                context,
+                                state,
+                                colors,
+                                notifier,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               );
@@ -282,15 +305,24 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     return 13 + 4 + tp.width + 8;
   }
 
+  /// 延迟分档配色:<100ms 绿,<300ms 黄,再高红;没测到延迟按绿(刚连上)。
+  Color _latencyColor(int? rttMs, PiColors piColors, ColorScheme colors) {
+    final rtt = rttMs;
+    if (rtt == null || rtt < 100) return piColors.success;
+    if (rtt < 300) return piColors.warning;
+    return colors.error;
+  }
+
   /// 左侧连接状态簇:通道图标(局域网/P2P)+ 延迟;连接/断开/失败各有其态。
   Widget _connCluster(BuildContext context, PiState state) {
     final colors = Theme.of(context).colorScheme;
+    final piColors = PiColors.of(context);
     final (IconData? icon, Color color) = switch (state.status) {
       PiConnStatus.connected => (
         state.activeTransport == PiActiveTransport.p2p
             ? Icons.public
             : Icons.wifi,
-        colors.tertiary,
+        _latencyColor(state.rttMs, piColors, colors),
       ),
       // 连接中用 spinner 而不是静态图标:转圈本身就是「正在连」。
       PiConnStatus.connecting => (null, colors.primary),
