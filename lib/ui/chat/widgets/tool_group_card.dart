@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../../../state/pi_session.dart';
 import '../../common/tool_avatar.dart';
-import '../../theme/motion.dart';
 import '../../theme/semantic_colors.dart';
 import '../../theme/shapes.dart';
 import '../../theme/typography.dart';
@@ -15,14 +14,15 @@ import 'tool_card.dart';
 /// 工具调用是过程证据,默认收成一颗胶囊,要查证再点开。
 ///
 /// 胶囊内容:
-/// - 执行中:spinner +「正在执行 read…」(强制展开,实时进度不能藏);
+/// - 执行中:spinner + 当前工具的具体命令(强制展开,实时进度不能藏;
+///   用户没点开过的话,完毕即自动收起);
 /// - 单工具:类别小图标 +「bash · export LC_ALL…」,**展开时摘要行自己换成
 ///   完整命令全文**(多行),展开区只有执行结果 —— 命令不重复写两遍;
 /// - 多工具:类别小图标 +「使用了 N 个工具」+ **迷你图标序列**
 ///   (按调用顺序排,扫一眼就知道用了哪些、什么顺序 —— 时序不丢),
 ///   展开后每条带自己的身份行 —— 否则看不出结果是谁的。
 ///
-/// `statOnly` 纯统计模式:胶囊只报数量,不可点、无箭头、不展开。
+/// `statOnly` 纯统计模式:胶囊只报数量,不可点、不展开。
 /// 用于轮尾统计行 —— 工具卡已在消息流原位,展开只是重复。
 class ToolGroupCard extends StatefulWidget {
   const ToolGroupCard({super.key, required this.tools, this.statOnly = false});
@@ -41,9 +41,9 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
 
   bool get _anyRunning => widget.tools.any((t) => !t.done);
 
-  String? get _runningName {
+  ToolItem? get _runningTool {
     for (final t in widget.tools) {
-      if (!t.done) return t.name;
+      if (!t.done) return t;
     }
     return null;
   }
@@ -64,7 +64,7 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
     final piColors = PiColors.of(context);
     final statOnly = widget.statOnly;
     final expanded = !statOnly && (_expanded || _anyRunning);
-    final running = _runningName;
+    final runningTool = statOnly ? null : _runningTool;
     final tools = widget.tools;
     final single = tools.length == 1;
 
@@ -105,6 +105,9 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                 ],
               ),
         child: Row(
+          // 顶部对齐:单工具展开时摘要行换成多行完整命令,Row 随之变高,
+          // 默认的垂直居中会把领头图标往下带 —— 固定它在展开前的位置。
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (!statOnly && _anyRunning)
               SizedBox(
@@ -133,16 +136,21 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
             const SizedBox(width: 8),
             Flexible(
               child: Text(
-                !statOnly && running != null
-                    ? '正在执行 $running…'
-                    : single
+                // 运行中也显示具体命令(转圈保留在左侧),不再换成「正在执行 X…」。
+                single
                     ? _singleLabel(tools.first)
+                    : runningTool != null
+                    ? _singleLabel(runningTool)
                     : '使用了 ${tools.length} 个工具',
                 // 展开后摘要行自己换成**完整命令全文**(多行不换行截断) ——
                 // 折叠时是单行 ellipsis。同一行文字从「截断版」变「完整版」,
                 // 展开区就不再需要重复写一遍命令。
-                maxLines: single && expanded ? null : 1,
-                overflow: single && expanded ? null : TextOverflow.ellipsis,
+                maxLines: (single || runningTool != null) && expanded
+                    ? null
+                    : 1,
+                overflow: (single || runningTool != null) && expanded
+                    ? null
+                    : TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: !statOnly && _anyRunning
                       ? colors.primary
@@ -164,19 +172,6 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
             ],
             // 迷你图标序列:按调用顺序排列,折叠也能看出顺序。
             if ((statOnly || !_anyRunning) && !single) ..._miniIcons(piColors),
-            if (!statOnly) ...[
-              const SizedBox(width: 6),
-              AnimatedRotation(
-                turns: expanded ? 0.5 : 0,
-                duration: PiMotion.collapse,
-                curve: PiMotion.collapseCurve,
-                child: Icon(
-                  Icons.expand_more,
-                  size: 15,
-                  color: colors.onSurfaceVariant,
-                ),
-              ),
-            ],
           ],
         ),
       ),

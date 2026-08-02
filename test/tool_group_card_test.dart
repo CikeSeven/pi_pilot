@@ -229,8 +229,8 @@ void main() {
       ..output = 'partial-out';
     await pump(tester, ToolGroupCard(tools: [running]), settle: false);
 
-    // 没点任何东西,输出就该已经可见。
-    expect(find.textContaining('正在执行 bash'), findsOneWidget);
+    // 没点任何东西,输出就该已经可见;摘要行显示具体命令而不是「正在执行」。
+    expect(find.textContaining('bash · sleep 1'), findsOneWidget);
     expect(find.textContaining('partial-out'), findsOneWidget);
   });
 

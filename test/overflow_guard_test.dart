@@ -108,14 +108,11 @@ void main() {
 
     final cardRight = tester.getRect(find.byType(Card)).right;
     final check = tester.getRect(find.byIcon(Icons.check_circle_outline));
-    final chevron = tester.getRect(find.byIcon(Icons.expand_more));
 
-    // 箭头是行内最后一个元素:离卡片右缘不超过身份行右 padding(8)
-    // + 尾部槽对齐容差。Editorial Retro 重新排版后实测 ≈ 18;
+    // 状态图标是 trailing 的唯一元素(展开箭头已删,整行可点):离卡片右缘
+    // 不超过身份行右 padding(8) + 尾部槽对齐容差;
     // 旧版「对半分」bug 会让它停在卡片中间,那是几百 px 开外,照样抓得住。
-    expect(cardRight - chevron.right, lessThan(24));
-    // 顺序正确:状态图标在箭头左侧,两者都在卡片右半区
-    expect(check.right, lessThan(chevron.left));
+    expect(cardRight - check.right, lessThan(24));
     expect(check.left, greaterThan(cardRight * 0.6));
   });
 

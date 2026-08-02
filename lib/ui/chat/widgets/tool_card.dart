@@ -154,48 +154,27 @@ class _ToolCardState extends ConsumerState<ToolCard> {
           ? null
           : () => showMessageActions(context, ref, item),
       contentPadding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-      // trailing 只留状态位:两个槽都是定宽 20,spinner(16)与完成图标(18)
-      // 各自居中 —— 否则状态切换瞬间整行宽度跳变
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (!item.done)
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: Center(
-                child: SizedBox(
+      // trailing 只留状态位:定宽 20,spinner(16)与完成图标(18)各自居中 ——
+      // 否则状态切换瞬间整行宽度跳变。展开箭头已删,整张身份行就是开关。
+      trailing: SizedBox(
+        width: 20,
+        height: 20,
+        child: Center(
+          child: !item.done
+              ? SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
                     strokeWidth: 2.5,
                     color: headerFg,
                   ),
-                ),
-              ),
-            )
-          else
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: Center(
-                child: Icon(
+                )
+              : Icon(
                   showError ? Icons.error_outline : Icons.check_circle_outline,
                   size: 18,
                   color: showError ? colors.error : headerFg,
                 ),
-              ),
-            ),
-          if (hasBody && ask == null) ...[
-            const SizedBox(width: 4),
-            AnimatedRotation(
-              turns: expanded ? 0.5 : 0,
-              duration: PiMotion.collapse,
-              curve: PiMotion.collapseCurve,
-              child: Icon(Icons.expand_more, size: 18, color: headerFg),
-            ),
-          ],
-        ],
+        ),
       ),
       child: AnimatedSize(
         duration: PiMotion.collapse,
@@ -340,12 +319,16 @@ Widget _outputWell(BuildContext context, String text) {
   return Container(
     width: double.infinity,
     constraints: const BoxConstraints(maxHeight: _kOutputMaxHeight),
-    padding: const EdgeInsets.all(12),
+    // 上/下少给 3:monoSmall 是 12px 字 × 1.5 行高(=18),首末行各带
+    // 3px 半行距。四边都给 12 的话,上/下视觉间距是 15 —— 减掉半行距,
+    // 四边视觉间距统一对齐左边的 12。
+    padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
     // 纵向滚动到头后继续拖,增量转交外层消息列表(OverscrollForwarder)。
     child: OverscrollForwarder(
       child: SingleChildScrollView(
+        // trimRight:输出末尾的换行符会多渲染出一行空行,井底凭空高 18px。
         child: AnsiText(
-          text: text,
+          text: text.trimRight(),
           style: AppType.monoSmall(color: piColors.codeWellFg),
         ),
       ),
