@@ -81,6 +81,28 @@ export interface BridgeMessage extends JsonObject {
   _hub?: HubCommandMeta;
 }
 
+const COMPACT_PROMPT = /^\/compact(?:\s+([\s\S]*))?$/;
+
+/** 将旧客户端发来的 /compact prompt 翻译为正常 compact 命令。 */
+export function translateCompactPrompt(
+  message: BridgeMessage,
+): BridgeMessage | undefined {
+  if (message.type !== "prompt" || typeof message.message !== "string") {
+    return undefined;
+  }
+
+  const match = COMPACT_PROMPT.exec(message.message.trim());
+  if (!match) return undefined;
+
+  const instructions = match[1]?.trim();
+  const translated: BridgeMessage = { ...message, type: "compact" };
+  delete translated.message;
+  delete translated.streamingBehavior;
+  delete translated.instructions;
+  if (instructions) translated.instructions = instructions;
+  return translated;
+}
+
 const READ_ONLY_SOURCE_COMMANDS = new Set([
   "get_state",
   "get_entries",

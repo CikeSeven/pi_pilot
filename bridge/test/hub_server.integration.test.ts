@@ -4,7 +4,59 @@ import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
-import { HUB_PROTOCOL_VERSION } from "../src/hub_protocol.js";
+import { HUB_PROTOCOL_VERSION, translateCompactPrompt } from "../src/hub_protocol.js";
+
+test("translates an exact compact prompt and preserves request metadata", () => {
+  const input = {
+    type: "prompt",
+    id: "request-1",
+    opId: "phone-op-7",
+    message: "/compact",
+    streamingBehavior: "followUp",
+    _hub: { leaseId: "lease-1", fence: 9 },
+  };
+
+  assert.deepEqual(translateCompactPrompt(input), {
+    type: "compact",
+    id: "request-1",
+    opId: "phone-op-7",
+    _hub: { leaseId: "lease-1", fence: 9 },
+  });
+  assert.equal(input.type, "prompt");
+  assert.equal(input.message, "/compact");
+});
+
+test("passes compact instructions through after trimming", () => {
+  assert.deepEqual(
+    translateCompactPrompt({
+      type: "prompt",
+      message: "  /compact   保留报错信息和文件路径  ",
+    }),
+    {
+      type: "compact",
+      instructions: "保留报错信息和文件路径",
+    },
+  );
+});
+
+test("rejects non-exact compact prompts", () => {
+  for (const message of [
+    "/compacting",
+    "/Compact",
+    "/compact。",
+    "请帮我 /compact 一下",
+  ]) {
+    assert.equal(
+      translateCompactPrompt({ type: "prompt", message }),
+      undefined,
+      message,
+    );
+  }
+  assert.equal(
+    translateCompactPrompt({ type: "message", message: "/compact" }),
+    undefined,
+  );
+});
 
 type Frame = Record<string, any>;
 

@@ -20,6 +20,7 @@ import {
   isDesktopMutationCommand,
   isReadOnlySourceCommand,
   parseCursor,
+  translateCompactPrompt,
   withoutHubMetadata,
   type BridgeMessage,
   type JsonObject,
@@ -1858,6 +1859,9 @@ function handleSourceCommand(client: MobileClient, msg: BridgeMessage): void {
     handleAskFrame(client, msg);
     return;
   }
+  // 新版 App 会在 sendPrompt 里拦住 /compact;旧版或漏网客户端仍可能把它
+  // 当 prompt 发来。这里只翻译帧,继续走休眠唤醒、租约、流式守卫和串行队列。
+  msg = translateCompactPrompt(msg) ?? msg;
   // headless 的 prompt 会展开扩展命令。用户以为自己在发一句话,pi 却执行了一条
   // 命令 —— 这是既有的静默 bug,在这里堵掉。
   if (
