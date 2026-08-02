@@ -84,6 +84,9 @@ class _MessageNavRailState extends State<MessageNavRail>
   /// 预览卡中心 y(相对轨道顶)。
   double _previewY = 0;
 
+  /// 拖拽中上次触发跳转的锚点序号:同一锚点内微调不重复滚动。
+  int? _lastJumpIndex;
+
   // -- 焦点平滑层 ----------------------------------------------------------
   //
   // painter 不吃原始进度:所有 focus 变化(滚动/跳转/拖拽/窗口扩展)
@@ -92,8 +95,8 @@ class _MessageNavRailState extends State<MessageNavRail>
   late final Ticker _focusTicker = createTicker(_tickFocus);
   final _smoothFocus = ValueNotifier<double>(0);
   double _targetFocus = 0;
-  static const _kFollowScroll = 0.20;
-  static const _kFollowDrag = 0.38;
+  static const _kFollowScroll = 0.28;
+  static const _kFollowDrag = 0.48;
 
   void _setFocusTarget(double t) {
     _targetFocus = t.clamp(0.0, 1.0);
@@ -158,6 +161,7 @@ class _MessageNavRailState extends State<MessageNavRail>
 
   void _startPreview(double y, double height) {
     widget.onInteractionChanged(true);
+    _lastJumpIndex = null;
     setState(() {
       _activeIndex = _indexAt(y, height);
       _dragT = _tAt(y, height);
@@ -167,12 +171,19 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 
   void _updatePreview(double y, double height) {
+    final newIndex = _indexAt(y, height);
     setState(() {
-      _activeIndex = _indexAt(y, height);
+      _activeIndex = newIndex;
       _dragT = _tAt(y, height);
       _previewY = y.clamp(0.0, height);
     });
     _setFocusTarget(_dragT!);
+    // 实时跟随:拖到新锚点时列表立刻滚过去,
+    // 不再等松手才跳 —— 用户的手指就是滚动条。
+    if (newIndex != _lastJumpIndex && newIndex < widget.anchors.length) {
+      _lastJumpIndex = newIndex;
+      widget.onJump(widget.anchors[newIndex].rowIndex);
+    }
   }
 
   void _endPreview() {
@@ -381,11 +392,7 @@ class _RailPainter extends CustomPainter {
             focusColor.withValues(alpha: 0.6),
             influence,
           )!;
-        canvas.drawLine(
-          Offset(3, y),
-          Offset(3 + 3 + 4 * influence, y),
-          paint,
-        );
+        canvas.drawLine(Offset(3, y), Offset(3 + 3 + 4 * influence, y), paint);
       }
     }
 

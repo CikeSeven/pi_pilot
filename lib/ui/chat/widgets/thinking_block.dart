@@ -81,18 +81,18 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
           child: GlassPill(
             onTap: () => setState(() => _expanded = !_expanded),
+            // 思考胶囊只需裹住短文案,不像工具组要撑满整行。
+            fillWidth: false,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Flexible(
-                  child: Text(
-                    _durationLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: muted,
-                      letterSpacing: 0.2,
-                    ),
+                Text(
+                  _durationLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: muted,
+                    letterSpacing: 0.2,
                   ),
                 ),
                 const SizedBox(width: 6),
