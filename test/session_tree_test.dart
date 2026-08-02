@@ -2,8 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/state/pi_session.dart';
 import 'package:pi_pilot/ui/sessions/session_tree_screen.dart'
     show locateCurrentRow;
-import 'package:pi_pilot/ui/sessions/tree_layout.dart'
-    show TreeRowLayout, buildTreeRows;
+import 'package:pi_pilot/ui/sessions/tree_layout.dart' show buildTreeRows;
 
 void main() {
   SessionTreeNode node(

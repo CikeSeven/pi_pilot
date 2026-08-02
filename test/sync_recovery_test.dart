@@ -16,7 +16,7 @@ class _SyncSession extends PiSessionNotifier {
   @override
   PiState build() => nextInitial;
 
-  /// 已发出的 get_entries:'full' 或 'since:<leaf>'。
+  /// 已发出的 get_entries:'full' 或 `since:<leaf>`。
   final List<String> requests = [];
 
   /// 兜底重试调度记录。
