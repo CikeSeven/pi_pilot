@@ -32,50 +32,55 @@ class UserBubble extends ConsumerWidget {
       // top 20:和前一个元素(AI 回复/工具卡)间距 = 4+20 = 24,轮切换大间距。
       // bottom 4:和后面的工具卡/AI 回复间距 = 4+4 = 8,同一轮内部。
       padding: const EdgeInsets.fromLTRB(10, 20, 10, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          // 落款小标:在卡片右上,像纸条上的署名
-          Padding(
-            padding: const EdgeInsets.only(right: 4, bottom: 6),
-            child: Text(
-              '你',
-              style: AppType.eyebrow(
-                color: colors.onSurfaceVariant.withValues(alpha: 0.8),
+      // 撑满整行再谈右对齐:父级若给松散宽度(比如默认居中的 Column),
+      // 没有这一层,短消息会收缩后被父级居中。
+      child: SizedBox(
+        width: double.infinity,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            // 落款小标:在卡片右上,像纸条上的署名
+            Padding(
+              padding: const EdgeInsets.only(right: 4, bottom: 6),
+              child: Text(
+                '你',
+                style: AppType.eyebrow(
+                  color: colors.onSurfaceVariant.withValues(alpha: 0.8),
+                ),
               ),
             ),
-          ),
-          // 右对齐 + 宽度上限:长消息不会顶满全宽,短消息自然收缩
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.sizeOf(context).width * 0.82,
-            ),
-            child: Material(
-              color: colors.primary,
-              shape: SquircleBorder(
-                borderRadius: BorderRadius.circular(PiShape.md),
+            // 右对齐 + 宽度上限:长消息不会顶满全宽,短消息自然收缩
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.sizeOf(context).width * 0.82,
               ),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onLongPress: () => showMessageActions(context, ref, item),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 14,
-                  ),
-                  child: SelectableText(
-                    item.text,
-                    style: chatBodyStyle(
-                      context,
-                      ref.watch(settingsProvider),
-                      color: colors.onPrimary,
+              child: Material(
+                color: colors.primary,
+                shape: SquircleBorder(
+                  borderRadius: BorderRadius.circular(PiShape.md),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onLongPress: () => showMessageActions(context, ref, item),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 14,
+                    ),
+                    child: SelectableText(
+                      item.text,
+                      style: chatBodyStyle(
+                        context,
+                        ref.watch(settingsProvider),
+                        color: colors.onPrimary,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

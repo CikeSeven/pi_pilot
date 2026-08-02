@@ -26,6 +26,32 @@ void main() {
         expect(find.text('hi'), findsOneWidget);
       });
 
+      testWidgets('用户气泡在松散父约束下仍然贴右', (tester) async {
+        // 回归:chat_body 给带时间戳的行包一个 Column,它曾经用默认的 center
+        // 对齐 —— 子项拿到松散宽度,短消息的气泡收缩成内容宽后被挤到屏幕
+        // 中间。现在气泡自己撑满整行,不管父级给什么约束都贴右。
+        final item = UserItem(
+          'user:right',
+          text: '安装到手机',
+          time: DateTime(2026),
+        );
+        await tester.pumpWidget(_wrap(
+          Column(children: [ChatItemView(item: item)]), // 默认 center = 案发现场
+          dark: dark,
+        ));
+        final bubble = tester.getRect(
+          find.ancestor(
+            of: find.byType(SelectableText),
+            // 只有气泡的 Material 带形状,Scaffold/MaterialApp 的是平面。
+            matching: find.byWidgetPredicate(
+              (w) => w is Material && w.shape != null,
+            ),
+          ),
+        );
+        // 默认测试画布宽 800,UserBubble 右 padding 10 → 右缘应贴在 790。
+        expect(bubble.right, moreOrLessEquals(790, epsilon: 1));
+      });
+
       testWidgets('流式助手 → 纯文本 + 闪烁光标 widget', (tester) async {
         final item = AssistantItem('assistant:1')..text = 'partial';
         await tester.pumpWidget(_wrap(ChatItemView(item: item), dark: dark));

@@ -666,6 +666,11 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     };
                     if (rowTime == null) return view;
                     return Column(
+                      // 默认 center 会给子项松散宽度:用户气泡收缩成内容宽
+                      // 再被居中,短消息就「跑到屏幕中间」了。stretch 保持
+                      // 满宽紧约束,右对齐交给气泡自己;时间戳自带 Center,
+                      // 不受影响。
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         MessageTimestamp(time: rowTime),
                         view,
