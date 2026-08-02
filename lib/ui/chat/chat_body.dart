@@ -419,16 +419,27 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     });
   }
 
-  /// 无条件跳到底部:最后一行的**尾缘**贴住视口底。
+  /// 无条件跳到底部。
   ///
   /// 旧实现要「连推 6 帧、每帧朝当前 maxScrollExtent 再跳一次」,因为惰性列表
   /// 的 maxScrollExtent 是估算值、一次 jumpTo 到不了真正的底。按下标定位没有
-  /// 这个问题:直接指定最后一行 + alignment,一步到位。
+  /// 这个问题:直接指定最后一行,一步到位。
   ///
-  /// alignment 用 1.0 配合负偏移不可行(API 只接受 0~1 的前缘位置),所以这里
-  /// 取最后一行的前缘贴底再让列表自己夹紧 —— 内容比视口高时等价于滚到底。
+  /// **alignment 必须是 0,不能是 1**。alignment 的语义是「把目标行的*前缘*
+  /// 对齐到视口的这个比例位置」,所以 alignment:1 = 前缘贴视口底 = 这一行整个
+  /// 落在可见区**以下**,最后一条消息反而看不见了(实测:50 行 x 80px 的列表
+  /// 里跳最后一行,视口只到倒数第二行,最后一行连 widget 树都没进)。它也不会
+  /// 被自动夹回来 —— 算出来的 offset 比 maxScrollExtent 小,夹取根本不触发。
+  ///
+  /// alignment:0 是「最后一行前缘贴视口顶」,内容比视口高时超出部分由列表夹紧,
+  /// 结果就是滚到底;内容比视口矮时本来就无处可滚。两种情形都对。
+  ///
+  /// 守卫放在这里而不是靠调用点自觉:空列表时 `_rows.length - 1` 是 -1,
+  /// `jumpTo(index: -1)` 会断言失败。按钮的 onJump 直接连到本方法,而它的
+  /// 可见判据(maxIndex < lastSlot - 2)在列表空时是可能成立的。
   void _jumpToBottom() {
-    _itemScroll.jumpTo(index: _slotOfRow(_rows.length - 1), alignment: 1);
+    if (!_itemScroll.isAttached || _rows.isEmpty) return;
+    _itemScroll.jumpTo(index: _slotOfRow(_rows.length - 1), alignment: 0);
   }
 
   void _send({PiDelivery? delivery}) {
@@ -551,8 +562,10 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   itemPositionsListener: _itemPositions,
                   // 首帧就落在最新消息上。按下标定位不需要把中间那几百条先建出来,
                   // 所以也不再需要尾部窗口那套变通。
+                  // alignment 取 0(前缘贴顶再由列表夹紧)而不是 1 —— 理由见
+                  // _jumpToBottom:1 会把这一行推到可见区以下,最新消息反而没了。
                   initialScrollIndex: itemCount == 0 ? 0 : itemCount - 1,
-                  initialAlignment: 1,
+                  initialAlignment: 0,
                   // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
                   // 顶部留出灵动岛高度,静止时第一项在岛下面。
                   // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。

@@ -231,4 +231,119 @@ void main() {
       reason: 'jumpTo 的 alignment 是视口对齐值,负数不成立',
     );
   });
+
+  group('跳到底部 / 首帧落点', () {
+    // 这一组钉的是 alignment 的语义陷阱。
+    //
+    // alignment 是「把目标行的**前缘**对齐到视口的这个比例位置」,所以
+    // alignment:1 表示前缘贴视口底 —— 目标行整个落在可见区**以下**。
+    // 曾经把 _jumpToBottom 和 initialAlignment 都写成 1,以为「列表会自己
+    // 夹回来,等价于滚到底」:实际不会,算出来的 offset 比 maxScrollExtent
+    // 小,夹取根本不触发,结果最后一条消息连 widget 树都没进。
+    //
+    // 上一轮重构漏了这两条路径(测试只覆盖了「插入历史后复原」),于是一个
+    // 「最新消息整个看不见」的 bug 过了全量测试也过了真机安装。
+
+    testWidgets('jumpTo(最后一行, alignment 0) 真的能看到最后一行', (tester) async {
+      final keys = [for (var i = 0; i < 50; i++) 'row-$i'];
+      final controller = ItemScrollController();
+      final listener = ItemPositionsListener.create();
+
+      await tester.pumpWidget(
+        harness(
+          keys: keys,
+          controller: controller,
+          listener: listener,
+          initialIndex: 0,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      controller.jumpTo(index: keys.length - 1, alignment: 0);
+      await tester.pumpAndSettle();
+
+      final last = keys.length - 1;
+      final positions = listener.itemPositions.value;
+      // 最后一行必须在可见集里,且真的占着可见区(尾缘 > 0)。
+      final lastPos = positions.where((p) => p.index == last);
+      expect(lastPos, isNotEmpty, reason: '最后一行必须在可见集里');
+      expect(lastPos.first.itemTrailingEdge, greaterThan(0));
+      expect(find.text('row-$last'), findsOneWidget, reason: '最后一行必须真的建出来');
+    });
+
+    testWidgets('alignment 1 会把目标行推出可见区 —— 记录这个语义,防止再写回去', (
+      tester,
+    ) async {
+      final keys = [for (var i = 0; i < 50; i++) 'row-$i'];
+      final controller = ItemScrollController();
+      final listener = ItemPositionsListener.create();
+
+      await tester.pumpWidget(
+        harness(
+          keys: keys,
+          controller: controller,
+          listener: listener,
+          initialIndex: 0,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      controller.jumpTo(index: keys.length - 1, alignment: 1);
+      await tester.pumpAndSettle();
+
+      // 这是**错误**用法的实测结果:最后一行没进树。
+      // 如果哪天这条断言失败了,说明包的语义变了,那时 alignment:0 的选择可以复审。
+      expect(
+        find.text('row-${keys.length - 1}'),
+        findsNothing,
+        reason: 'alignment:1 把最后一行推到了可见区以下 —— 所以生产代码必须用 0',
+      );
+    });
+
+    testWidgets('内容比视口矮时跳底不炸,且全部可见', (tester) async {
+      // 只有 2 行,远不够填满 600 高的视口 —— 无处可滚,但也不能出错。
+      final keys = ['row-0', 'row-1'];
+      final controller = ItemScrollController();
+      final listener = ItemPositionsListener.create();
+
+      await tester.pumpWidget(
+        harness(
+          keys: keys,
+          controller: controller,
+          listener: listener,
+          initialIndex: 0,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      controller.jumpTo(index: keys.length - 1, alignment: 0);
+      await tester.pumpAndSettle();
+
+      expect(find.text('row-0'), findsOneWidget);
+      expect(find.text('row-1'), findsOneWidget);
+    });
+
+    testWidgets('首帧 initialAlignment 0 + 末项下标:最新一条直接可见', (tester) async {
+      final keys = [for (var i = 0; i < 80; i++) 'row-$i'];
+      final controller = ItemScrollController();
+      final listener = ItemPositionsListener.create();
+
+      // 和 ChatBody 首帧一致:initialScrollIndex 指最后一项,alignment 0。
+      await tester.pumpWidget(
+        harness(
+          keys: keys,
+          controller: controller,
+          listener: listener,
+          initialIndex: keys.length - 1,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('row-${keys.length - 1}'),
+        findsOneWidget,
+        reason: '首帧就该落在最新消息上',
+      );
+    });
+  });
 }
