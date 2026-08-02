@@ -120,6 +120,18 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   /// 首个可见行在完整行表里的下标(由 [_itemPositions] 推导)。
   int _firstVisibleRow = 0;
 
+  /// 视口是否贴在列表**真正的底部端点**上(决定流式期间是否跟随)。
+  ///
+  /// 判据不能用「最后一行的下标出现在可见集里」:一条长回答本身就可能比
+  /// 视口高好几屏,用户在它内部往上翻了很远,它**仍然**是最后一个可见行。
+  /// 那样每来一个 token 都会判成「在底部」并跳一次,视口被反复按回那一行的
+  /// 顶部 —— 真机症状是「每多生成一点文字列表就向上抽动一下」,而且人根本
+  /// 没法往上翻。
+  ///
+  /// 改成看终点槽([_tailSlots] 里那 1px 的哨兵)可见不可见:它在视野里才算
+  /// 真的到底了。
+  bool _tailPinned = true;
+
   /// 列表顶部是否占着一个「加载更早」槽位。
   ///
   /// 只在「桥上还留着更早的历史」时出现。本地不再做窗口化——尾部窗口
@@ -140,6 +152,20 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
 
   /// 当前列表顶部的额外槽位数(0 或 1)。build 时同步。
   int _leadingSlots = 0;
+
+  /// 列表尾部的额外槽位数:输入卡占位 + 1px 终点哨兵。
+  ///
+  /// 底部留白原来是 `padding` 的一部分。padding 不是子项,拿不到可见性,
+  /// 于是「到底了没有」只能靠最后一行的下标去猜 —— 那个判据对高个流式行
+  /// 是错的(见 [_tailPinned])。把留白改成真实槽位,再追一个 1px 哨兵当
+  /// 终点,「到底」就变成一个可以直接观测的事实。
+  static const int _tailSlots = 2;
+
+  /// 终点哨兵的槽位下标(列表最后一个槽)。
+  int get _terminalSlot => _leadingSlots + _rows.length + _trailingRequestSlots + 1;
+
+  /// 尾部「待处理 UI 请求」占的槽位数(0 或 1)。build 时同步。
+  int _trailingRequestSlots = 0;
 
   /// 滚动位置 → 锚点序号比例(0~1)。
   ///
@@ -206,6 +232,13 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     }
     _firstVisibleRow = _rowOfSlot(firstSlot);
     _scrollProgress.value = _anchorFocusT();
+
+    // 终点哨兵在视野里 = 真的贴着底。用户往上翻一点它就离开可见集,
+    // 跟随随即让位 —— 这是个可观测的事实,不是从行下标推断出来的。
+    final terminal = _terminalSlot;
+    _tailPinned = positions.any(
+      (p) => p.index == terminal && p.itemTrailingEdge <= 1.001,
+    );
 
     if (_autoLoading) return;
     final state = ref.read(piSessionProvider);
@@ -404,42 +437,48 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
 
   /// 本来就贴着底就跟着新消息走;已经翻上去看历史了就别抢用户的位置。
   ///
-  /// 判据从「maxScrollExtent - pixels < 240」改成「最后一行是否在可见集里」
-  /// —— 像素判据依赖估算的 maxScrollExtent,流式期间那个值一直在抖。
+  /// 判据换过三轮,前两轮都错:
+  /// - 「maxScrollExtent - pixels < 240」:像素判据依赖估算的 maxScrollExtent,
+  ///   流式期间那个值一直在抖;
+  /// - 「最后一行的下标在可见集里」:一条长回答本身就能比视口高好几屏,用户
+  ///   在它内部往上翻很远之后它**仍然**是最后一个可见行 —— 于是每个 token 都
+  ///   判成「在底部」跳一次,视口被按回那一行顶部,人根本翻不上去。
+  ///
+  /// 现在看 [_tailPinned](终点哨兵可见不可见),那是可观测的事实而非推断。
   void _scrollToBottomIfNear() {
     if (!_itemScroll.isAttached || _rows.isEmpty) return;
-    final positions = _itemPositions.itemPositions.value;
-    if (positions.isEmpty) return;
-    final lastSlot = _slotOfRow(_rows.length - 1);
-    final atBottom = positions.any((p) => p.index >= lastSlot - 1);
-    if (!atBottom) return;
+    if (!_tailPinned) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_itemScroll.isAttached || _rows.isEmpty) return;
+      if (!_tailPinned) return;
       _jumpToBottom();
     });
   }
 
-  /// 无条件跳到底部。
+  /// 无条件跳到底部 —— 跳到**终点哨兵**并把它贴到视口底。
   ///
   /// 旧实现要「连推 6 帧、每帧朝当前 maxScrollExtent 再跳一次」,因为惰性列表
   /// 的 maxScrollExtent 是估算值、一次 jumpTo 到不了真正的底。按下标定位没有
-  /// 这个问题:直接指定最后一行,一步到位。
+  /// 这个问题,一步到位。
   ///
-  /// **alignment 必须是 0,不能是 1**。alignment 的语义是「把目标行的*前缘*
-  /// 对齐到视口的这个比例位置」,所以 alignment:1 = 前缘贴视口底 = 这一行整个
-  /// 落在可见区**以下**,最后一条消息反而看不见了(实测:50 行 x 80px 的列表
-  /// 里跳最后一行,视口只到倒数第二行,最后一行连 widget 树都没进)。它也不会
-  /// 被自动夹回来 —— 算出来的 offset 比 maxScrollExtent 小,夹取根本不触发。
+  /// 落点是哨兵而不是最后一行,因为 alignment 的语义是「把目标项的**前缘**
+  /// 对齐到视口的这个比例位置」,拿最后一行做落点两个方向都不对:
+  /// - alignment 0 = 那一行顶部贴视口顶。一条比视口高好几屏的长回答只会露出
+  ///   开头,而且流式期间每个 token 都把视口按回它的顶部(向上抽动的由来)。
+  /// - alignment 1 = 那一行前缘贴视口底,整行落到可见区**以下**,最后一条反而
+  ///   看不见(实测:50 行 x 80px 跳最后一行,视口只到倒数第二行,那一行连
+  ///   widget 树都没进;而且不会被夹回来 —— 算出的 offset 比 maxScrollExtent
+  ///   小,夹取根本不触发)。
   ///
-  /// alignment:0 是「最后一行前缘贴视口顶」,内容比视口高时超出部分由列表夹紧,
-  /// 结果就是滚到底;内容比视口矮时本来就无处可滚。两种情形都对。
+  /// 哨兵只有 1px:把它贴到视口底,就等于「内容的最末端刚好落在视口底」,
+  /// 与最后一行有多高无关。
   ///
-  /// 守卫放在这里而不是靠调用点自觉:空列表时 `_rows.length - 1` 是 -1,
-  /// `jumpTo(index: -1)` 会断言失败。按钮的 onJump 直接连到本方法,而它的
-  /// 可见判据(maxIndex < lastSlot - 2)在列表空时是可能成立的。
+  /// 守卫放在这里而不是靠调用点自觉:列表空时槽位算出来可能是负的,
+  /// `jumpTo(index: -1)` 会断言失败。按钮的 onJump 直接连到本方法。
   void _jumpToBottom() {
     if (!_itemScroll.isAttached || _rows.isEmpty) return;
-    _itemScroll.jumpTo(index: _slotOfRow(_rows.length - 1), alignment: 0);
+    _tailPinned = true;
+    _itemScroll.jumpTo(index: _terminalSlot, alignment: 1);
   }
 
   void _send({PiDelivery? delivery}) {
@@ -517,8 +556,11 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     // 顶部只在「桥上还留着更早的历史」时占一个加载槽。本地不再窗口化。
     final hasEarlier = _hasEarlierSlot(state);
     _leadingSlots = hasEarlier ? 1 : 0;
+    _trailingRequestSlots = state.pendingUiRequest != null ? 1 : 0;
+    // 尾部两槽:输入卡占位 + 1px 终点哨兵。留白做成真实槽位才能观测「到底了」,
+    // 见 _tailPinned。
     final itemCount =
-        _leadingSlots + _rows.length + (state.pendingUiRequest != null ? 1 : 0);
+        _leadingSlots + _rows.length + _trailingRequestSlots + _tailSlots;
 
     // 首帧之后量一次;之后由 SizeChangedLayoutNotifier 驱动
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncComposerHeight());
@@ -560,21 +602,21 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   child: ScrollablePositionedList.builder(
                   itemScrollController: _itemScroll,
                   itemPositionsListener: _itemPositions,
-                  // 首帧就落在最新消息上。按下标定位不需要把中间那几百条先建出来,
-                  // 所以也不再需要尾部窗口那套变通。
-                  // alignment 取 0(前缘贴顶再由列表夹紧)而不是 1 —— 理由见
-                  // _jumpToBottom:1 会把这一行推到可见区以下,最新消息反而没了。
+                  // 首帧落到终点哨兵上,alignment 1 把它贴到视口底 —— 哨兵只有
+                  // 1px,贴底就等于「内容的最末端刚好在视口底」,不管最后一行
+                  // 有多高都成立。
+                  //
+                  // 这里不能改成「最后一行 + alignment 0」:那是把那一行的**顶部**
+                  // 对齐到视口顶,一条比视口高好几屏的长回答会只露出开头。
                   initialScrollIndex: itemCount == 0 ? 0 : itemCount - 1,
-                  initialAlignment: 0,
+                  initialAlignment: 1,
                   // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
                   // 顶部留出灵动岛高度,静止时第一项在岛下面。
                   // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。
-                  padding: EdgeInsets.fromLTRB(
-                    4,
-                    widget.topPadding + 12,
-                    4,
-                    listBottomInset,
-                  ),
+                  // 底部不再用 padding 留白:它不是子项、拿不到可见性,
+                  // 「到底了没有」就只能靠最后一行下标去猜(对高个流式行是错的)。
+                  // 改成尾部两个真实槽位,见 _tailSlots。
+                  padding: EdgeInsets.fromLTRB(4, widget.topPadding + 12, 4, 0),
                   // 长会话里 keep-alive 会把滚过的每一项都钉在内存里不释放,
                   // 越滚越重。消息项本身无状态可留(展开态在 ChatItem 上),关掉。
                   addAutomaticKeepAlives: false,
@@ -585,6 +627,14 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                         loading: state.loadingEarlier,
                         onRetry: () => unawaited(_loadEarlier()),
                       );
+                    }
+                    // 终点哨兵:1px 的空盒子。它可见 = 真的到底了。
+                    if (index == itemCount - 1) {
+                      return const SizedBox(height: 1);
+                    }
+                    // 输入卡占位:把最后一条消息顶到输入卡上方。
+                    if (index == itemCount - 2) {
+                      return SizedBox(height: listBottomInset);
                     }
                     final full = index - _leadingSlots;
                     if (full >= _rows.length) {
@@ -642,7 +692,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   bottom: listBottomInset,
                   child: ScrollToBottomButton(
                     positions: _itemPositions,
-                    lastSlot: itemCount - 1,
+                    terminalSlot: itemCount - 1,
                     onJump: _jumpToBottom,
                     revision: state.revision,
                   ),
