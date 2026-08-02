@@ -282,4 +282,133 @@ void main() {
       );
     });
   });
+  group('替换事务的原子性:绝不发布半成品列表', () {
+    // 这一组钉的是**发布序列**,不是最终状态。
+    //
+    // 事故现场:同源重连清掉 365 条内部条目之后、快照灌回之前,只要有一个
+    // 流式 token 到达就会 _emit() 出一个只含当前 assistant 的列表。真机
+    // 症状是「所有消息全没了,只剩正在生成的那一条,还一直在生成中」,而且
+    // **不会再多打一条清空日志** —— 取证时极容易误判成「清空后没填回来」。
+    //
+    // 只断言最终 items 长度抓不到这个 bug:最终态往往是对的,错的是中间那
+    // 一帧。所以这里断言整个发布序列里不出现 0 / 1 这种残缺长度。
+
+    test('空快照守卫路径:发布序列里不出现残缺长度', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = _seeded(container);
+      final before = notifier.debugEmittedLengths.length;
+
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'entries': <dynamic>[],
+      });
+
+      final emitted = notifier.debugEmittedLengths.skip(before).toList();
+      expect(emitted, isNotEmpty, reason: '守卫路径应当发布一次(状态可能有更新)');
+      expect(
+        emitted.where((n) => n < 2),
+        isEmpty,
+        reason: '本地有 2 条,任何一次发布都不该少于 2 —— 少了就是半成品泄漏出去了',
+      );
+    });
+
+    test('清空窗口撞上流式 token:不能发布出「只剩正在生成的那一条」', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = _seeded(container);
+
+      // 同一会话的对账式快照:sameBranch 成立 → 不清空,就地补齐。
+      notifier.debugApplyHubSnapshot(
+        {
+          'state': {'sessionId': 's1'},
+          'leafId': 'e2',
+          'entries': [
+            _userEntry('e3', '2026-08-02T12:02:00.000Z', '第三条'),
+          ],
+        },
+        reconcile: true,
+      );
+      final before = notifier.debugEmittedLengths.length;
+
+      // 流式 token 到达。
+      notifier.debugMessageUpdate(
+        timestamp: '2026-08-02T12:03:00.000Z',
+        text: '正在生成',
+      );
+
+      final emitted = notifier.debugEmittedLengths.skip(before).toList();
+      expect(
+        emitted.where((n) => n <= 1),
+        isEmpty,
+        reason: '历史还在,流式发布不该出现长度 0/1',
+      );
+      expect(notifier.state.items.length, greaterThanOrEqualTo(3));
+    });
+
+    test('对账快照保留既有游标 —— 补齐尾部不该抹掉往前翻的能力', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = _seeded(container);
+      notifier.debugSetEarlierCursor('e1', hasMore: true);
+
+      notifier.debugApplyHubSnapshot(
+        {
+          'state': {'sessionId': 's1'},
+          'leafId': 'e2',
+          'entries': [
+            _userEntry('e3', '2026-08-02T12:02:00.000Z', '第三条'),
+          ],
+        },
+        reconcile: true,
+      );
+
+      expect(
+        notifier.debugOldestEntryId,
+        'e1',
+        reason: '对账只是补尾部,既有游标必须留住',
+      );
+      expect(notifier.state.hasMoreHistory, isTrue);
+    });
+
+    test('重建时桥给了权威元数据:游标与标志成对落地', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = _seeded(container);
+
+      // 换会话重建,桥说「只发了尾巴,更早的还在会话文件里」。
+      notifier.debugApplyHubSnapshot(
+        {
+          'state': {'sessionId': 's2'},
+          'entries': [
+            _userEntry('e90', '2026-08-02T13:00:00.000Z', '新会话尾巴'),
+          ],
+        },
+        entriesHasMore: true,
+        entriesOldestId: 'e90',
+      );
+
+      expect(notifier.state.hasMoreHistory, isTrue);
+      expect(notifier.debugOldestEntryId, 'e90');
+    });
+
+    test('重建时桥没给元数据:标志为假,不留下转圈状态', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = _seeded(container);
+      notifier.debugSetEarlierCursor('e1', hasMore: true);
+
+      // 换会话重建,且桥这次整份都塞得进预算(不下发 entriesHasMore)。
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's2'},
+        'entries': [
+          _userEntry('e90', '2026-08-02T13:00:00.000Z', '新会话尾巴'),
+        ],
+      });
+
+      // 标志必须为假:游标已随清空作废,留着 true 就是永久转圈。
+      expect(notifier.state.hasMoreHistory, isFalse);
+      expect(notifier.state.loadingEarlier, isFalse);
+    });
+  });
 }

@@ -893,6 +893,11 @@ class PiSessionNotifier extends Notifier<PiState> {
   int _eventPageRounds = 0;
   static const _maxEventPageRounds = 50;
   bool _resyncRunning = false;
+
+  /// 在一轮重同步执行期间被压下的请求原因(只留最早那个)。
+  ///
+  /// 空快照守卫的补货必然发生在同步过程中,直接丢掉就等于不修。
+  String? _pendingResyncReason;
   int _inOrderStreak = 0;
   bool _bufferOverflowed = false;
   bool _gapNoticeShown = false;
@@ -1435,8 +1440,20 @@ class PiSessionNotifier extends Notifier<PiState> {
     _activeSyncGeneration = gen;
     _bufferedSourceEvents.clear();
     _leafId = null;
-    _resetConversation(reason: 'select-source');
-    state = state.copyWith(clearSource: true);
+    // 同源重连不清列表。
+    //
+    // 网络切换会走 network_changed → transport_open → _selectSource(同一个
+    // sourceId) 这条链。这里原来无条件清空,于是一次 Wi-Fi/移动网切换就能把
+    // 几百条消息瞬间清掉,再等快照灌回来 —— 中间那段空窗一旦撞上流式 token,
+    // 就发布出「只剩正在生成的那一条」。
+    //
+    // 同源的旧内容本来就是对的:留着它,让随后的快照做原子替换/对账。真正
+    // 需要清的是**换源**(下面那句 clearSource 也只在换源时才有意义)。
+    final sameSource = sourceId == state.selectedSourceId;
+    if (!sameSource) {
+      _resetConversation(reason: 'select-source(switch)');
+      state = state.copyWith(clearSource: true);
+    }
     state = state.copyWith(
       selectedSourceId: sourceId,
       sessionPhase: SyncPhase.syncing,
@@ -2996,7 +3013,15 @@ class PiSessionNotifier extends Notifier<PiState> {
               rebaseEntryId != null &&
               snapshotEntries.any((e) => e is Map && e['id'] == rebaseEntryId);
           if (rebaseEntryId == null || anchorHit) {
-            _applyHubSnapshot(snapshot, reconcile: reconcile || anchorHit);
+            // 分页元数据要跟着快照一起进替换事务 —— 见 _applyHubSnapshot。
+            _applyHubSnapshot(
+              snapshot,
+              reconcile: reconcile || anchorHit,
+              entriesHasMore: data['entriesHasMore'] == true,
+              entriesOldestId: data['entriesOldestId'] is String
+                  ? data['entriesOldestId'] as String
+                  : null,
+            );
           } else {
             // rebase:快照头与本地历史接不上 —— 只取会话状态,
             // entries 从锚点正向补齐,历史不整段重拉。
@@ -3008,6 +3033,15 @@ class PiSessionNotifier extends Notifier<PiState> {
               sourceEpoch: snapshot['epoch'] as String?,
               lastSourceSeq: snapshot['baseSeq'] as int? ?? 0,
             );
+            // rebase 分支自己不做替换事务,分页元数据在这里补。
+            // (走 _applyHubSnapshot 的那一支已经在事务内设好,见其文档。)
+            final oldest = data['entriesOldestId'];
+            if (data['entriesHasMore'] == true &&
+                oldest is String &&
+                oldest.isNotEmpty) {
+              _oldestEntryId = oldest;
+              state = state.copyWith(hasMoreHistory: true);
+            }
             unawaited(
               _rebaseFromEntry(
                 rebaseEntryId,
@@ -3016,13 +3050,6 @@ class PiSessionNotifier extends Notifier<PiState> {
               ),
             );
           }
-        }
-        // 桥为了不撞爆手机的 2MB 套接字缓冲,只发了 entries 的尾巴。
-        // 更早的仍在桥上,记住游标以便「加载更早」往前取。
-        if (data['entriesHasMore'] == true) {
-          final oldest = data['entriesOldestId'];
-          if (oldest is String && oldest.isNotEmpty) _oldestEntryId = oldest;
-          state = state.copyWith(hasMoreHistory: true);
         }
       } else if (mode == 'rpc') {
         await _sync(
@@ -3172,9 +3199,21 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
   }
 
+  /// 应用一份 hub 快照。
+  ///
+  /// 这是一个**替换事务**:清空 → 灌入 → 一次 `_emit()`。中途绝不发布中间
+  /// 状态 —— 清空之后、灌回之前只要发布一次,撞上流式 token 就会让界面变成
+  /// 「只剩正在生成的那一条」。
+  ///
+  /// [entriesHasMore] / [entriesOldestId] 是桥给的**权威**分页元数据(桥只发
+  /// entries 的尾巴,更早的留在会话文件里)。它们必须在这个事务内、跟条目
+  /// 一起落地:游标与 `hasMoreHistory` 成对才有意义。只设标志不设游标 →
+  /// 「加载更早」永远转圈;只设游标不设标志 → 那一行根本不出现。
   void _applyHubSnapshot(
     Map<dynamic, dynamic> snapshot, {
     bool reconcile = false,
+    bool entriesHasMore = false,
+    String? entriesOldestId,
   }) {
     final stateData = snapshot['state'];
     final leafId = snapshot['leafId'] as String?;
@@ -3212,6 +3251,7 @@ class PiSessionNotifier extends Notifier<PiState> {
       if (stateData is Map) {
         _applyStateData(Map<String, dynamic>.from(stateData));
       }
+      // 游标一并保留:本地内容没动,往前翻的能力也不该被这次空快照抹掉。
       _emit();
       // 走 scheduleSyncRecovery 这个缝隙而不是直接调 _scheduleSourceResync:
       // 两者在生产里等价,但缝隙可以被测试桩接住 —— 「空快照必须排补货」
@@ -3230,7 +3270,24 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 快照可能不带 leafId(协议允许 null)。别用 null 覆盖已知的 leaf,
     // 否则随后的 session_tree 会被误判成"分支变了"。
     if (leafId != null && leafId.isNotEmpty) _leafId = leafId;
+    // 分页游标与标志:成对落地,且只认桥给的权威元数据。
+    //
+    // 重建路径上 _resetConversation 已经把 _oldestEntryId 清成 null,所以
+    // 这里必须重新设 —— 否则「加载更早」要么不出现(标志假),要么一直转圈
+    // (标志真但游标空)。
+    // 对账路径(sameBranch)不动既有游标:那次快照只是补齐尾部,凭它把往前
+    // 翻的能力抹掉是错的;除非桥这次带了权威元数据。
+    final cursorFromBridge = entriesOldestId != null && entriesOldestId.isNotEmpty
+        ? entriesOldestId
+        : null;
+    if (!sameBranch || cursorFromBridge != null) {
+      if (cursorFromBridge != null) _oldestEntryId = cursorFromBridge;
+      state = state.copyWith(
+        hasMoreHistory: entriesHasMore && _oldestEntryId != null,
+      );
+    }
     state = state.copyWith(
+      loadingEarlier: false,
       sourceEpoch: snapshot['epoch'] as String?,
       lastSourceSeq: snapshot['baseSeq'] as int? ?? 0,
     );
@@ -3504,7 +3561,14 @@ class PiSessionNotifier extends Notifier<PiState> {
   void debugApplyHubSnapshot(
     Map<dynamic, dynamic> snapshot, {
     bool reconcile = false,
-  }) => _applyHubSnapshot(snapshot, reconcile: reconcile);
+    bool entriesHasMore = false,
+    String? entriesOldestId,
+  }) => _applyHubSnapshot(
+    snapshot,
+    reconcile: reconcile,
+    entriesHasMore: entriesHasMore,
+    entriesOldestId: entriesOldestId,
+  );
 
   /// 测试缝隙:读往前分页游标(断言「标志为真时游标必须存在」)。
   @visibleForTesting
@@ -3528,6 +3592,30 @@ class PiSessionNotifier extends Notifier<PiState> {
     _oldestEntryId = oldestId;
     state = state.copyWith(hasMoreHistory: hasMore);
   }
+
+  /// 测试缝隙:驱动一次流式 assistant 更新(复现「清空窗口撞上 token」)。
+  @visibleForTesting
+  void debugMessageUpdate({required String timestamp, required String text}) {
+    _onMessageUpdate({
+      'message': {
+        'role': 'assistant',
+        'timestamp': timestamp,
+        'content': [
+          {'type': 'text', 'text': text},
+        ],
+      },
+    });
+    _emit();
+  }
+
+  /// 测试缝隙:观察每一次对外发布的 items 长度。
+  ///
+  /// 「只剩正在生成的那一条」这类事故的关键不在最终态,而在**中间发布**:
+  /// 清空之后、灌回之前只要发布一次就会被 UI 看到。只断言最终 items 长度
+  /// 是抓不到的,必须记录发布序列。
+  @visibleForTesting
+  List<int> get debugEmittedLengths => List.unmodifiable(_emittedLengths);
+  final List<int> _emittedLengths = [];
 
   /// 测试缝隙:把条目灌进本地历史(构造「本地已有内容」的前置状态)。
   ///
@@ -4052,7 +4140,16 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 单飞 + 指数退避(250ms→8s, ±20% 抖动)。
   /// 旧实现每个被拒事件都触发一次全量重拉,峰值 ~40 次/秒。
   void _scheduleSourceResync({required String reason}) {
-    if (_disposed || _resyncTimer != null || _resyncRunning) return;
+    if (_disposed || _resyncTimer != null) return;
+    // 正在跑的那一轮不能顶替,但**也不能把请求丢掉**。
+    //
+    // 这里原来直接 return,于是「当前这轮同步的结果本身有问题、需要再来一次」
+    // 的请求会被静默吞掉 —— 空快照守卫排的补货正是这种:它必然在一轮同步
+    // 的执行过程中发出。丢了就等下一次碰巧的触发,列表在那之前一直是残缺的。
+    if (_resyncRunning) {
+      _pendingResyncReason ??= reason;
+      return;
+    }
     // 断线期间重同步只会空转失败:重连流程自己会触发首次同步。
     if (_conn?.isOpen != true) return;
     final base = math.min(8000, 250 * math.pow(2, _resyncAttempt).toInt());
@@ -4071,6 +4168,12 @@ class PiSessionNotifier extends Notifier<PiState> {
         }
       } finally {
         _resyncRunning = false;
+        // 这一轮跑的时候被压下的请求,现在补上。
+        final pending = _pendingResyncReason;
+        if (pending != null) {
+          _pendingResyncReason = null;
+          _scheduleSourceResync(reason: pending);
+        }
       }
     });
   }
@@ -4945,6 +5048,7 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   void _emit() {
     if (_disposed) return;
+    _emittedLengths.add(_items.length);
     state = state.copyWith(
       items: List<ChatItem>.unmodifiable(_items),
       revision: state.revision + 1,
@@ -4974,18 +5078,19 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 否则下一批正常消息会被插到列表中间。
     _oldestEntryId = null;
     _prependAt = null;
-    // 游标和 hasMoreHistory 必须同生同死。
+    // **这里绝对不能碰 state。**
     //
-    // 只清游标、把 hasMoreHistory 留在 true,会得到一个**永久卡住**的状态:
-    // UI 看 hasMoreHistory 为真,一直显示「加载更早」那一行、还会自动触发
-    // 补货;而 loadEarlierHistory() 第一行就是 `cursor == null → return
-    // false`,每次都立刻返回。于是「正在加载更早的消息…」一直转,上面的
-    // 消息永远出不来 —— 症状是「突然加载不出来之前的消息了」。
+    // 本方法是纯内部暂存操作:清 _items,然后由调用方灌入替换条目、最后
+    // 统一 _emit() 一次。曾经在这里加过
+    //   state = state.copyWith(hasMoreHistory: false, loadingEarlier: false);
+    // 想让游标和标志同生同死 —— 结果打破了那个「一次发布」的原子性,开出
+    // 一个能对外发布半成品的窗口:清空之后、灌回之前,只要有一个流式 token
+    // 到达就会 _emit() 出一个只含当前 assistant 的列表。真机症状是「所有
+    // 消息全没了,只剩正在生成的那一条」,而且**不会再多打一条清空日志**,
+    // 取证时极容易误判成「清空后没填回来」。
     //
-    // 清空之后是否还有更早的历史,由随后的快照/全量响应重新判定
-    // (snapshot 路径看 entriesHasMore,全量路径看 hasMore),那里会连
-    // 游标一起设回来。所以这里归零是安全的:要么被重新置真,要么本就没有。
-    state = state.copyWith(hasMoreHistory: false, loadingEarlier: false);
+    // 游标与 hasMoreHistory 的成对性由替换事务负责(见 _applyHubSnapshot
+    // 与 _sync 的全量分支):在它们各自那一次 _emit() 之前一起设好。
   }
 
   static List<String> _stringList(dynamic value) =>
