@@ -278,7 +278,9 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     switch (state.status) {
       case PiConnStatus.connected:
         final rtt = state.rttMs;
-        return rtt == null ? null : '${rtt}ms';
+        // 显示封顶 999ms:再大的值没有信息量,只会把岛撑宽;
+        // 颜色分档仍看真实 rtt(_latencyColor),不一起封顶。
+        return rtt == null ? null : '${rtt > 999 ? 999 : rtt}ms';
       case PiConnStatus.connecting:
         // 有过会话的连接中 = 断线重连;首次连接才叫连接中。
         return state.hasSession ? '重连中' : '连接中';
