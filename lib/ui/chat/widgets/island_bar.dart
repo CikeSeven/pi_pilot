@@ -270,7 +270,10 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     dynamic notifier,
   ) {
     final theme = Theme.of(context);
-    final canUndo = !state.isStreaming && notifier.undoTargetEntryId != null;
+    // 生成中不再藏撤销:回退链路(relay 的 runNavigate)自己会先中断当前
+    // 回合再移动 leaf。「生成完才能撤」会把最想撤的人(看着输出不对想立刻
+    // 回退的)挡在门外 —— 那就是用户感知的「回退功能没了」。
+    final canUndo = notifier.undoTargetEntryId != null;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),

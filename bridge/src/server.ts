@@ -1120,7 +1120,10 @@ function forwardSourceCommand(
     // 会话可能已经在生成 —— 入队时的检查早就过期了,必须在真正下发前复检。
     void commandQueue.run(source.id, async () => {
       if (!requireLease(client, source.id, msg)) return;
-      if (sourceIsStreaming(source.id)) {
+      // navigate_tree 豁免流式守卫:它的处理器(runNavigate)自己
+      // abort()+waitForIdle() 再移动 leaf,生成中回退正是它的正经用法;
+      // 拦在这里,手机端「撤销上一轮」在生成期间就永远失败。
+      if (msg.type !== "navigate_tree" && sourceIsStreaming(source.id)) {
         respond(
           client.ws,
           msg,

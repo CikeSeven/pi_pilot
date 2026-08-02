@@ -1264,12 +1264,12 @@ export class DesktopRelay {
     if (!cached) {
       if (ctx.mode === "tui") {
         ctx.ui.notify(
-          "手机请求回退会话:请先在这里执行一次 /pipilot-undo 以启用远程回退",
+          "手机请求回退会话:请先在这里执行一次 /pipilot 以启用远程回退(无副作用;切换会话后需重新执行)",
           "warning",
         );
       }
       throw new Error(
-        "需要先在电脑端的这个会话里执行一次 /pipilot-undo(每个 pi 进程只需一次),然后重试",
+        "需要先在电脑端的当前会话里执行一次 /pipilot 启用远程回退(无副作用;切换会话后需重新执行)",
       );
     }
     const result = await runNavigate(navRuntimeFor(cached), entryId);

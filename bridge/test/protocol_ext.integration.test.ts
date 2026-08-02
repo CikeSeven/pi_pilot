@@ -248,6 +248,62 @@ test("pong echo, desktop snapshot reads, and extension_ui_response gating", asyn
     const nav = await navPromise;
     assert.equal(nav.success, true);
 
+    // navigate_tree 豁免疫式守卫:生成中的 desktop 源也要照样转发 ——
+    // runNavigate 自己会 abort()+waitForIdle(),生成中回退是正经用法。
+    // 拦在 bridge 的话,手机端「撤销上一轮」在生成期间永远失败。
+    // (desktop_event 的 seq 必须严格 +1,否则被 bridge 拒收,流式标志翻不上。)
+    const streamingOf = (frame: Frame): boolean | undefined => {
+      if (frame.type !== "hub_sessions_changed") return undefined;
+      const sessions = Array.isArray(frame.sessions) ? frame.sessions : [];
+      const found = sessions.find((s) => s?.sessionId === "session-test");
+      return found ? found.streaming === true : undefined;
+    };
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_event",
+        sourceId: "desktop:test",
+        epoch: "epoch-test",
+        seq: 1,
+        event: { type: "agent_start" },
+      }),
+    );
+    // 等流式标志真的翻上去(以 sessions 广播为准,不靠瞎睡)。
+    await phone.waitFor((frame) => streamingOf(frame) === true);
+    const streamingNavPromise = phone.request("navigate_tree", {
+      entryId: "leaf-1",
+      ...navMeta,
+    });
+    const streamingForward = await desktop.waitFor(
+      (frame) =>
+        frame.type === "remote_command" &&
+        frame.command?.type === "navigate_tree" &&
+        frame.requestId !== navForward.requestId,
+    );
+    desktop.ws.send(
+      JSON.stringify({
+        type: "remote_result",
+        requestId: streamingForward.requestId,
+        success: true,
+        data: { ok: true },
+      }),
+    );
+    const streamingNav = await streamingNavPromise;
+    assert.equal(streamingNav.success, true);
+    // 对照组:compact 在生成中必须仍被守卫拦下。
+    const compactDenied = await phone.request("compact", navMeta);
+    assert.equal(compactDenied.success, false);
+    assert.match(compactDenied.error, /streaming_guard/);
+    desktop.ws.send(
+      JSON.stringify({
+        type: "desktop_event",
+        sourceId: "desktop:test",
+        epoch: "epoch-test",
+        seq: 2,
+        event: { type: "agent_settled" },
+      }),
+    );
+    await phone.waitFor((frame) => streamingOf(frame) === false);
+
     // extension_ui_response:无 lease 拒绝
     const noLease = await phone.request("extension_ui_response", {
       uiRequestId: "ui-1",

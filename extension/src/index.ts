@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { loadRelayConfig, RELAY_CONFIG_PATH } from "./config.js";
 import { NavCommandContextCache, registerNavCommands } from "./nav_commands.js";
 import { DesktopRelay } from "./relay.js";
@@ -135,6 +139,10 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   pi.registerCommand("pipilot", {
     description: "Show PiPilot desktop relay status",
     handler: async (_args, ctx) => {
+      // 顺便缓存命令上下文:远程回退(手机发起)需要 ExtensionCommandContext
+      // 上的 navigateTree,普通事件 ctx 没有。/pipilot 是**无副作用**的状态
+      // 命令,用它当激活入口 —— 拿 /pipilot-undo 激活会真的撤掉一轮。
+      navCache.remember(ctx as ExtensionCommandContext);
       if (ctx.mode !== "tui") return;
       ctx.ui.notify(
         relay
