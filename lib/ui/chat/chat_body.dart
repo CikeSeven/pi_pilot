@@ -2,14 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../state/device_manager.dart';
 import '../../state/pi_session.dart';
 import '../sessions/devices_page.dart';
-import '../theme/motion.dart';
 import '../theme/paper.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
+import 'chat_scroll_anchor.dart';
 import 'widgets/chat_item_view.dart';
 import 'widgets/composer.dart';
 import 'widgets/message_nav_rail.dart';
@@ -34,7 +35,18 @@ class ChatBody extends ConsumerStatefulWidget {
 
 class _ChatBodyState extends ConsumerState<ChatBody> {
   final _input = TextEditingController();
-  final _scroll = ScrollController();
+
+  /// 按**下标**定位的列表。
+  ///
+  /// 换掉 `ListView` + `ScrollController` 不是为了好看:普通惰性列表只能按
+  /// 像素跳,而聊天行高差几十倍(一条用户消息 vs 一个大 bash 输出井),
+  /// `maxScrollExtent` 又只是按已建行平均高度外推的**估算值**。于是
+  /// 「跳到第 N 条」「插入历史后停在原处」「滚动条位置」三件事全都建立在
+  /// 一个不成立的假设上 —— 这就是卡顿之外那两个 bug 的共同根因。
+  ///
+  /// `ScrollablePositionedList` 直接按 index + alignment 定位,和行高解耦。
+  final _itemScroll = ItemScrollController();
+  final _itemPositions = ItemPositionsListener.create();
   String _inputText = '';
 
   /// 快捷指令没有输入框可清,用它挡住连点(否则会开两个会话、发两条消息)。
@@ -49,46 +61,41 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   final _composerKey = GlobalKey();
   double _composerHeight = 140;
 
-  /// 派生数据缓存:key -> 下标、以及时间标注标志。
+  /// 派生数据缓存:时间标注标志。
   ///
-  /// 两者都只依赖 items 列表本身,但以前都在 build 里现算:
-  /// - findChildIndexCallback 里用 indexWhere 线性扫描,而它**对每个可见子项调一次**,
-  ///   一次重建就是 O(可见项 x 总条数);流式期间每个 token 都涨 revision 触发重建。
-  /// - _timestampFlags 全量重扫一遍 items。
+  /// 只依赖 items 列表本身,但以前在 build 里全量重扫一遍 items。
   /// 靠 revision 判定失效,同一份列表只算一次。
   int _derivedRevision = -1;
-  Map<String, int> _indexByKey = const {};
   List<bool> _timestampFlagCache = const [];
 
   /// 渲染行:由 items 派生,连续的 ≥2 个 ToolItem 聚合成一个工具组行。
-  /// 窗口/下标/时间戳全都按行维度计算。
+  /// 下标/时间戳全都按行维度计算。
   List<_ChatRow> _rows = const [];
+
+  /// 行主键 → 行下标。加载更早的历史后靠它把视口锚回同一条消息。
+  Map<String, int> _rowIndexByKey = const {};
 
   /// 会话切换后待执行的「跳到底部」。
   ///
   /// 加载完的落点必须是最新消息 —— 长会话停在第一条,用户要滑很久。
-  String? _pendingBottomToken;
+  /// 按下标定位之后这件事变得很便宜:`initialScrollIndex` 一步到位,
+  /// 不再需要「连推 6 帧、每帧朝新的 maxScrollExtent 再跳一次」那条链。
   String? _lastSessionToken;
 
-  /// 正在跑的跳底链(防止 build 每帧都新开一条)。
-  String? _bottomChainToken;
-
-  /// 列表窗口:只渲染最后这么多条。
+  /// 一次性的「首帧落到底部」标记。
   ///
-  /// **这是消除切换卡顿的关键**。`RenderSliverList` 要求子项在布局上连续,
-  /// 没法跳过中间项直接量最后一项的位置 —— 所以 `jumpTo(maxScrollExtent)`
-  /// 会在一帧里把从头到底的所有项全建出来。2000 条的会话切过去,
-  /// 那一帧就是几百毫秒的掉帧。窗口化之后无论会话多长,首帧只建这么多条。
-  static const _windowStep = 60;
-  int _windowSize = _windowStep;
+  /// 必须和 [_lastSessionToken] 分开:切会话那一帧 items 通常还是空的,
+  /// 此时跳等于没跳。留着这个 token 等历史真的刷进来再跳一次,然后清掉 ——
+  /// 清掉是关键,否则用户往上翻历史会被反复拽回底部。
+  String? _pendingInitialBottomToken;
 
-  /// 离顶部多远就开始预加载。
+  /// 离顶部还有几行就开始预加载。
   ///
-  /// 留一段提前量而不是等 pixels 归零:联网那一段有往返延迟,
-  /// 真到顶了才发请求的话用户会看到一次硬停。
-  static const _autoLoadThreshold = 600.0;
+  /// 从「离顶部 600px」改成「首个可见行下标 ≤ 3」:像素阈值在行高不均的
+  /// 列表里没有稳定含义(一个大输出井就能顶掉整个提前量),行下标有。
+  static const _autoLoadRowThreshold = 3;
 
-  /// 自动加载的重入阁:一次滚动里 position 会反复通知。
+  /// 自动加载的重入闸:一次滚动里 positions 会反复通知。
   bool _autoLoading = false;
 
   // -- 消息导航轨道 --------------------------------------------------------
@@ -96,17 +103,13 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   /// 用户消息锚点(行下标 + 预览),由 _syncDerived 顺手收集。
   List<NavAnchor> _navAnchors = const [];
 
-  /// 轨道显隐:滚动时弹出,静置 [_railHideDelay] 后自动缩回;
-  /// 轨道被触摸期间(_railInteracting)挂起隐藏。
-  bool _railVisible = false;
+  /// 轨道显隐。**用 ValueNotifier 而不是 setState** —— 显隐每次翻转都
+  /// 重建整个 ChatBody 的话,会连带把 ListView 可见项全部重建一遍
+  /// (markdown 解析 + 语法高亮),滚动一停一动就掉帧。
+  final _railVisible = ValueNotifier<bool>(false);
   bool _railInteracting = false;
   Timer? _railHideTimer;
   static const _railHideDelay = Duration(seconds: 2);
-
-  /// 待精修的跳转目标行:itemBuilder 会给它挂 [_jumpKey],
-  /// 构建出来以后 ensureVisible 校正粗跳的估算误差。
-  int? _pendingJumpRow;
-  final _jumpKey = GlobalKey();
 
   /// 滚动进度(0~1),滚动时逐帧更新,驱动轨道游标连续滑动。
   ///
@@ -114,163 +117,105 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   /// 游标如果吃 build 里现算的值,会停在滚动前的位置不动。
   final _scrollProgress = ValueNotifier<double>(0);
 
+  /// 首个可见行在完整行表里的下标(由 [_itemPositions] 推导)。
+  int _firstVisibleRow = 0;
+
+  /// 列表顶部是否占着一个「加载更早」槽位。
+  ///
+  /// 只在「桥上还留着更早的历史」时出现。本地不再做窗口化——尾部窗口
+  /// 是为绕开普通 ListView 无法按下标 seek 而生的,按下标定位之后它只剩
+  /// 副作用(头部插入让 offset 变化 → 位置乱窜),所以整套拆掉了。
+  bool _hasEarlierSlot(PiState state) => state.hasMoreHistory;
+
+  /// 行下标 → 列表槽位。
+  int _slotOfRow(int rowIndex) => rowIndex + _leadingSlots;
+
+  /// 列表槽位 → 行下标(负数会被夹到 0:那是「加载更早」槽)。
+  int _rowOfSlot(int slot) {
+    final row = slot - _leadingSlots;
+    if (row < 0) return 0;
+    if (row >= _rows.length) return _rows.isEmpty ? 0 : _rows.length - 1;
+    return row;
+  }
+
+  /// 当前列表顶部的额外槽位数(0 或 1)。build 时同步。
+  int _leadingSlots = 0;
+
   /// 滚动位置 → 锚点序号比例(0~1)。
   ///
   /// 不做「像素比例 = 进度」—— 那样峰值位置和第几条消息对不上。
   /// 先把像素比例换算成行号,再在相邻锚点之间按行号线性插序号:
   /// 视口正在看第 i 条消息,进度就严格落在第 i 个大节点上;
   /// 两条消息之间连续插值,既严格匹配又不阶跃。
-  double _anchorFocusT() {
-    final rows = _rows.length;
-    final anchors = _navAnchors;
-    if (rows <= 1 || anchors.isEmpty) return 0;
-    if (!_scroll.hasClients) return _scrollProgress.value;
-    final position = _scroll.position;
-    final extent = position.hasContentDimensions ? position.maxScrollExtent : 0;
-    if (extent <= 0) return 0;
-    final rowF = (position.pixels / extent) * (rows - 1);
-    if (rowF <= anchors.first.rowIndex) return 0;
-    if (rowF >= anchors.last.rowIndex) return 1;
-    for (var j = 0; j + 1 < anchors.length; j++) {
-      final a = anchors[j].rowIndex.toDouble();
-      final b = anchors[j + 1].rowIndex.toDouble();
-      if (rowF <= b) {
-        final local = ((rowF - a) / (b - a)).clamp(0.0, 1.0);
-        return (j + local) / (anchors.length - 1);
-      }
-    }
-    return 1;
-  }
+  ///
+  /// 焦点现在从**真实布局出的首个可见行下标**推导,不再拿
+  /// `pixels / maxScrollExtent` 当行号比例 —— 后者在行高不均的列表里
+  /// 本身就是错的映射(滚动条位置对不上第几条消息的根因)。
+  double _anchorFocusT() => anchorFocusOf(_navAnchors, _firstVisibleRow);
 
   void _showRail() {
     _railHideTimer?.cancel();
-    if (!_railVisible) setState(() => _railVisible = true);
+    _railVisible.value = true;
   }
 
   void _scheduleRailHide() {
     _railHideTimer?.cancel();
     _railHideTimer = Timer(_railHideDelay, () {
-      if (!_railInteracting && mounted) {
-        setState(() => _railVisible = false);
-      }
+      if (!_railInteracting && mounted) _railVisible.value = false;
     });
   }
 
-  /// 跳到某一行:先扩窗口让目标可被构建,再按比例粗跳,
-  /// 最后靠 ensureVisible 链精修(估算误差在长会话里会很大)。
+  /// 跳到某一行:按**下标**直接定位。
+  ///
+  /// 旧实现是「按比例粗跳 + ensureVisible 精修链」,两头都不可靠:比例假设
+  /// 行高均等;而惰性列表只建视口附近,粗跳落点偏了目标行根本没被建出来,
+  /// `GlobalKey.currentContext` 恒为 null,几帧后静默放弃 —— 这就是
+  /// 「拖到某处列表动一下就不动、根本没定位过去」的直接原因。
+  ///
+  /// alignment 0.08:目标行落在视口偏上一点,上文留一线,不贴死顶边。
   void _jumpToRow(int rowIndex) {
     if (rowIndex < 0 || rowIndex >= _rows.length) return;
     _showRail();
-    // 目标在窗口之上:窗口是尾部锚定的,必须扩到覆盖目标。
-    // 一次性成本,和「加载更早」翻到顶等价。
-    final window = ChatWindow.of(
-      total: _rows.length,
-      windowSize: _windowSize,
-      hasPendingUiRequest: ref.read(piSessionProvider).pendingUiRequest != null,
-      hasRemoteEarlier: ref.read(piSessionProvider).hasMoreHistory,
-    );
-    if (rowIndex < window.offset) {
-      setState(() {
-        _windowSize = _rows.length - rowIndex + _windowStep;
-      });
-    }
-    _pendingJumpRow = rowIndex;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      final position = _scroll.position;
-      final ratio = _rows.length <= 1 ? 0.0 : rowIndex / (_rows.length - 1);
-      _scroll.jumpTo(
-        (position.maxScrollExtent * ratio).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        ),
-      );
-      _refineJump(8);
-    });
-  }
-
-  /// 粗跳之后等目标行构建出来,ensureVisible 精修。
-  ///
-  /// 两个坑都是真踩过的:
-  /// - 完成后**必须 setState 卸载挂点**:_jumpKey 是复用的,旧 KeyedSubtree
-  ///   还挂在树上时下一次跳转会给新目标挂同一个 GlobalKey,直接红屏。
-  /// - 单次 jumpTo 的估算是基于旧 extent 的,窗口扩展后偏差很大;
-  ///   所以每帧没等到目标就按**最新** extent 重新逼近一次。
-  void _refineJump(int remaining) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _pendingJumpRow == null) return;
-      final ctx = _jumpKey.currentContext;
-      if (ctx != null) {
-        Scrollable.ensureVisible(
-          ctx,
-          duration: PiMotion.entrance,
-          curve: PiMotion.std,
-          alignment: 0.08,
-        );
-        setState(() => _pendingJumpRow = null);
-        return;
-      }
-      if (remaining <= 0) {
-        setState(() => _pendingJumpRow = null);
-        return;
-      }
-      if (_scroll.hasClients) {
-        final position = _scroll.position;
-        final ratio = _rows.length <= 1
-            ? 0.0
-            : _pendingJumpRow! / (_rows.length - 1);
-        final target = (position.maxScrollExtent * ratio).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        );
-        if ((position.pixels - target).abs() > 8) {
-          _scroll.jumpTo(target);
-        }
-      }
-      _refineJump(remaining - 1);
-    });
+    _scheduleRailHide();
+    if (!_itemScroll.isAttached) return;
+    _itemScroll.jumpTo(index: _slotOfRow(rowIndex), alignment: 0.08);
+    // 轨道游标立刻落到目标,不等 positions 回调 —— 松手即到位。
+    _firstVisibleRow = rowIndex;
+    _scrollProgress.value = _anchorFocusT();
   }
 
   @override
   void initState() {
     super.initState();
-    _scroll.addListener(_onScroll);
+    _itemPositions.itemPositions.addListener(_onPositions);
   }
 
-  /// 接近顶部就自动往前补。滚动也是导航轨道的显隐信号:
-  /// 一滚就弹出,停下来 [_railHideDelay] 后自动缩回。
-  void _onScroll() {
-    _showRail();
-    _scheduleRailHide();
-    if (_scroll.hasClients) {
-      _scrollProgress.value = _anchorFocusT();
+  /// 可见项变化的统一入口(替代旧的 `ScrollController` 监听)。
+  ///
+  /// 帧路径上只做三件轻量事:算首个可见行、更新游标进度、必要时补历史。
+  /// **不再在这里调 `_syncDerived`** —— 派生行表只依赖 items,归 build 管;
+  /// 滚动期间反复重算是白烧帧时间。
+  void _onPositions() {
+    final positions = _itemPositions.itemPositions.value;
+    if (positions.isEmpty) return;
+
+    // 下标最小的槽位 = 用户正在看的那一行(它的前缘可能已经滚到视口上方)。
+    var firstSlot = positions.first.index;
+    for (final p in positions) {
+      if (p.index < firstSlot) firstSlot = p.index;
     }
-    if (_autoLoading || !_scroll.hasClients) return;
-    final position = _scroll.position;
+    _firstVisibleRow = _rowOfSlot(firstSlot);
+    _scrollProgress.value = _anchorFocusT();
+
+    if (_autoLoading) return;
     final state = ref.read(piSessionProvider);
-    _syncDerived(state); // 滚动在 build 之间触发,先保证 rows 已同步
-    final window = ChatWindow.of(
-      total: _rows.length,
-      windowSize: _windowSize,
-      hasPendingUiRequest: state.pendingUiRequest != null,
-      hasRemoteEarlier: state.hasMoreHistory,
-    );
-    final trigger = shouldAutoLoadEarlier(
-      pixels: position.pixels,
-      maxScrollExtent: position.hasContentDimensions
-          ? position.maxScrollExtent
-          : 0,
-      threshold: _autoLoadThreshold,
-      hasEarlier: window.hasEarlier,
-      loadingEarlier: state.loadingEarlier,
-      jumpingToBottom: _pendingBottomToken != null,
-    );
-    if (!trigger) return;
+    if (!state.hasMoreHistory || state.loadingEarlier) return;
+    if (firstSlot > _autoLoadRowThreshold) return;
 
     _autoLoading = true;
     unawaited(
-      _loadEarlier(window).whenComplete(() {
-        // 下一帧再放门:本帧里 position 还会因为补偿 jumpTo 再通知几次。
+      _loadEarlier().whenComplete(() {
+        // 下一帧再放闸:本帧里 positions 还会因为锚点跳转再通知几次。
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _autoLoading = false;
         });
@@ -278,61 +223,68 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     );
   }
 
-  void _growWindow() {
-    if (!_scroll.hasClients) {
-      setState(() => _windowSize += _windowStep);
-      return;
-    }
-    // 头部插入内容会把当前位置整体推下去,记下展开前的高度,
-    // 下一帧按增量补偿,视觉上停在原处。
-    final before = _scroll.position.maxScrollExtent;
-    final pixels = _scroll.position.pixels;
-    setState(() => _windowSize += _windowStep);
-    _compensateAfterGrow(pixels: pixels, extentBefore: before);
-  }
 
-  /// 头部长高之后把滚动位置拉回原处。
-  void _compensateAfterGrow({
-    required double pixels,
-    required double extentBefore,
-  }) {
+  /// 「加载更早」—— 联网把更早的历史补进列表,视口按 **稳定行主键** 锚住不动。
+  ///
+  /// 桥为了不撞爆手机的 2MB 套接字缓冲只发 entries 的尾巴(全量快照实测到过
+  /// 10.27MB),更早的留在桥上。所以滚到本地头部不等于历史到头了。
+  ///
+  /// 旧实现是「记下 maxScrollExtent,插入后按增量 jumpTo 补偿」。那个补偿量
+  /// 恒定偏:头部插入几十行后新的 `maxScrollExtent` 仍然只是按已建行平均高度
+  /// 外推的估算值,和真实高度增量没有确定关系 —— 偏多少不可预测,这就是
+  /// 「加载完更早的消息后列表乱窜、找不到跑哪去了」的根因。
+  ///
+  /// 现在改成:插入前记下**当前屏内第一条内容行的主键**和它的前缘位置,
+  /// 插入后在新行表里按同一个主键查新下标,连原前缘位置一起给回去。
+  ///
+  /// 为什么不用「旧下标 + 插入行数」推算:行表是从 items 派生的,一次同步里
+  /// 工具行/统计行的数量都可能变,而且 `await` 之后 Riverpod 可能已经重建过
+  /// `_rows`,行增量根本算不准(会算成 0)。主键是唯一可信的身份。
+  Future<void> _loadEarlier() async {
+    final anchor = _currentViewportAnchor();
+    final ok = await ref.read(piSessionNotifierProvider)?.loadEarlierHistory();
+    if (!mounted || ok != true || anchor == null) return;
+
+    // 等这一帧把新行表建出来,再按主键查新下标 —— 此时 build 已经跑过
+    // _syncDerived,_rowIndexByKey 是新的。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      final delta = _scroll.position.maxScrollExtent - extentBefore;
-      if (delta <= 0) return;
-      _scroll.jumpTo(
-        (pixels + delta).clamp(
-          _scroll.position.minScrollExtent,
-          _scroll.position.maxScrollExtent,
-        ),
+      if (!mounted || !_itemScroll.isAttached) return;
+      final newRow = _rowIndexByKey[anchor.rowKey];
+      // 查不到说明那一条被压缩/替换掉了,这时候硬跳反而更乱,不动为上。
+      if (newRow == null) return;
+      _itemScroll.jumpTo(
+        index: _slotOfRow(newRow),
+        alignment: anchor.leadingEdge,
       );
     });
   }
 
-  /// 「加载更早」—— 本地还有就只放大窗口,本地空了就联网补。
+  /// 当前**屏内**第一条内容行的锚点(主键 + 前缘归一化位置)。
   ///
-  /// 桥为了不撞爆手机的 2MB 套接字缓冲只发 entries 的尾巴(全量快照实测到过
-  /// 10.27MB),更早的留在桥上。所以滚到本地头部不等于历史到头了。
-  Future<void> _loadEarlier(ChatWindow window) async {
-    if (!window.needsRemoteFetch) {
-      _growWindow();
-      return;
+  /// 两处讲究:
+  /// - 只取 `itemLeadingEdge` 在 0~1 之间的项。`ItemScrollController.jumpTo`
+  ///   的 alignment 是视口对齐值,喂负数不成立;而下标最小的那一项通常
+  ///   已经有一部分滚到视口上方去了(前缘为负)。
+  /// - 跳过加载槽和统计行:前者不是消息,后者不对应任何 item、没有稳定身份。
+  ViewportAnchor? _currentViewportAnchor() {
+    final positions = _itemPositions.itemPositions.value;
+    if (positions.isEmpty) return null;
+
+    ViewportAnchor? best;
+    var bestEdge = double.infinity;
+    for (final p in positions) {
+      if (p.itemLeadingEdge < 0 || p.itemLeadingEdge > 1) continue;
+      final row = p.index - _leadingSlots;
+      if (row < 0 || row >= _rows.length) continue;
+      final key = _primaryKeyOf(_rows[row]);
+      if (key == null) continue;
+      // 屏内最靠上的那一条。
+      if (p.itemLeadingEdge < bestEdge) {
+        bestEdge = p.itemLeadingEdge;
+        best = ViewportAnchor(rowKey: key, leadingEdge: p.itemLeadingEdge);
+      }
     }
-    final extentBefore = _scroll.hasClients
-        ? _scroll.position.maxScrollExtent
-        : null;
-    final pixels = _scroll.hasClients ? _scroll.position.pixels : 0.0;
-    final countBefore = ref.read(piSessionProvider).items.length;
-    final ok = await ref.read(piSessionNotifierProvider)?.loadEarlierHistory();
-    if (!mounted || ok != true) return;
-    final added = ref.read(piSessionProvider).items.length - countBefore;
-    if (added <= 0) return;
-    // 必须同时把窗口放大 —— 窗口是锚在**尾部**的,光把历史插进列表的话
-    // offset 会跟着变大,刚取回来的那批仍然在窗口之上,点了等于没反应。
-    setState(() => _windowSize += added);
-    if (extentBefore != null) {
-      _compensateAfterGrow(pixels: pixels, extentBefore: extentBefore);
-    }
+    return best;
   }
 
   void _syncDerived(PiState state) {
@@ -347,16 +299,11 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     // - 轮尾追加一颗**纯统计**胶囊(「使用了 N 个工具」+ 迷你图标),
     //   不可点、不展开 —— 一轮几十次调用要有个总账,明细已在流里逐条列出。
     final rows = <_ChatRow>[];
-    final index = <String, int>{};
     final rowTimes = <DateTime?>[];
 
-    void addRow(_ChatRow row, DateTime? time, List<ChatItem> keys) {
-      final ri = rows.length;
+    void addRow(_ChatRow row, DateTime? time) {
       rows.add(row);
       rowTimes.add(time);
-      for (final k in keys) {
-        index[k.key] = ri;
-      }
     }
 
     void buildSegment(int start, int end) {
@@ -375,16 +322,16 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
         final item = items[i];
         if (item is ToolItem) {
           allTools.add(item);
-          addRow(_ToolGroupRow(List.unmodifiable([item])), null, [item]);
+          addRow(_ToolGroupRow(List.unmodifiable([item])), null);
         } else if (!isEmptyAssistant(item)) {
-          addRow(_SingleRow(item), timeOf(item), [item]);
+          addRow(_SingleRow(item), timeOf(item));
         }
       }
 
       // 轮尾统计胶囊。不注册工具 key:那些 key 属于流里的原位工具行,
       // 重复注册会把滚动锚点从工具行抢过来。
       if (allTools.isNotEmpty) {
-        addRow(_ToolStatRow(List.unmodifiable(allTools)), null, const []);
+        addRow(_ToolStatRow(List.unmodifiable(allTools)), null);
       }
     }
 
@@ -409,8 +356,17 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     }
 
     _rows = rows;
-    _indexByKey = index;
     _timestampFlagCache = flags;
+    // 主键 → 行下标。加载更早的历史后要靠它把视口重新锚回同一条消息上
+    // —— 不能用「旧下标 + 插入行数」推算:行表是从 items 派生的,
+    // 一次同步里工具行/统计行的数量都可能变,推算出来的位置不可信。
+    // 统计行不注册:它不属于任何 item,没有稳定身份。
+    final keys = <String, int>{};
+    for (var i = 0; i < rows.length; i++) {
+      final key = _primaryKeyOf(rows[i]);
+      if (key != null) keys[key] = i;
+    }
+    _rowIndexByKey = keys;
     // 导航轨道锚点:每行用户消息一个刻度。
     _navAnchors = [
       for (var i = 0; i < rows.length; i++)
@@ -418,6 +374,15 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
           NavAnchor(rowIndex: i, preview: u.text, time: u.time),
     ];
   }
+
+  /// 一行的稳定主键(和渲染时的 widget key 同源)。
+  ///
+  /// 统计行返回 null —— 它是轮尾派生的汇总胶囊,不对应任何 item。
+  static String? _primaryKeyOf(_ChatRow row) => switch (row) {
+    _SingleRow(item: final item) => item.key,
+    _ToolGroupRow(tools: final tools) => tools.first.key,
+    _ToolStatRow() => null,
+  };
 
   void _syncComposerHeight() {
     final box = _composerKey.currentContext?.findRenderObject() as RenderBox?;
@@ -430,59 +395,40 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   @override
   void dispose() {
     _railHideTimer?.cancel();
+    _itemPositions.itemPositions.removeListener(_onPositions);
     _scrollProgress.dispose();
+    _railVisible.dispose();
     _input.dispose();
-    _scroll.removeListener(_onScroll);
-    _scroll.dispose();
     super.dispose();
   }
 
+  /// 本来就贴着底就跟着新消息走;已经翻上去看历史了就别抢用户的位置。
+  ///
+  /// 判据从「maxScrollExtent - pixels < 240」改成「最后一行是否在可见集里」
+  /// —— 像素判据依赖估算的 maxScrollExtent,流式期间那个值一直在抖。
   void _scrollToBottomIfNear() {
-    if (!_scroll.hasClients) return;
-    final position = _scroll.position;
-    if (position.maxScrollExtent - position.pixels < 240) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) {
-          _scroll.jumpTo(_scroll.position.maxScrollExtent);
-        }
-      });
-    }
+    if (!_itemScroll.isAttached || _rows.isEmpty) return;
+    final positions = _itemPositions.itemPositions.value;
+    if (positions.isEmpty) return;
+    final lastSlot = _slotOfRow(_rows.length - 1);
+    final atBottom = positions.any((p) => p.index >= lastSlot - 1);
+    if (!atBottom) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_itemScroll.isAttached || _rows.isEmpty) return;
+      _jumpToBottom();
+    });
   }
 
-  /// 无条件跳到底部。
+  /// 无条件跳到底部:最后一行的**尾缘**贴住视口底。
   ///
-  /// 与 [_scrollToBottomIfNear] 的区别是不看当前位置 —— 会话刚加载完时
-  /// pixels 是 0 而 maxScrollExtent 很大,「接近底部」永远不成立。
+  /// 旧实现要「连推 6 帧、每帧朝当前 maxScrollExtent 再跳一次」,因为惰性列表
+  /// 的 maxScrollExtent 是估算值、一次 jumpTo 到不了真正的底。按下标定位没有
+  /// 这个问题:直接指定最后一行 + alignment,一步到位。
   ///
-  /// 惰性列表的 maxScrollExtent 是估算值,一次 jumpTo 到不了真正的底,
-  /// 所以连着推几帧,每帧都朝当前的 maxScrollExtent 再跳一次。
-  void _jumpToBottomSoon(String token) {
-    // build 每帧都会调到这里(流式时尤其频),同一个 token 只允许一条链在跑。
-    if (_bottomChainToken == token) return;
-    _bottomChainToken = token;
-    var remaining = 6;
-    void step() {
-      if (!mounted || _pendingBottomToken != token) {
-        if (_bottomChainToken == token) _bottomChainToken = null;
-        return;
-      }
-      if (!_scroll.hasClients) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => step());
-        return;
-      }
-      final position = _scroll.position;
-      if (position.pixels < position.maxScrollExtent) {
-        _scroll.jumpTo(position.maxScrollExtent);
-      }
-      if (--remaining > 0) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => step());
-      } else {
-        _pendingBottomToken = null;
-        _bottomChainToken = null;
-      }
-    }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) => step());
+  /// alignment 用 1.0 配合负偏移不可行(API 只接受 0~1 的前缘位置),所以这里
+  /// 取最后一行的前缘贴底再让列表自己夹紧 —— 内容比视口高时等价于滚到底。
+  void _jumpToBottom() {
+    _itemScroll.jumpTo(index: _slotOfRow(_rows.length - 1), alignment: 1);
   }
 
   void _send({PiDelivery? delivery}) {
@@ -536,27 +482,32 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     _syncDerived(state);
     final timestampFlags = _timestampFlagCache;
 
-    // 会话/源一换就残一个「跳底」标记。不能在此时就跳 ——
-    // 切换瞬间 items 还是空的,得等历史刷进来。
+    // 会话/源一换就把落点打到最新消息。**不能在切换那一帧就跳** ——
+    // 切换瞬间 items 往往还是空的(历史要等一个往返),那一帧跳了等于没跳,
+    // 而且不会再有第二次机会。所以先记一个一次性 token,等这个会话真的有
+    // 消息了再跳一次,然后立刻清掉。
     final sessionToken = '${state.selectedSourceId}/${state.sessionId}';
     if (sessionToken != _lastSessionToken) {
       _lastSessionToken = sessionToken;
-      _pendingBottomToken = sessionToken;
-      // 换会话必须收回窗口,否则从长会话切过去会继承一个很大的窗口,
-      // 首帧又要建几百条。
-      _windowSize = _windowStep;
+      _pendingInitialBottomToken = sessionToken;
+      _firstVisibleRow = 0;
+      _scrollProgress.value = 0;
     }
-    if (_pendingBottomToken == sessionToken && state.items.isNotEmpty) {
-      _jumpToBottomSoon(sessionToken);
+    if (_pendingInitialBottomToken == sessionToken && state.items.isNotEmpty) {
+      _pendingInitialBottomToken = null;
+      // 已挂载的列表不会重读 initialScrollIndex,手动推一下。
+      // 按下标定位一步到位,不需要旧那条「连推 6 帧朝 maxScrollExtent 逼近」的链。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_itemScroll.isAttached || _rows.isEmpty) return;
+        _jumpToBottom();
+      });
     }
 
-    // 只渲染尾部窗口。offset 是窗口首行在完整行表里的下标。
-    final window = ChatWindow.of(
-      total: _rows.length,
-      windowSize: _windowSize,
-      hasPendingUiRequest: state.pendingUiRequest != null,
-      hasRemoteEarlier: state.hasMoreHistory,
-    );
+    // 顶部只在「桥上还留着更早的历史」时占一个加载槽。本地不再窗口化。
+    final hasEarlier = _hasEarlierSlot(state);
+    _leadingSlots = hasEarlier ? 1 : 0;
+    final itemCount =
+        _leadingSlots + _rows.length + (state.pendingUiRequest != null ? 1 : 0);
 
     // 首帧之后量一次;之后由 SizeChangedLayoutNotifier 驱动
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncComposerHeight());
@@ -581,8 +532,27 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
               else
                 // 导航走左侧的 MessageNavRail(刻度=用户消息),
                 // 系统 Scrollbar 撤掉 —— 两者功能重叠,双侧各一条太吵。
-                ListView.builder(
-                  controller: _scroll,
+                //
+                // 按**下标**定位而不是按像素:行高差几十倍时像素定位必然不准,
+                // 而惰性列表的 maxScrollExtent 只是估算值。
+                // 轨道显隐挂在**滚动起止**上而不是每次位置通知:后者一帧一次,
+                // 每次都 cancel + new Timer,光这笔分配就在帧路径上白烧。
+                NotificationListener<ScrollNotification>(
+                  onNotification: (n) {
+                    if (n is ScrollStartNotification) {
+                      _showRail();
+                    } else if (n is ScrollEndNotification) {
+                      _scheduleRailHide();
+                    }
+                    return false;
+                  },
+                  child: ScrollablePositionedList.builder(
+                  itemScrollController: _itemScroll,
+                  itemPositionsListener: _itemPositions,
+                  // 首帧就落在最新消息上。按下标定位不需要把中间那几百条先建出来,
+                  // 所以也不再需要尾部窗口那套变通。
+                  initialScrollIndex: itemCount == 0 ? 0 : itemCount - 1,
+                  initialAlignment: 1,
                   // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
                   // 顶部留出灵动岛高度,静止时第一项在岛下面。
                   // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。
@@ -595,68 +565,41 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   // 长会话里 keep-alive 会把滚过的每一项都钉在内存里不释放,
                   // 越滚越重。消息项本身无状态可留(展开态在 ChatItem 上),关掉。
                   addAutomaticKeepAlives: false,
-                  itemCount: window.itemCount,
-                  findChildIndexCallback: (key) {
-                    // 预建的 key -> 下标表。以前这里 indexWhere 线性扫描,
-                    // 而本回调对每个可见子项都会调一次 —— 一次重建就是
-                    // O(可见项 x 总条数),流式期间每个 token 都要付这笔钱。
-                    if (key is! ValueKey<String>) return null;
-                    final full = _indexByKey[key.value];
-                    if (full == null) return null;
-                    // 只认「行的主 key」(单行的 item key,或组第一个工具的 key)。
-                    // 组内其余工具的 key 也映射到组行 —— 重排时多个不同 key
-                    // 解析到同一 slot,viewport 会试图把两个 keyed child 放进
-                    // 同一位置,直接红屏(viewport.dart '!_doingMountOrUpdate')。
-                    // 返回 null 让旧 child 按无 key 正常回收即可。
-                    final row = _rows[full];
-                    final primaryKey = switch (row) {
-                      _SingleRow(item: final item) => item.key,
-                      _ToolGroupRow(tools: final tools) => tools.first.key,
-                      // 统计行不注册任何 item key,永远解析不到。
-                      _ToolStatRow() => null,
-                    };
-                    if (key.value != primaryKey) return null;
-                    return window.slotOf(full);
-                  },
+                  itemCount: itemCount,
                   itemBuilder: (context, index) {
-                    if (window.isLoadEarlierSlot(index)) {
+                    if (hasEarlier && index == 0) {
                       return _EarlierLoader(
-                        remaining: window.offset,
                         loading: state.loadingEarlier,
-                        onRetry: () => unawaited(_loadEarlier(window)),
+                        onRetry: () => unawaited(_loadEarlier()),
                       );
                     }
-                    if (window.isPendingRequestSlot(index)) {
+                    final full = index - _leadingSlots;
+                    if (full >= _rows.length) {
                       final request = state.pendingUiRequest!;
                       return UiRequestCard(
                         key: ValueKey('ui-request-${request.id}'),
                         request: request,
                       );
                     }
-                    final full = window.itemIndexOf(index);
                     final row = _rows[full];
-                    var view = switch (row) {
+                    final view = switch (row) {
                       _SingleRow(item: final item) => ChatItemView(
                         key: ValueKey(item.key),
                         item: item,
                       ),
-                      _ToolGroupRow(tools: final tools) => ToolGroupCard(
+                      // 工具卡也要各自封重绘边界:流式期间它们内部一直在变,
+                      // 不隔离的话会拉着同屏其他卡一起重绘。
+                      _ToolGroupRow(tools: final tools) => RepaintBoundary(
                         // key 用首个工具的 key:streaming 中新工具入组时
                         // key 稳定,widget 复用只是 tools 变长。
                         key: ValueKey(tools.first.key),
-                        tools: tools,
+                        child: ToolGroupCard(tools: tools),
                       ),
                       // 统计行无 key:它不属于任何 item,也无状态可保。
-                      _ToolStatRow(tools: final tools) => ToolGroupCard(
-                        tools: tools,
-                        statOnly: true,
+                      _ToolStatRow(tools: final tools) => RepaintBoundary(
+                        child: ToolGroupCard(tools: tools, statOnly: true),
                       ),
                     };
-                    // 导航轨道的跳转目标:挂上 GlobalKey,构建出来以后
-                    // _refineJump 用 ensureVisible 校正粗跳的估算误差。
-                    if (full == _pendingJumpRow) {
-                      view = KeyedSubtree(key: _jumpKey, child: view);
-                    }
                     if (!timestampFlags[full]) return view;
                     // 时间戳只会挂在有时间的行(user/assistant);
                     // 工具组行无时间,flag 一定是 false,走不到这里。
@@ -676,7 +619,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                         view,
                       ],
                     );
-                  },
+                    },
+                  ),
                 ),
               if (state.hasSession)
                 Positioned(
@@ -684,7 +628,9 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   // 抬到输入卡上方,不然会被它压住
                   bottom: listBottomInset,
                   child: ScrollToBottomButton(
-                    controller: _scroll,
+                    positions: _itemPositions,
+                    lastSlot: itemCount - 1,
+                    onJump: _jumpToBottom,
                     revision: state.revision,
                   ),
                 ),
@@ -694,19 +640,25 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   left: 0,
                   top: widget.topPadding + 32,
                   bottom: listBottomInset + 24,
-                  child: MessageNavRail(
-                    visible: _railVisible || _railInteracting,
-                    anchors: _navAnchors,
-                    progress: _scrollProgress,
-                    onJump: _jumpToRow,
-                    onInteractionChanged: (interacting) {
-                      _railInteracting = interacting;
-                      if (interacting) {
-                        _railHideTimer?.cancel();
-                      } else {
-                        _scheduleRailHide();
-                      }
-                    },
+                  // 显隐走 ValueListenableBuilder 而不是 setState:滚动一停一动都
+                  // 重建整个 ChatBody 的话,会连带重建所有可见消息卡(markdown 解析 +
+                  // 语法高亮),那是卡顿的一大头。
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: _railVisible,
+                    builder: (context, visible, _) => MessageNavRail(
+                      visible: visible || _railInteracting,
+                      anchors: _navAnchors,
+                      progress: _scrollProgress,
+                      onJump: _jumpToRow,
+                      onInteractionChanged: (interacting) {
+                        _railInteracting = interacting;
+                        if (interacting) {
+                          _railHideTimer?.cancel();
+                        } else {
+                          _scheduleRailHide();
+                        }
+                      },
+                    ),
                   ),
                 ),
               // 顶部渐变遮罩:灵动岛不遮一整栏,内容滚到顶部时渐隐。
@@ -1065,33 +1017,10 @@ class _LivenessBanner extends ConsumerWidget {
   }
 }
 
-/// 滚到顶部附近时该不该自动补更早的历史。
-///
-/// 抽成顶层函数而不是留在 `_onScroll` 里,是因为几道卡全是真踩过的坑,
-/// 而内联在私有 State 里没法单独测。
-bool shouldAutoLoadEarlier({
-  required double pixels,
-  required double maxScrollExtent,
-  required double threshold,
-  required bool hasEarlier,
-  required bool loadingEarlier,
-  required bool jumpingToBottom,
-}) {
-  if (!hasEarlier) return false;
-  if (loadingEarlier) return false;
-  // 切会话后还在跳底的过程中:pixels 从 0 往下跑,中途必然落在阈值内,
-  // 不挡的话每次切会话都会白白发一轮往前分页。
-  if (jumpingToBottom) return false;
-  // 内容还没撑满一屏时 maxScrollExtent 是 0,pixels 永远在「顶部」。
-  // 那种情况下本来也滚不动,交给指示行自己可点。
-  if (maxScrollExtent <= 0) return false;
-  return pixels <= threshold;
-}
-
 /// 消息列表的渲染行:由 ChatItem 列表派生。
 ///
 /// 每个 ToolItem 各自一行([_ToolGroupRow] 现在只装单个工具),其余每项一行;
-/// 每轮末尾追加一颗纯统计的 [_ToolStatRow]。窗口/下标/时间戳全按行维度计算,
+/// 每轮末尾追加一颗纯统计的 [_ToolStatRow]。下标/时间戳全按行维度计算,
 /// 不再直接用 items 下标。
 sealed class _ChatRow {
   const _ChatRow();
@@ -1112,88 +1041,17 @@ class _ToolStatRow extends _ChatRow {
   final List<ToolItem> tools;
 }
 
-/// 消息列表的尾部窗口下标运算。
-///
-/// 提成独立类而不是留在 `build` 里,是因为这里的下标换算(完整列表下标 ↔
-/// 列表槽位)一旦算错就会**渲染错消息**,而内联在 build 里没法单独测。
-///
-/// 槽位布局:`[加载更早?] + 窗口内消息 + [待应答对话框?]`
-class ChatWindow {
-  const ChatWindow({
-    required this.total,
-    required this.offset,
-    required this.hasPendingUiRequest,
-    this.hasRemoteEarlier = false,
-  });
-
-  factory ChatWindow.of({
-    required int total,
-    required int windowSize,
-    required bool hasPendingUiRequest,
-    bool hasRemoteEarlier = false,
-  }) => ChatWindow(
-    total: total,
-    offset: total > windowSize ? total - windowSize : 0,
-    hasPendingUiRequest: hasPendingUiRequest,
-    hasRemoteEarlier: hasRemoteEarlier,
-  );
-
-  /// 完整列表的总条数。
-  final int total;
-
-  /// 窗口首项在完整列表里的下标。
-  final int offset;
-  final bool hasPendingUiRequest;
-
-  /// 桥上还留着更早的历史(本地已经没有了,但能联网取)。
-  ///
-  /// 桥为了不撞爆手机的 2MB 套接字缓冲只发 entries 的尾巴,所以「没有本地更早」
-  /// 不等于「没有更早」—— 滚到本地头部时按钮还要在,只是改成联网补。
-  final bool hasRemoteEarlier;
-
-  /// 窗口之上还有没渲染的历史 → 需要「加载更早」按钮占一个槽位。
-  bool get hasEarlier => offset > 0 || hasRemoteEarlier;
-
-  /// 本地窗口之上已经空了,再往前得联网取。
-  bool get needsRemoteFetch => offset == 0 && hasRemoteEarlier;
-
-  int get _leading => hasEarlier ? 1 : 0;
-  int get _trailing => hasPendingUiRequest ? 1 : 0;
-
-  /// 窗口内渲染的消息条数。
-  int get visibleCount => total - offset;
-
-  int get itemCount => _leading + visibleCount + _trailing;
-
-  bool isLoadEarlierSlot(int slot) => hasEarlier && slot == 0;
-
-  bool isPendingRequestSlot(int slot) =>
-      hasPendingUiRequest && slot - _leading == visibleCount;
-
-  /// 槽位 → 完整列表下标。调用前必须先排除两个特殊槽位。
-  int itemIndexOf(int slot) => offset + slot - _leading;
-
-  /// 完整列表下标 → 槽位;落在窗口之外返回 null(ListView 会当作新子项)。
-  int? slotOf(int index) {
-    if (index < offset || index >= total) return null;
-    return index - offset + _leading;
-  }
-}
-
 /// 列表顶部的历史加载指示。
 ///
-/// 不是按钮:滚到顶部附近由 `_onScroll` 自动触发补齐。仍然可点只是兼一手
+/// 不是按钮:滚到顶部附近由 `_onPositions` 自动触发补齐。仍然可点只是兼一手
 /// —— 内容没撑满一屏时根本没有滚动事件,此时自动触发依赖不上。
+///
+/// 不再显示「还剩 N 条」:那个数是「尾部窗口之上还没渲染的本地条数」,
+/// 而窗口化已经拆掉了(它是位置乱窜的根因)。现在未加载的历史全在桥上,
+/// 条数不在本地,数不出来。
 class _EarlierLoader extends StatelessWidget {
-  const _EarlierLoader({
-    required this.remaining,
-    required this.onRetry,
-    this.loading = false,
-  });
+  const _EarlierLoader({required this.onRetry, this.loading = false});
 
-  /// 窗口之上还没渲染的条数。0 表示本地已空,接下来要联网取 ——
-  /// 那时数不出来还剩多少,因为条数在桥上。
-  final int remaining;
   final VoidCallback onRetry;
   final bool loading;
 
@@ -1223,10 +1081,7 @@ class _EarlierLoader extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  remaining > 0 ? '正在加载更早的消息 · 还有 $remaining 条' : '正在加载更早的消息…',
-                  style: text,
-                ),
+                Text('正在加载更早的消息…', style: text),
               ],
             ),
           ),

@@ -6,18 +6,10 @@ import 'package:flutter/scheduler.dart';
 
 import '../../theme/motion.dart';
 import '../../theme/shapes.dart';
+import '../chat_scroll_anchor.dart';
+import '../nav_anchor.dart';
 
-/// 消息导航轨道的锚点:一条用户消息在完整行表中的位置与预览。
-class NavAnchor {
-  const NavAnchor({required this.rowIndex, required this.preview, this.time});
-
-  /// 该用户消息在完整渲染行表(_rows)中的下标。
-  final int rowIndex;
-
-  /// 消息全文(预览卡自己截断)。
-  final String preview;
-  final DateTime? time;
-}
+export '../nav_anchor.dart' show NavAnchor;
 
 /// 消息导航轨道:屏幕左缘、**垂直居中**的一段刻度条,
 /// 每个刻度对应一条用户消息。
@@ -158,11 +150,11 @@ class _MessageNavRailState extends State<MessageNavRail>
   }
 
   /// 手势 y → 刻度下标:轨道内均匀分布,与绘制同一套映射。
-  int _indexAt(double y, double height) {
-    final n = widget.anchors.length;
-    if (n == 0) return 0;
-    return (_tAt(y, height) * (n - 1)).round();
-  }
+  ///
+  /// 映射本身抽到 [anchorIndexAt] —— 它要能独立于行高被测试,
+  /// 「拖到哪就该是第几条消息」是这条轨道唯一的正确性契约。
+  int _indexAt(double y, double height) =>
+      anchorIndexAt(_tAt(y, height), widget.anchors.length);
 
   void _startPreview(double y, double height) {
     widget.onInteractionChanged(true);

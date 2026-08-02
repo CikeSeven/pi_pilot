@@ -49,6 +49,7 @@ dependencies:
   # 切网即时重连需要一个即时网络变化信号。钉死精确版本:
   # 这是原生插件,次要版本升级会换掉平台实现。
   connectivity_plus: 7.3.1
+  scrollable_positioned_list: ^0.3.8
 
 dev_dependencies:
   flutter_test:
