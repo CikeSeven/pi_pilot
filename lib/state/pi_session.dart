@@ -3189,11 +3189,41 @@ class PiSessionNotifier extends Notifier<PiState> {
         sessionId == state.sessionId &&
         leafId != null &&
         _seenEntryIds.contains(leafId);
+
+    final entries = snapshot['entries'] as List? ?? const [];
+    // staged replacement:空快照不许清列表。
+    //
+    // 这条路径原来是「先清空,再灌 entries」。快照没带 entries(字段缺失被
+    // ?? const [] 兜成空、或桥在会话切换间隙返回了空批)时,列表就被清成
+    // 空白 —— 而且这里**自己不安排补货**,只能等下次碰巧触发同步,严重时
+    // 一直空到重启 App。这就是「消息列表莫名其妙没了」。
+    //
+    // full-sync 路径此前已按同样思路加固过(先拉到完整数据再替换,失败保留
+    // 旧列表 + 退避重试),但 hub v2 快照这条漏了。
+    //
+    // 判据要严:只在「同一会话、本地有内容、快照却是空的」时保留。换会话
+    // /换分支时快照本就该是空的(那是真的没消息),这时候必须照常清空,
+    // 否则会把上一个会话的消息留在界面上冒充新会话的内容。
+    final sameSession = sessionId != null && sessionId == state.sessionId;
+    if (entries.isEmpty && sameSession && _items.isNotEmpty) {
+      _logP2p(
+        '快照 entries 为空但本地有 ${_items.length} 条(同一会话),保留现有列表并调度重同步',
+      );
+      if (stateData is Map) {
+        _applyStateData(Map<String, dynamic>.from(stateData));
+      }
+      _emit();
+      // 走 scheduleSyncRecovery 这个缝隙而不是直接调 _scheduleSourceResync:
+      // 两者在生产里等价,但缝隙可以被测试桩接住 —— 「空快照必须排补货」
+      // 这条约束才断言得到。
+      scheduleSyncRecovery(reason: 'empty-snapshot');
+      return;
+    }
+
     if (!sameBranch) _resetConversation(reason: 'snapshot-rebuild');
     if (stateData is Map) {
       _applyStateData(Map<String, dynamic>.from(stateData));
     }
-    final entries = snapshot['entries'] as List? ?? const [];
     for (final entry in entries) {
       if (entry is Map) _ingestEntry(Map<String, dynamic>.from(entry));
     }
@@ -3468,6 +3498,47 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 测试缝隙:设置本地 leaf(决定 _sync 走增量还是全量)。
   @visibleForTesting
   set debugLeafId(String? value) => _leafId = value;
+
+  /// 测试缝隙:直接喂一份 hub 快照。
+  @visibleForTesting
+  void debugApplyHubSnapshot(
+    Map<dynamic, dynamic> snapshot, {
+    bool reconcile = false,
+  }) => _applyHubSnapshot(snapshot, reconcile: reconcile);
+
+  /// 测试缝隙:读往前分页游标(断言「标志为真时游标必须存在」)。
+  @visibleForTesting
+  String? get debugOldestEntryId => _oldestEntryId;
+
+  /// 测试缝隙:构造「桥说过还有更早的」这个前置状态。
+  @visibleForTesting
+  void debugSetHasMoreHistory(bool value) =>
+      state = state.copyWith(hasMoreHistory: value);
+
+  /// 测试缝隙:构造「正在加载更早」这个前置状态。
+  @visibleForTesting
+  void debugSetLoadingEarlier(bool value) =>
+      state = state.copyWith(loadingEarlier: value);
+
+  /// 测试缝隙:同时设回游标和标志 —— 模拟 entriesHasMore 分支做的事。
+  ///
+  /// 成对设置是这条路径的正确性要求:只设一个就是那个卡住状态。
+  @visibleForTesting
+  void debugSetEarlierCursor(String oldestId, {required bool hasMore}) {
+    _oldestEntryId = oldestId;
+    state = state.copyWith(hasMoreHistory: hasMore);
+  }
+
+  /// 测试缝隙:把条目灌进本地历史(构造「本地已有内容」的前置状态)。
+  ///
+  /// 跟着 emit 一次 —— 真实的 entry_appended 路径就是 ingest + emit,
+  /// 只 ingest 不 emit 会得到「_items 有内容但 state.items 是空的」这种
+  /// 现实中不存在的状态。
+  @visibleForTesting
+  void debugIngestEntry(Map<String, dynamic> entry) {
+    _ingestEntry(entry);
+    _emit();
+  }
 
   Future<Map<String, dynamic>?> _request(
     String type, [
@@ -4903,6 +4974,18 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 否则下一批正常消息会被插到列表中间。
     _oldestEntryId = null;
     _prependAt = null;
+    // 游标和 hasMoreHistory 必须同生同死。
+    //
+    // 只清游标、把 hasMoreHistory 留在 true,会得到一个**永久卡住**的状态:
+    // UI 看 hasMoreHistory 为真,一直显示「加载更早」那一行、还会自动触发
+    // 补货;而 loadEarlierHistory() 第一行就是 `cursor == null → return
+    // false`,每次都立刻返回。于是「正在加载更早的消息…」一直转,上面的
+    // 消息永远出不来 —— 症状是「突然加载不出来之前的消息了」。
+    //
+    // 清空之后是否还有更早的历史,由随后的快照/全量响应重新判定
+    // (snapshot 路径看 entriesHasMore,全量路径看 hasMore),那里会连
+    // 游标一起设回来。所以这里归零是安全的:要么被重新置真,要么本就没有。
+    state = state.copyWith(hasMoreHistory: false, loadingEarlier: false);
   }
 
   static List<String> _stringList(dynamic value) =>
