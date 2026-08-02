@@ -162,7 +162,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
   static const int _tailSlots = 2;
 
   /// 终点哨兵的槽位下标(列表最后一个槽)。
-  int get _terminalSlot => _leadingSlots + _rows.length + _trailingRequestSlots + 1;
+  int get _terminalSlot =>
+      _leadingSlots + _rows.length + _trailingRequestSlots + 1;
 
   /// 尾部「待处理 UI 请求」占的槽位数(0 或 1)。build 时同步。
   int _trailingRequestSlots = 0;
@@ -255,7 +256,6 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       }),
     );
   }
-
 
   /// 「加载更早」—— 联网把更早的历史补进列表,视口按 **稳定行主键** 锚住不动。
   ///
@@ -528,6 +528,20 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
       (_, _) => _scrollToBottomIfNear(),
     );
 
+    // 回退到某条用户消息时,桌面端会连同那条消息的原文(editorText)一起
+    // 返回 —— 填回输入框,对齐桌面 pi:回退 = 把那条消息拿回来重新编辑。
+    // 一次性信号,填完立刻 consume 掉,免得泄露到下一个会话。
+    ref.listen<String?>(piSessionProvider.select((s) => s.composerFill), (
+      _,
+      fill,
+    ) {
+      if (fill == null || fill.isEmpty) return;
+      _input.text = fill;
+      _input.selection = TextSelection.collapsed(offset: fill.length);
+      setState(() => _inputText = fill);
+      ref.read(piSessionNotifierProvider)?.consumeComposerFill();
+    });
+
     final state = ref.watch(piSessionProvider);
     _syncDerived(state);
     final timestampFlags = _timestampFlagCache;
@@ -600,88 +614,93 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                     return false;
                   },
                   child: ScrollablePositionedList.builder(
-                  itemScrollController: _itemScroll,
-                  itemPositionsListener: _itemPositions,
-                  // 首帧落到终点哨兵上,alignment 1 把它贴到视口底 —— 哨兵只有
-                  // 1px,贴底就等于「内容的最末端刚好在视口底」,不管最后一行
-                  // 有多高都成立。
-                  //
-                  // 这里不能改成「最后一行 + alignment 0」:那是把那一行的**顶部**
-                  // 对齐到视口顶,一条比视口高好几屏的长回答会只露出开头。
-                  initialScrollIndex: itemCount == 0 ? 0 : itemCount - 1,
-                  initialAlignment: 1,
-                  // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
-                  // 顶部留出灵动岛高度,静止时第一项在岛下面。
-                  // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。
-                  // 底部不再用 padding 留白:它不是子项、拿不到可见性,
-                  // 「到底了没有」就只能靠最后一行下标去猜(对高个流式行是错的)。
-                  // 改成尾部两个真实槽位,见 _tailSlots。
-                  padding: EdgeInsets.fromLTRB(4, widget.topPadding + 12, 4, 0),
-                  // 长会话里 keep-alive 会把滚过的每一项都钉在内存里不释放,
-                  // 越滚越重。消息项本身无状态可留(展开态在 ChatItem 上),关掉。
-                  addAutomaticKeepAlives: false,
-                  itemCount: itemCount,
-                  itemBuilder: (context, index) {
-                    if (hasEarlier && index == 0) {
-                      return _EarlierLoader(
-                        loading: state.loadingEarlier,
-                        onRetry: () => unawaited(_loadEarlier()),
+                    itemScrollController: _itemScroll,
+                    itemPositionsListener: _itemPositions,
+                    // 首帧落到终点哨兵上,alignment 1 把它贴到视口底 —— 哨兵只有
+                    // 1px,贴底就等于「内容的最末端刚好在视口底」,不管最后一行
+                    // 有多高都成立。
+                    //
+                    // 这里不能改成「最后一行 + alignment 0」:那是把那一行的**顶部**
+                    // 对齐到视口顶,一条比视口高好几屏的长回答会只露出开头。
+                    initialScrollIndex: itemCount == 0 ? 0 : itemCount - 1,
+                    initialAlignment: 1,
+                    // 底部留出输入卡的实测高度,免得最后一条消息被压在下面;
+                    // 顶部留出灵动岛高度,静止时第一项在岛下面。
+                    // 左右 4:卡片自己带 10 margin,总边距 14(收紧,放更多内容)。
+                    // 底部不再用 padding 留白:它不是子项、拿不到可见性,
+                    // 「到底了没有」就只能靠最后一行下标去猜(对高个流式行是错的)。
+                    // 改成尾部两个真实槽位,见 _tailSlots。
+                    padding: EdgeInsets.fromLTRB(
+                      4,
+                      widget.topPadding + 12,
+                      4,
+                      0,
+                    ),
+                    // 长会话里 keep-alive 会把滚过的每一项都钉在内存里不释放,
+                    // 越滚越重。消息项本身无状态可留(展开态在 ChatItem 上),关掉。
+                    addAutomaticKeepAlives: false,
+                    itemCount: itemCount,
+                    itemBuilder: (context, index) {
+                      if (hasEarlier && index == 0) {
+                        return _EarlierLoader(
+                          loading: state.loadingEarlier,
+                          onRetry: () => unawaited(_loadEarlier()),
+                        );
+                      }
+                      // 终点哨兵:1px 的空盒子。它可见 = 真的到底了。
+                      if (index == itemCount - 1) {
+                        return const SizedBox(height: 1);
+                      }
+                      // 输入卡占位:把最后一条消息顶到输入卡上方。
+                      if (index == itemCount - 2) {
+                        return SizedBox(height: listBottomInset);
+                      }
+                      final full = index - _leadingSlots;
+                      if (full >= _rows.length) {
+                        final request = state.pendingUiRequest!;
+                        return UiRequestCard(
+                          key: ValueKey('ui-request-${request.id}'),
+                          request: request,
+                        );
+                      }
+                      final row = _rows[full];
+                      final view = switch (row) {
+                        _SingleRow(item: final item) => ChatItemView(
+                          key: ValueKey(item.key),
+                          item: item,
+                        ),
+                        // 工具卡也要各自封重绘边界:流式期间它们内部一直在变,
+                        // 不隔离的话会拉着同屏其他卡一起重绘。
+                        _ToolGroupRow(tools: final tools) => RepaintBoundary(
+                          // key 用首个工具的 key:streaming 中新工具入组时
+                          // key 稳定,widget 复用只是 tools 变长。
+                          key: ValueKey(tools.first.key),
+                          child: ToolGroupCard(tools: tools),
+                        ),
+                        // 统计行无 key:它不属于任何 item,也无状态可保。
+                        _ToolStatRow(tools: final tools) => RepaintBoundary(
+                          child: ToolGroupCard(tools: tools, statOnly: true),
+                        ),
+                      };
+                      if (!timestampFlags[full]) return view;
+                      // 时间戳只会挂在有时间的行(user/assistant);
+                      // 工具组行无时间,flag 一定是 false,走不到这里。
+                      final rowTime = switch (row) {
+                        _SingleRow(item: final item) => timeOf(item),
+                        _ToolGroupRow() || _ToolStatRow() => null,
+                      };
+                      if (rowTime == null) return view;
+                      return Column(
+                        // 默认 center 会给子项松散宽度:用户气泡收缩成内容宽
+                        // 再被居中,短消息就「跑到屏幕中间」了。stretch 保持
+                        // 满宽紧约束,右对齐交给气泡自己;时间戳自带 Center,
+                        // 不受影响。
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          MessageTimestamp(time: rowTime),
+                          view,
+                        ],
                       );
-                    }
-                    // 终点哨兵:1px 的空盒子。它可见 = 真的到底了。
-                    if (index == itemCount - 1) {
-                      return const SizedBox(height: 1);
-                    }
-                    // 输入卡占位:把最后一条消息顶到输入卡上方。
-                    if (index == itemCount - 2) {
-                      return SizedBox(height: listBottomInset);
-                    }
-                    final full = index - _leadingSlots;
-                    if (full >= _rows.length) {
-                      final request = state.pendingUiRequest!;
-                      return UiRequestCard(
-                        key: ValueKey('ui-request-${request.id}'),
-                        request: request,
-                      );
-                    }
-                    final row = _rows[full];
-                    final view = switch (row) {
-                      _SingleRow(item: final item) => ChatItemView(
-                        key: ValueKey(item.key),
-                        item: item,
-                      ),
-                      // 工具卡也要各自封重绘边界:流式期间它们内部一直在变,
-                      // 不隔离的话会拉着同屏其他卡一起重绘。
-                      _ToolGroupRow(tools: final tools) => RepaintBoundary(
-                        // key 用首个工具的 key:streaming 中新工具入组时
-                        // key 稳定,widget 复用只是 tools 变长。
-                        key: ValueKey(tools.first.key),
-                        child: ToolGroupCard(tools: tools),
-                      ),
-                      // 统计行无 key:它不属于任何 item,也无状态可保。
-                      _ToolStatRow(tools: final tools) => RepaintBoundary(
-                        child: ToolGroupCard(tools: tools, statOnly: true),
-                      ),
-                    };
-                    if (!timestampFlags[full]) return view;
-                    // 时间戳只会挂在有时间的行(user/assistant);
-                    // 工具组行无时间,flag 一定是 false,走不到这里。
-                    final rowTime = switch (row) {
-                      _SingleRow(item: final item) => timeOf(item),
-                      _ToolGroupRow() || _ToolStatRow() => null,
-                    };
-                    if (rowTime == null) return view;
-                    return Column(
-                      // 默认 center 会给子项松散宽度:用户气泡收缩成内容宽
-                      // 再被居中,短消息就「跑到屏幕中间」了。stretch 保持
-                      // 满宽紧约束,右对齐交给气泡自己;时间戳自带 Center,
-                      // 不受影响。
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        MessageTimestamp(time: rowTime),
-                        view,
-                      ],
-                    );
                     },
                   ),
                 ),

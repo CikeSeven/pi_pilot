@@ -508,6 +508,7 @@ class PiState {
     this.sessionBusyElsewhere = false,
     this.sessionWaking = false,
     this.transientNotice,
+    this.composerFill,
     this.backgroundFinishTick = 0,
     this.backgroundFinishName,
     this.activityStatus,
@@ -574,6 +575,11 @@ class PiState {
   /// 一次性提示(横幅),由 `_LivenessBanner` 渲染,用户点掉后调
   /// `dismissNotice()` 清空。
   final String? transientNotice;
+
+  /// 一次性:回退到某条用户消息后,要把那条消息原文填回输入框(等同桌面
+  /// pi 的 editorText 行为)。chat_body 监听它,填完调 consumeComposerFill
+  /// 清掉 —— 不能常驻 state,否则下个会话了它还阴魂不散。
+  final String? composerFill;
 
   /// 桌面 working-activity 插件推过来的实时状态行(TUI Working 行同源)。
   /// 非空时灵动岛直接显示它,不再用本地从 items 推导的二手状态。
@@ -675,6 +681,7 @@ class PiState {
     bool? sessionBusyElsewhere,
     bool? sessionWaking,
     String? transientNotice,
+    String? composerFill,
     int? backgroundFinishTick,
     String? backgroundFinishName,
     String? activityStatus,
@@ -692,6 +699,7 @@ class PiState {
     bool clearUiRequest = false,
     bool clearAsk = false,
     bool clearNotice = false,
+    bool clearComposerFill = false,
     bool clearActivity = false,
   }) {
     return PiState(
@@ -734,6 +742,9 @@ class PiState {
       transientNotice: clearNotice
           ? null
           : (transientNotice ?? this.transientNotice),
+      composerFill: clearComposerFill
+          ? null
+          : (composerFill ?? this.composerFill),
       activityStatus: clearSource || clearActivity
           ? null
           : (activityStatus ?? this.activityStatus),
@@ -888,6 +899,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   int _syncGeneration = 0;
   int _activeSyncGeneration = 0;
   Timer? _resyncTimer;
+
   /// 选中源从推送目录消失后的宽限复核定时器,见 [_scheduleSourceLossCheck]。
   Timer? _sourceLossTimer;
   int _resyncAttempt = 0;
@@ -1776,13 +1788,21 @@ class PiSessionNotifier extends Notifier<PiState> {
       _write(state.copyWith(error: (resp?['error'] as String?) ?? '回退失败'));
       return false;
     }
-    // 桌面端会把被回退掉的用户消息原文回填(等同"内容回到输入框")
+    // 桌面端会把被回退掉的用户消息原文返回(editorText)——填回手机
+    // 输入框,跟桌面 pi 的行为对齐:回退=把那条消息拿回来重新编辑。
     final editorText = (resp?['data'] as Map?)?['editorText'];
     if (editorText is String && editorText.isNotEmpty) {
-      _write(state.copyWith(transientNotice: '已回退,原消息:$editorText'));
+      _write(state.copyWith(composerFill: editorText));
     }
     await _syncSelectedSource(forceFull: true);
     return true;
+  }
+
+  /// 输入框已经吃下了回退填充的文本,清掉这个一次性信号。
+  void consumeComposerFill() {
+    if (state.composerFill != null) {
+      state = state.copyWith(clearComposerFill: true);
+    }
   }
 
   /// 清掉一次性提示(用户点了横幅上的关闭)。
@@ -3249,9 +3269,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 否则会把上一个会话的消息留在界面上冒充新会话的内容。
     final sameSession = sessionId != null && sessionId == state.sessionId;
     if (entries.isEmpty && sameSession && _items.isNotEmpty) {
-      _logP2p(
-        '快照 entries 为空但本地有 ${_items.length} 条(同一会话),保留现有列表并调度重同步',
-      );
+      _logP2p('快照 entries 为空但本地有 ${_items.length} 条(同一会话),保留现有列表并调度重同步');
       if (stateData is Map) {
         _applyStateData(Map<String, dynamic>.from(stateData));
       }
@@ -3281,7 +3299,8 @@ class PiSessionNotifier extends Notifier<PiState> {
     // (标志真但游标空)。
     // 对账路径(sameBranch)不动既有游标:那次快照只是补齐尾部,凭它把往前
     // 翻的能力抹掉是错的;除非桥这次带了权威元数据。
-    final cursorFromBridge = entriesOldestId != null && entriesOldestId.isNotEmpty
+    final cursorFromBridge =
+        entriesOldestId != null && entriesOldestId.isNotEmpty
         ? entriesOldestId
         : null;
     if (!sameBranch || cursorFromBridge != null) {
@@ -3554,7 +3573,8 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   /// 测试缝隙:直接驱动一次 _sync。
   @visibleForTesting
-  Future<void> debugSync({bool forceFull = false}) => _sync(forceFull: forceFull);
+  Future<void> debugSync({bool forceFull = false}) =>
+      _sync(forceFull: forceFull);
 
   /// 测试缝隙:设置本地 leaf(决定 _sync 走增量还是全量)。
   @visibleForTesting
@@ -4190,7 +4210,8 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 桌面扩展归一化后带 leafId;pi 原生事件(未归一化的旧扩展、无头源
     // 直通)带的是 newLeafId。两个键都认 —— 手机 APK 和桌面扩展各自独立
     // 更新,哪侧旧都得能收敛。
-    final explicit = event.containsKey('leafId') || event.containsKey('newLeafId');
+    final explicit =
+        event.containsKey('leafId') || event.containsKey('newLeafId');
     final raw = event['leafId'] ?? event['newLeafId'];
     final leaf = raw is String && raw.isNotEmpty ? raw : null;
     if (leaf == null) {
