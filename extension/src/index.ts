@@ -3,9 +3,60 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { loadRelayConfig, RELAY_CONFIG_PATH } from "./config.js";
 import { NavCommandContextCache, registerNavCommands } from "./nav_commands.js";
 import { DesktopRelay } from "./relay.js";
+
+/**
+ * 让每个事件 ctx 都带上 `navigateTree`。
+ *
+ * pi 只把它挂在命令上下文上(createCommandContext),但真正实现
+ * (`runner.navigateTreeHandler`)在会话建立时就通过 bindCommandContext
+ * 绑好,且整个会话期间不会被解绑。手机发起的远程回退走的是 WebSocket
+ * 事件,永远拿不到命令上下文 —— 老方案(navCache)要求用户先在电脑端
+ * 跑一次 /pipilot,人在外面远程操控时这就是一道回家的门槛。
+ *
+ * 这里直接给宿主 ExtensionRunner 原型打补丁(扩展经 jiti 别名加载,
+ * 与宿主共享同一个模块实例,补丁即生效于宿主),完全复刻
+ * createCommandContext 里 navigateTree 的接法。特性探测失败就静默
+ * 放弃,relay 会退回 navCache 老路径。
+ */
+function patchRunnerNavigateTree(): void {
+  try {
+    const proto = (ExtensionRunner as unknown as { prototype?: Record<string, unknown> })
+      ?.prototype;
+    if (!proto || typeof proto.createContext !== "function") return;
+    if ((proto.createContext as { __pipilotNavPatched?: boolean }).__pipilotNavPatched) return;
+    const original = proto.createContext as (this: unknown) => Record<string, unknown>;
+    const patched = function (this: {
+      assertActive?: () => void;
+      navigateTreeHandler?: (
+        targetId: string,
+        options?: unknown,
+      ) => Promise<unknown>;
+    }): Record<string, unknown> {
+      const ctx = original.call(this);
+      if (
+        ctx &&
+        typeof ctx.navigateTree !== "function" &&
+        typeof this.navigateTreeHandler === "function"
+      ) {
+        const runner = this;
+        ctx.navigateTree = (targetId: string, options?: unknown) => {
+          runner.assertActive?.();
+          return runner.navigateTreeHandler!(targetId, options);
+        };
+      }
+      return ctx;
+    };
+    (patched as { __pipilotNavPatched?: boolean }).__pipilotNavPatched = true;
+    proto.createContext = patched;
+  } catch {
+    // 补丁失败就保持原样(navCache 兜底),绝不能让扩展加载挂掉
+  }
+}
+patchRunnerNavigateTree();
 
 export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   let relay: DesktopRelay | undefined;
@@ -139,9 +190,9 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   pi.registerCommand("pipilot", {
     description: "Show PiPilot desktop relay status",
     handler: async (_args, ctx) => {
-      // 顺便缓存命令上下文:远程回退(手机发起)需要 ExtensionCommandContext
-      // 上的 navigateTree,普通事件 ctx 没有。/pipilot 是**无副作用**的状态
-      // 命令,用它当激活入口 —— 拿 /pipilot-undo 激活会真的撤掉一轮。
+      // 补丁(见文件顶部)生效后远程回退开箱即用,这里只是兜底激活:
+      // 老 pi 或非 jiti 加载导致补丁失效时,navCache 老路径还需要一次
+      // 命令上下文。/pipilot 是**无副作用**的状态命令,适合当这个入口。
       navCache.remember(ctx as ExtensionCommandContext);
       if (ctx.mode !== "tui") return;
       ctx.ui.notify(

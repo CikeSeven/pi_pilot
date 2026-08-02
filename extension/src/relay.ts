@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import type { RelayConfig } from "./config.js";
 import {
   navRuntimeFor,
@@ -1255,11 +1259,20 @@ export class DesktopRelay {
   /**
    * 执行一次会话回退。
    *
-   * 用缓存的命令上下文(远程命令自己的 ctx 上没有 `navigateTree`)。
-   * 从没在电脑上跑过 `/pipilot-nav` 时缓存是空的,这时如实报错并提示用户
-   * 在电脑上跑一次 —— 比悄悄失败或伪装成功要好。
+   * 首选当前会话的 live ctx:index.ts 的补丁让每个事件 ctx 都带上了
+   * `navigateTree`(背后是会话级绑定的 navigateTreeHandler),手机远程
+   * 回退开箱即用,不需要先在电脑端跑任何命令。
+   * 补丁未生效(老 pi/非 jiti 加载)时退回缓存的命令上下文(navCache)。
    */
   private async navigate(entryId: string | undefined, ctx: ExtensionContext): Promise<unknown> {
+    const live = ctx as ExtensionContext & {
+      navigateTree?: ExtensionCommandContext["navigateTree"];
+    };
+    if (typeof live.navigateTree === "function") {
+      const result = await runNavigate(navRuntimeFor(live as ExtensionCommandContext), entryId);
+      if (!result.ok) throw new Error(result.error ?? "rollback was cancelled");
+      return result;
+    }
     const cached = this.navCache?.get(this.boundSessionFile ?? "");
     if (!cached) {
       if (ctx.mode === "tui") {
