@@ -198,8 +198,8 @@ test("tip stays fixed while new events arrive mid-pagination", () => {
   assert.equal(second.events.some((event) => event.eventId === late.eventId), false);
 
   const drained = manager.drainLiveBuffer("sub-1");
-  assert.equal(Array.isArray(drained), true);
-  assert.deepEqual((drained as NotificationEventV1[]).map((e) => e.sequence), [5]);
+  assert.ok("events" in drained);
+  assert.deepEqual(drained.events.map((e) => e.sequence), [5]);
 });
 
 test("scope-excluded sequences are reported as skipped, not dropped", () => {
@@ -405,6 +405,70 @@ test("live buffer overflow demands resync instead of dropping the head", () => {
   assert.equal((drained as { type?: string }).type, "notification_resync_required");
   // 溢出后不能悄悄 ready。
   assert.equal(manager.markReady("sub-1"), undefined);
+});
+
+// --- 过期事件抑制:完成通知落盘后断链积压,新任务已开跑(2026-08-02 事故)----
+
+test("过期事件在 catch-up 分页里走 skippedRanges,覆盖连续性不破", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  // seq 1 过期(更新的任务已在它创建后开跑),seq 2 新鲜。
+  const manager = new NotificationSubscriptionManager(
+    store,
+    BRIDGE_ID,
+    EPOCH,
+    Date.now,
+    (event) => event.sequence === 1,
+  );
+  push(store, { createdAt: "2026-08-02T04:17:16.000Z" });
+  push(store, { createdAt: "2026-08-02T04:18:30.000Z" });
+
+  const request = parseSubscribeRequest({
+    id: "sub-1",
+    installationId: "inst-1",
+    cursor: null,
+    scopeVersion: 1,
+  });
+  assert.notEqual(request, undefined);
+  const page = asPage(manager.subscribe(request));
+  assert.deepEqual(page.events.map((event) => event.sequence), [2]);
+  assert.deepEqual(page.skippedRanges, [{ from: 1, through: 1 }]);
+  assert.ok(
+    coversContinuously(page.fromExclusive, page.through, page.events, page.skippedRanges),
+    "覆盖连续性被破坏,客户端会误判丢包",
+  );
+});
+
+test("live buffer 里的过期事件被剔除,sequence 进 skipped", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  // seq 2 过期。
+  const manager = new NotificationSubscriptionManager(
+    store,
+    BRIDGE_ID,
+    EPOCH,
+    Date.now,
+    (event) => event.sequence === 2,
+  );
+  push(store); // seq 1:catch-up 占位,pageLimit=1 让订阅停在分页中
+  const request = parseSubscribeRequest({
+    id: "sub-1",
+    installationId: "inst-1",
+    cursor: null,
+    scopeVersion: 1,
+    pageLimit: 1,
+  });
+  assert.notEqual(request, undefined);
+  manager.subscribe(request);
+  const stale = push(store); // seq 2
+  const fresh = push(store); // seq 3
+  manager.onEvent(stale);
+  manager.onEvent(fresh);
+
+  const drained = manager.drainLiveBuffer("sub-1");
+  assert.ok("events" in drained);
+  assert.deepEqual(drained.events.map((event) => event.sequence), [3]);
+  assert.deepEqual(drained.skipped, [2]);
 });
 
 // --- cursor 过期与 epoch ----------------------------------------------------

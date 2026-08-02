@@ -59,6 +59,11 @@ export class NotificationDetector {
 
   /// sourceId -> 当前 in-flight 的 taskGenerationId。
   private readonly activeGeneration = new Map<string, string>();
+  /// sourceId -> 最近一次任务开始时刻(ms)。完成事件的「新鲜度」靠它判定:
+  /// 有更新任务开跑后才送达的 task_completed 全是过期通知 —— 用户已经在等
+  /// 下一轮,这时弹「任务完成」只会被当成误报(2026-08-02 事故:断链积压的
+  /// 完成通知迟到 51s,撞进新任务开始后的第 4 秒)。
+  private readonly latestStartedAt = new Map<string, number>();
   /// requestId -> eventId。input_required 与 input_resolved 靠它配对,
   /// 让 resolved 能更新/取消原来那条通知而不是新弹一条。
   private readonly inputRequests = new Map<string, string>();
@@ -76,7 +81,16 @@ export class NotificationDetector {
   /// 必须沿用原 generation,否则会被当成一个新任务而重复通知。
   private restoreGenerations(): void {
     for (const gen of this.store.inFlightGenerations()) {
-      if (gen.sourceId.length > 0) this.activeGeneration.set(gen.sourceId, gen.taskGenerationId);
+      if (gen.sourceId.length === 0) continue;
+      this.activeGeneration.set(gen.sourceId, gen.taskGenerationId);
+      // in_flight 记录的 at 就是开始时刻(at 只在完成时被改写),据此恢复新鲜度判定。
+      const startedAt = Date.parse(gen.at);
+      if (Number.isFinite(startedAt)) {
+        const known = this.latestStartedAt.get(gen.sourceId);
+        if (known === undefined || startedAt > known) {
+          this.latestStartedAt.set(gen.sourceId, startedAt);
+        }
+      }
     }
   }
 
@@ -87,6 +101,7 @@ export class NotificationDetector {
     if (existing !== undefined) return existing;
     const generationId = crypto.randomUUID();
     this.activeGeneration.set(sourceId, generationId);
+    this.latestStartedAt.set(sourceId, this.now());
     this.store.beginGeneration(sourceId, generationId);
     return generationId;
   }
@@ -133,6 +148,7 @@ export class NotificationDetector {
     if (existing !== undefined) return existing;
     const generationId = `recovery-${crypto.randomUUID()}`;
     this.activeGeneration.set(sourceId, generationId);
+    this.latestStartedAt.set(sourceId, this.now());
     this.store.beginGeneration(sourceId, generationId);
     return generationId;
   }
@@ -198,6 +214,16 @@ export class NotificationDetector {
 
   activeGenerationFor(sourceId: string): string | undefined {
     return this.activeGeneration.get(sourceId);
+  }
+
+  /// 这条完成事件是否已经过期:同 source 有更新的任务在它创建之后开跑。
+  /// 订阅管理器在投递前调用 —— 过期事件走 skippedRanges,不推给手机。
+  isStaleCompletion(event: NotificationEventV1): boolean {
+    if (event.type !== "task_completed" || event.sourceId === undefined) return false;
+    const startedAt = this.latestStartedAt.get(event.sourceId);
+    if (startedAt === undefined) return false;
+    const createdAt = Date.parse(event.createdAt);
+    return Number.isFinite(createdAt) && startedAt > createdAt;
   }
 
   pendingInputCount(): number {

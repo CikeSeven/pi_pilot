@@ -301,6 +301,13 @@ interface SubscriptionState {
   generation: number;
 }
 
+/// drainLiveBuffer 的产出:可投递事件 + 因过期被跳过的 sequence。
+/// 跳过的 sequence 必须进 live 帧的 skippedRanges,覆盖连续性才不破。
+export interface DrainedLiveEvents {
+  events: NotificationEventV1[];
+  skipped: number[];
+}
+
 /// 通知订阅管理器。
 ///
 /// 关键不变量(stable-plan.md §7.2):
@@ -317,6 +324,9 @@ export class NotificationSubscriptionManager {
     private readonly bridgeInstallationId: string,
     private readonly eventEpoch: string,
     private readonly now: () => number = Date.now,
+    /// 投递前判定事件是否已过期(典型:完成通知积压期间新任务已开跑)。
+    /// 过期事件进 skippedRanges,不推给客户端。
+    private readonly isStaleEvent: (event: NotificationEventV1) => boolean = () => false,
   ) {}
 
   /// 建立订阅并返回第一页。cursor 早于保留窗口时返回 cursor_expired。
@@ -420,6 +430,13 @@ export class NotificationSubscriptionManager {
         cursor = next;
         continue;
       }
+      // 过期事件(典型:完成通知落盘后断链积压,新任务已开跑)不投递 ——
+      // 标为 skipped,覆盖连续性不破,客户端也不会再弹误导通知。
+      if (this.isStaleEvent(event)) {
+        skipped.push(next);
+        cursor = next;
+        continue;
+      }
       if (!matchesScope(event, state.scopes)) {
         skipped.push(next);
         cursor = next;
@@ -480,19 +497,27 @@ export class NotificationSubscriptionManager {
 
   /// 排空 live buffer。必须在 hasMore=false 之后、发 ready 之前调用,
   /// 保证 catch-up 与实时流之间没有空窗。
-  drainLiveBuffer(subscriptionId: string): NotificationEventV1[] | ResyncRequiredFrame {
+  drainLiveBuffer(subscriptionId: string): DrainedLiveEvents | ResyncRequiredFrame {
     const state = this.subscriptions.get(subscriptionId);
-    if (state === undefined) return [];
+    if (state === undefined) return { events: [], skipped: [] };
     if (state.overflowed) {
       return { type: "notification_resync_required", id: state.id, reason: "live_buffer_overflow" };
     }
-    const drained = state.liveBuffer.filter((event) => event.sequence > state.delivered);
-    state.liveBuffer = [];
-    state.liveBufferBytes = 0;
-    for (const event of drained) {
+    const events: NotificationEventV1[] = [];
+    const skipped: number[] = [];
+    for (const event of state.liveBuffer) {
+      if (event.sequence <= state.delivered) continue;
+      // 过期事件剔除出投递,但 sequence 必须上报 —— 否则覆盖出现缺口。
+      if (this.isStaleEvent(event)) {
+        skipped.push(event.sequence);
+      } else {
+        events.push(event);
+      }
       state.delivered = Math.max(state.delivered, event.sequence);
     }
-    return drained;
+    state.liveBuffer = [];
+    state.liveBufferBytes = 0;
+    return { events, skipped };
   }
 
   /// 标记 ready。只有 catch-up 完成且 buffer 已排空才允许 ——

@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { NotificationDetector } from "../src/notification_detector.js";
 import { NotificationEventStore } from "../src/notification_event_store.js";
+import {
+  NotificationSubscriptionManager,
+  parseSubscribeRequest,
+  type NotificationEventsPage,
+} from "../src/notification_protocol.js";
 
 const BRIDGE_ID = "bridge-test";
 const EPOCH = "epoch-1";
@@ -229,4 +234,100 @@ test("事件带稳定的 bridge 身份与 epoch", () => {
   assert.equal(result?.event.bridgeInstallationId, BRIDGE_ID);
   assert.equal(result?.event.eventEpoch, EPOCH);
   assert.equal(result?.event.schema, 1);
+});
+
+// --- 过期完成通知判定:断链积压 + 新任务开跑(2026-08-02 事故)----------------
+
+test("新任务开跑后,积压的旧完成事件判定为过期", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  let clock = Date.parse("2026-08-02T12:00:00.000Z");
+  const detector = new NotificationDetector({
+    bridgeInstallationId: BRIDGE_ID,
+    eventEpoch: EPOCH,
+    store,
+    now: () => clock,
+  });
+  detector.onTaskStart("source-a");
+  clock += 1000;
+  const done = detector.onTaskEnd("source-a");
+  assert.notEqual(done, undefined);
+  // 尚无更新任务:不过期,迟到也该送达。
+  assert.equal(detector.isStaleCompletion(done!.event), false);
+  // 新任务开跑:旧完成事件立即过期。
+  clock += 1000;
+  detector.onTaskStart("source-a");
+  assert.equal(detector.isStaleCompletion(done!.event), true);
+  // 其他 source 不受影响;非完成类事件永不判过期。
+  assert.equal(detector.isStaleCompletion({ ...done!.event, sourceId: "source-b" }), false);
+  const input = detector.onInputRequired("req-1", { sourceId: "source-a" });
+  assert.notEqual(input, undefined);
+  assert.equal(detector.isStaleCompletion(input!.event), false);
+});
+
+test("重启后 in-flight 代次的开始时刻恢复,旧完成事件仍判过期", () => {
+  const dir = tmpDir();
+  let clock = Date.parse("2026-08-02T12:00:00.000Z");
+  const make = () => {
+    // generation 记录的 at 由 store 的时钟写入,恢复判定要与 detector 同源。
+    const store = new NotificationEventStore({ baseDir: dir, now: () => clock });
+    store.load();
+    return new NotificationDetector({
+      bridgeInstallationId: BRIDGE_ID,
+      eventEpoch: EPOCH,
+      store,
+      now: () => clock,
+    });
+  };
+  const first = make();
+  first.onTaskStart("source-a");
+  clock += 1000;
+  const done = first.onTaskEnd("source-a");
+  clock += 1000;
+  first.onTaskStart("source-a"); // 新任务在跑,未结束时 bridge「重启」
+
+  const second = make(); // 同一 journal 重建
+  assert.notEqual(done, undefined);
+  assert.equal(second.isStaleCompletion(done!.event), true);
+});
+
+test("事故回放:完成事件积压期间新任务开跑,订阅分页跳过它", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  let clock = Date.parse("2026-08-02T12:17:16.000Z");
+  const detector = new NotificationDetector({
+    bridgeInstallationId: BRIDGE_ID,
+    eventEpoch: EPOCH,
+    store,
+    now: () => clock,
+  });
+  const manager = new NotificationSubscriptionManager(
+    store,
+    BRIDGE_ID,
+    EPOCH,
+    () => clock,
+    (event) => detector.isStaleCompletion(event),
+  );
+
+  // 任务完成 → 事件落盘(手机断链,收不到)。
+  detector.onTaskStart("source-a");
+  clock += 39_000;
+  const done = detector.onTaskEnd("source-a");
+  assert.notEqual(done, undefined);
+  // 新任务开跑,手机此刻才重连订阅。
+  clock += 47_000;
+  detector.onTaskStart("source-a");
+
+  const request = parseSubscribeRequest({
+    id: "sub-1",
+    installationId: "inst-1",
+    cursor: null,
+    scopeVersion: 1,
+  });
+  assert.notEqual(request, undefined);
+  const page = manager.subscribe(request!);
+  assert.equal(page.type, "notification_events");
+  const eventsPage = page as NotificationEventsPage;
+  assert.deepEqual(eventsPage.events, []);
+  assert.deepEqual(eventsPage.skippedRanges, [{ from: 1, through: 1 }]);
 });

@@ -43,6 +43,7 @@ import { loadBridgeIdentity } from "./notification_identity.js";
 import { NotificationEventStore } from "./notification_event_store.js";
 import { NotificationDetector } from "./notification_detector.js";
 import {
+  mergeSkipped,
   NotificationSubscriptionManager,
   parseAckRequest,
   parseReceiptRequest,
@@ -76,6 +77,9 @@ const notificationSubscriptions = new NotificationSubscriptionManager(
   notificationStore,
   bridgeIdentity.bridgeInstallationId,
   bridgeIdentity.eventEpoch,
+  Date.now,
+  // 完成事件落盘后若断链积压、且更新的任务已开跑 —— 过期,投递时走 skippedRanges。
+  (event) => notificationDetector.isStaleCompletion(event),
 );
 const notificationReceipts = new NotificationReceiptStore();
 
@@ -2000,13 +2004,13 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
         // ready 绝不能在 socket 打开时就发 —— 那正是当前实现过早抑制兜底通知的缺陷。
         if (result.type === "notification_events" && !result.hasMore) {
           const drained = notificationSubscriptions.drainLiveBuffer(request.id);
-          if (Array.isArray(drained) && drained.length > 0) {
+          if ("events" in drained && (drained.events.length > 0 || drained.skipped.length > 0)) {
             sendObject(client.ws, {
               type: "notification_events",
               eventEpoch: bridgeIdentity.eventEpoch,
               bridgeNow: new Date().toISOString(),
-              events: drained,
-              skippedRanges: [],
+              events: drained.events,
+              skippedRanges: mergeSkipped(drained.skipped),
               live: true,
             });
           }
@@ -2028,13 +2032,13 @@ async function handleHubCommand(client: MobileClient, msg: BridgeMessage): Promi
         respond(client.ws, msg, true, page);
         if (page.type === "notification_events" && !page.hasMore) {
           const drained = notificationSubscriptions.drainLiveBuffer(subscriptionId);
-          if (Array.isArray(drained) && drained.length > 0) {
+          if ("events" in drained && (drained.events.length > 0 || drained.skipped.length > 0)) {
             sendObject(client.ws, {
               type: "notification_events",
               eventEpoch: bridgeIdentity.eventEpoch,
               bridgeNow: new Date().toISOString(),
-              events: drained,
-              skippedRanges: [],
+              events: drained.events,
+              skippedRanges: mergeSkipped(drained.skipped),
               live: true,
             });
           }
