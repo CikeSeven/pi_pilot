@@ -884,6 +884,8 @@ class PiSessionNotifier extends Notifier<PiState> {
   int _syncGeneration = 0;
   int _activeSyncGeneration = 0;
   Timer? _resyncTimer;
+  /// 选中源从推送目录消失后的宽限复核定时器,见 [_scheduleSourceLossCheck]。
+  Timer? _sourceLossTimer;
   int _resyncAttempt = 0;
 
   /// 事件页连续翻页轮数。bridge 的事件重放页有硬上限,落后很多时要翻几轮才
@@ -1673,10 +1675,12 @@ class PiSessionNotifier extends Notifier<PiState> {
           .firstOrNull;
       if (target != null) healPreference = true;
     }
-    // 3) 只有一个桌面端时直接用它(无歧义)
+    // 3) 只有一个桌面端时直接用它(无歧义)——但跨会话命中只是代打:
+    //    偏好只能为「同会话」重写,否则跳一次改错一次,
+    //    用户的会话回来之后,恢复照样落到这个错误窗口。
     if (target == null && connectedDesktops.length == 1) {
       target = connectedDesktops.single;
-      healPreference = true;
+      healPreference = shouldPersistAutoSwitch(target, preferredSession);
     }
 
     unawaited(_refreshHubSessionsWithRetry(connectionScope: connectionScope));
@@ -2783,6 +2787,8 @@ class PiSessionNotifier extends Notifier<PiState> {
     _reconnectTimer = null;
     _resyncTimer?.cancel();
     _resyncTimer = null;
+    _sourceLossTimer?.cancel();
+    _sourceLossTimer = null;
     _uiRequestTimer?.cancel();
     _uiRequestTimer = null;
     _stopHealthMonitor();
@@ -3655,22 +3661,31 @@ class PiSessionNotifier extends Notifier<PiState> {
   void _onSourcesChanged(Map<String, dynamic> event) {
     final raw = event['sources'] as List?;
     if (raw == null) return;
-    final previous = state.selectedSource;
-    final parsed = [
+    handleSourcesChanged([
       for (final source in raw)
         if (source is Map) SourceInfo.fromMap(source),
-    ];
+    ]);
+  }
+
+  /// 推送目录变化的核心判定,抽成公共方法让测试直接喂列表。
+  @visibleForTesting
+  void handleSourcesChanged(List<SourceInfo> parsed) {
+    final previous = state.selectedSource;
     final selected = parsed
         .where((source) => source.id == state.selectedSourceId)
         .firstOrNull;
     if (selected == null && state.selectedSourceId != null) {
-      _dropLease(state.selectedSourceId!);
-      state = state.copyWith(clearSource: true, sources: parsed);
-      // 源被 hub 摘掉了(桌面 pi 关掉/长期离线回收)。留在空选中态等于卡死,
-      // 有替代窗口就直接跟过去。
-      unawaited(_followLiveDesktop(parsed, previous));
+      // 推送目录少了选中源 ≠ 它真死了:registry 是内存态,bridge 重启后各
+      // 桌面 pi 要懒重注册,缺席可能只是重注册还没轮到它。列表照更、选择
+      // 留住,宽限复核确认没了才清选择+跟随 —— 不能把用户从还活着的
+      // 会话上拽走(一次传输抖动就换台,就是「会话自己切来切去」。)
+      _scheduleSourceLossCheck(previous);
+      state = state.copyWith(sources: parsed);
       return;
     }
+    // 选中源还在(或本就无选中):撤销可能挂着的失联复核。
+    _sourceLossTimer?.cancel();
+    _sourceLossTimer = null;
     if (sourceEpochChanged(previous, selected)) {
       // 换 epoch 只是事件流重来了;hub 现在会保留租约,所以这里也不丢
       _leafId = null;
@@ -3705,8 +3720,29 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 桌面源判死:桌面 TUI 不像 headless 会话那样能被发消息唤醒(进程已被冻住
     // 或退出),继续停在它身上永远等不到事件。
     if (selected != null && selected.isDesktop && !selected.connected) {
-      unawaited(_followLiveDesktop(parsed, selected));
+      unawaited(followLiveDesktop(parsed, selected));
     }
+  }
+
+  /// 选中源从推送目录里消失后的宽限复核:2.5s 后按权威 list 再对一次账,
+  /// 仍缺席才当真死亡处理(清选择、走跟随)。复核期间若有推送把源带回来,
+  /// [handleSourcesChanged] 会撤销这个定时器。
+  void _scheduleSourceLossCheck(SourceInfo? previous) {
+    _sourceLossTimer?.cancel();
+    _sourceLossTimer = Timer(const Duration(milliseconds: 2500), () async {
+      _sourceLossTimer = null;
+      if (_disposed) return;
+      final goneId = state.selectedSourceId;
+      if (goneId == null) return;
+      final fresh = await refreshSources();
+      if (_disposed || state.selectedSourceId != goneId) return;
+      if (fresh.any((source) => source.id == goneId)) return; // 虚惊一场
+      _dropLease(goneId);
+      state = state.copyWith(clearSource: true);
+      // 源被 hub 摘掉了(桌面 pi 关掉/长期离线回收)。留在空选中态等于卡死,
+      // 有替代窗口就跟过去(写不写偏好由 followLiveDesktop 自己决定)。
+      unawaited(followLiveDesktop(fresh, previous));
+    });
   }
 
   /// 选中的桌面窗口没了之后,自动跟到还活着的那个窗口。
@@ -3714,17 +3750,31 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 电脑上 Ctrl+Z 挂起再开一个 pi 时,新进程的 sourceId 里嵌着新的 PID,必然与
   /// 旧的不同。以前只有 [_initializeAfterConnect] 会做回退选源,所以运行期换窗口
   /// 时 App 就一直钉在那个已经死掉的源上,要杀掉重开才恢复。
-  Future<void> _followLiveDesktop(
+  @visibleForTesting
+  Future<void> followLiveDesktop(
     List<SourceInfo> sources,
     SourceInfo? previous,
   ) async {
     if (_disposed || !_hubV2) return;
     final target = pickFollowTarget(sources, previous);
     if (target == null || target.id == state.selectedSourceId) return;
-    if (!await selectSource(target.id)) return;
+    final persist = shouldPersistAutoSwitch(
+      target,
+      ref.read(settingsProvider).preferredSessionId,
+    );
+    if (!await selectSource(target.id, persist: persist)) return;
     if (_disposed) return;
     _write(state.copyWith(transientNotice: '原窗口已断开,已切到 ${target.label}'));
   }
+
+  /// 自动换源(跟随/回退)能不能写偏好:只有「同会话」窗口才配 —— 用户在
+  /// 电脑上 fg 回了原会话,PID 变了,绑定的 sourceId 该更新。跨会话命中只是
+  /// 代打,写进去的话跳一次就把偏好改错一次,之后每次恢复都落错窗口。
+  @visibleForTesting
+  static bool shouldPersistAutoSwitch(
+    SourceInfo target,
+    String? preferredSession,
+  ) => target.sessionId != null && target.sessionId == preferredSession;
 
   /// 旧桌面源失联后该跟到哪个窗口。
   ///
