@@ -45,7 +45,10 @@ import android.os.PowerManager
 /// 私有冻结策略状态(dontkillmyapp 对这几家的 dev 端结论都是
 /// 「No known solution」)。唯一可行的是逆向私有 AppOps,那既不稳定也不该
 /// 进生产。所以本模块的原则是:**状态检测只用公开 API,OEM 差异只体现在
-/// 引导跳转上**(见 BackgroundPermissionIntents)。
+/// Dart 侧的文字引导文案上**。曾实现过 deeplink 直达厂商设置页,但实测
+/// HyperOS V816 已移除 powerkeeper 整套 HiddenApps 组件(省电策略页),
+/// 各厂商组件名来自社区逆向、版本间极不稳定,没有任何可靠的自动跳转路径,
+/// 故已放弃跳转机制,统一改为文字引导用户手动设置。
 object BackgroundPermissionState {
 
     /// 判定结论。故意不叫 granted/denied:后台豁免不是一个布尔权限,

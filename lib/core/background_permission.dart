@@ -119,28 +119,6 @@ enum BackgroundPermissionVendor {
   }
 }
 
-/// 一次引导跳转的落点。区分「跳到厂商页」与「只跳到通用列表页」很重要:
-/// 后者用户还要自己在长列表里找到应用,提示语不同。
-enum BackgroundPermissionOutcome {
-  vendorSettings,
-  batteryWhitelistList,
-  appDetails,
-  failed;
-
-  static BackgroundPermissionOutcome parse(String? raw) {
-    switch (raw) {
-      case 'VENDOR_SETTINGS':
-        return BackgroundPermissionOutcome.vendorSettings;
-      case 'BATTERY_WHITELIST_LIST':
-        return BackgroundPermissionOutcome.batteryWhitelistList;
-      case 'APP_DETAILS':
-        return BackgroundPermissionOutcome.appDetails;
-      default:
-        return BackgroundPermissionOutcome.failed;
-    }
-  }
-}
-
 /// 后台豁免状态快照。字段与 Kotlin 侧 `snapshot()` 返回的 Map 对应。
 @immutable
 class BackgroundPermissionStatus {

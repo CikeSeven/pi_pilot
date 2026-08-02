@@ -423,33 +423,4 @@ class NotificationService {
       return BackgroundPermissionStatus.unavailable;
     }
   }
-
-  /// 跳转到后台运行设置页。
-  ///
-  /// preferVendor=true 时优先进厂商专属页(小米省电策略、三星永不休眠列表等),
-  /// 因为各家真正的后台开关往往**不在** AOSP 电池优化页里。跳失败会自动
-  /// 逐级降级到标准白名单列表页,再到应用详情页。
-  ///
-  /// 故意不用 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 直接弹框:
-  /// 那需要声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限,而 Google Play
-  /// 的 Device and Network Abuse 政策禁止不符合豁免条件的应用绕过系统电源管理,
-  /// 已有真实拒审案例。这里选择政策安全的路径。
-  Future<BackgroundPermissionOutcome> openBackgroundPermissionSettings({
-    bool preferVendor = true,
-  }) async {
-    if (!Platform.isAndroid) return BackgroundPermissionOutcome.failed;
-    try {
-      final raw = await _systemChannel.invokeMethod<String>(
-        'openBackgroundPermissionSettings',
-        {'preferVendor': preferVendor},
-      );
-      return BackgroundPermissionOutcome.parse(raw);
-    } on PlatformException catch (error) {
-      debugPrint('[NotificationService] 打开后台运行设置失败: $error');
-      return BackgroundPermissionOutcome.failed;
-    } on MissingPluginException catch (error) {
-      debugPrint('[NotificationService] 后台运行设置不可用: $error');
-      return BackgroundPermissionOutcome.failed;
-    }
-  }
 }

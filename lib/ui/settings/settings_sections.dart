@@ -6,6 +6,7 @@ import '../../core/notification_service.dart';
 import '../../state/pi_session.dart';
 import '../../state/settings_provider.dart';
 import '../theme/shapes.dart';
+import 'background_permission_guide.dart';
 import 'settings_widgets.dart';
 
 /// 设置的 5 个子页。
@@ -411,48 +412,10 @@ class _BackgroundPermissionTileState extends State<_BackgroundPermissionTile>
     setState(() => _status = status);
   }
 
-  Future<void> _open() async {
-    final outcome = await NotificationService.instance
-        .openBackgroundPermissionSettings();
-    if (!mounted) return;
-    // 只跳到了通用列表页时,用户还得自己在长列表里找到应用,
-    // 必须把厂商对应的路径提示出来,否则很多人会卡在这一步。
-    if (outcome == BackgroundPermissionOutcome.batteryWhitelistList ||
-        outcome == BackgroundPermissionOutcome.appDetails ||
-        outcome == BackgroundPermissionOutcome.failed) {
-      _showHint();
-    }
-  }
-
-  void _showHint() {
+  void _showGuide() {
     final status = _status;
     if (status == null) return;
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('如何允许后台运行'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(status.vendor.settingsHint),
-              const SizedBox(height: 16),
-              Text(
-                status.rationale,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
-    );
+    showBackgroundPermissionGuide(context, status);
   }
 
   @override
@@ -478,14 +441,10 @@ class _BackgroundPermissionTileState extends State<_BackgroundPermissionTile>
       trailing: ok
           ? Icon(Icons.check_circle_outline, color: color)
           : const Icon(Icons.chevron_right),
-      // 已授予时点击仍可进入设置(用户可能想确认或关闭),
-      // 但主动引导只在未授予时出现。
-      onTap: ok ? _open : _promptThenOpen,
+      // 不自动跳转:实测各厂商 deeplink 组件名极不稳定(HyperOS V816
+      // 已移除整套 HiddenApps 组件),没有任何可靠的直达路径,
+      // 统一改为纯文字引导,让用户按步骤自己去系统设置里改。
+      onTap: _showGuide,
     );
-  }
-
-  Future<void> _promptThenOpen() async {
-    _showHint();
-    await _open();
   }
 }

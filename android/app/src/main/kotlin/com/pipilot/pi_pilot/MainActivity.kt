@@ -221,14 +221,6 @@ class MainActivity : FlutterActivity() {
                     "backgroundPermissionState" -> {
                         result.success(BackgroundPermissionState.snapshot(applicationContext))
                     }
-                    // 跳转用 Activity context(startActivity 需要),不能用
-                    // applicationContext。preferVendor 默认 true 优先进厂商页,
-                    // 因为各家真正的后台开关往往不在 AOSP 电池优化页里。
-                    "openBackgroundPermissionSettings" -> {
-                        val preferVendor = call.argument<Boolean>("preferVendor") ?: true
-                        val outcome = BackgroundPermissionIntents.open(this, preferVendor)
-                        result.success(outcome.name)
-                    }
                     else -> result.notImplemented()
                 }
             }

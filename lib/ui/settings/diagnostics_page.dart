@@ -6,6 +6,7 @@ import '../../core/diagnostics.dart';
 import '../../core/notification_service.dart';
 import '../theme/shapes.dart';
 import '../theme/typography.dart';
+import 'background_permission_guide.dart';
 
 /// 诊断页(stable-plan.md §16.3)。
 ///
@@ -147,9 +148,9 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
         trailing: ok
             ? Icon(Icons.check_circle_outline, color: color)
             : TextButton(
-                onPressed: () => NotificationService.instance
-                    .openBackgroundPermissionSettings(),
-                child: const Text('去开启'),
+                onPressed: () =>
+                    showBackgroundPermissionGuide(context, permission),
+                child: const Text('如何开启'),
               ),
       ),
     );
