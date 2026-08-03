@@ -140,7 +140,8 @@ test("巨型 session_before_compact 线框化后照常送达,不丢事件、不�
     relay.emitBoundary({ type: "agent_start" }, ctx);
 
     // pi 0.83.0 自动压缩的真实负载:branchEntries 是整段会话(这里 ~1.5MB),
-    // 再加一个不可序列化的 AbortSignal —— 不线框化必超单帧预算被静默丢掉。
+    // 必超单帧 1MiB 预算被静默丢掉;signal 是宿主侧 AbortSignal,
+    // 序列化出来是个无用的 {},同样不该上路。
     const fat = "A".repeat(150_000);
     const branchEntries = Array.from({ length: 10 }, (_, i) => ({
       type: "message",
