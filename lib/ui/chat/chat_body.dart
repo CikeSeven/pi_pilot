@@ -585,7 +585,8 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncComposerHeight());
     // _composerHeight 已含手势条(Composer 内有 SafeArea),不要再加 bottomInset,
     // 否则列表底部悬空,和输入框之间露出空隙。
-    final listBottomInset = _composerHeight + 4;
+    // +20:到底时最后一条消息与输入卡之间的可见间隔(原来是 4,太挤)。
+    final listBottomInset = _composerHeight + 20;
 
     return Column(
       children: [
@@ -749,13 +750,15 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                   ),
                 ),
               // 顶部渐变遮罩:灵动岛不遮一整栏,内容滚到顶部时渐隐。
-              // 上段纯不透明(盖住岛后面的碎片),下段渐隐到透明。
+              // 只有最顶上一小段纯实色(盖住状态栏后面的碎片),
+              // 剩下 80% 全是渐隐带 —— 模糊范围向上铺满到岛后,
+              // 而不是实色块压下来、底部草草收掉。
               if (widget.topPadding > 0)
                 Positioned(
                   left: 0,
                   right: 0,
                   top: 0,
-                  height: widget.topPadding + 24,
+                  height: widget.topPadding + 48,
                   child: IgnorePointer(
                     child: DecoratedBox(
                       decoration: BoxDecoration(
@@ -768,7 +771,7 @@ class _ChatBodyState extends ConsumerState<ChatBody> {
                               context,
                             ).colorScheme.surface.withValues(alpha: 0),
                           ],
-                          stops: const [0.55, 1.0],
+                          stops: const [0.2, 1.0],
                         ),
                       ),
                     ),
