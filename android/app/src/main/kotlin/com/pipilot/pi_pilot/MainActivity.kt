@@ -68,6 +68,14 @@ class MainActivity : FlutterActivity() {
                         )
                         result.success(null)
                     }
+                    "notificationBackgroundBegin" -> {
+                        NotificationBackgroundWindow.begin(applicationContext)
+                        result.success(null)
+                    }
+                    "notificationBackgroundEnd" -> {
+                        NotificationBackgroundWindow.end(applicationContext)
+                        result.success(null)
+                    }
                     // 切后台时由 Dart 交出连接参数,之后连接由原生线程独立维护
                     "startWatcher" -> {
                         val host = call.argument<String>("host")

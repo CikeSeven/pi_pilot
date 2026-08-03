@@ -237,9 +237,13 @@ class NotificationProtocolEngine(
             .put("installationId", installationId)
             .put("scopeVersion", 1)
             .put("pageLimit", 100)
+        val elapsed = NotificationBackgroundWindow.elapsedMs(appContext)
+        if (elapsed != null) payload.put("backgroundElapsedMs", elapsed)
         if (cursorJson != null) payload.put("cursor", cursorJson)
         outbound.addLast(payload.toString())
-        WatcherDiagnostics.log("$diagPrefix subscribe(from=${saved?.through ?: 0})")
+        WatcherDiagnostics.log(
+            "$diagPrefix subscribe(from=${saved?.through ?: 0} backgroundMs=${elapsed ?: -1})",
+        )
     }
 
     /// 处理一页事件(catch-up 或实时推送)。

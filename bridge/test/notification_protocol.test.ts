@@ -81,6 +81,23 @@ test("subscribe requests reject malformed cursors and scopes", () => {
     pageLimit: 5,
   });
   assert.equal(ok?.pageLimit, 5);
+  assert.equal(ok?.backgroundElapsedMs, undefined);
+  assert.equal(
+    parseSubscribeRequest({
+      id: 'b',
+      installationId: 'i',
+      scopeVersion: 1,
+      backgroundElapsedMs: -1,
+    }),
+    undefined,
+  );
+  const bounded = parseSubscribeRequest({
+    id: 'c',
+    installationId: 'i',
+    scopeVersion: 1,
+    backgroundElapsedMs: Number.MAX_SAFE_INTEGER,
+  });
+  assert.equal(bounded?.backgroundElapsedMs, 24 * 60 * 60 * 1000);
   assert.equal(ok?.scopeVersion, 2);
 });
 
@@ -469,6 +486,104 @@ test("live buffer 里的过期事件被剔除,sequence 进 skipped", () => {
   assert.ok("events" in drained);
   assert.deepEqual(drained.events.map((event) => event.sequence), [3]);
   assert.deepEqual(drained.skipped, [2]);
+});
+
+test("后台窗口前的完成事件只推进 cursor,窗口后的完成仍投递", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  const now = Date.parse("2026-08-03T12:00:10.000Z");
+  const manager = new NotificationSubscriptionManager(
+    store,
+    BRIDGE_ID,
+    EPOCH,
+    () => now,
+  );
+  push(store, {
+    createdAt: "2026-08-03T12:00:04.999Z",
+    sourceId: "source-a",
+  });
+  push(store, {
+    type: "input_required",
+    createdAt: "2026-08-03T12:00:04.000Z",
+    sourceId: "source-a",
+  });
+  push(store, {
+    createdAt: "2026-08-03T12:00:05.001Z",
+    sourceId: "source-a",
+  });
+
+  const page = asPage(
+    manager.subscribe({
+      id: "sub-window",
+      installationId: "inst-1",
+      cursor: { eventEpoch: EPOCH, sequence: 0 },
+      scopes: {},
+      scopeVersion: 1,
+      backgroundElapsedMs: 5_000,
+    }),
+  );
+
+  assert.deepEqual(page.events.map((event) => event.sequence), [2, 3]);
+  assert.deepEqual(page.skippedRanges, [{ from: 1, through: 1 }]);
+  assert.ok(
+    coversContinuously(page.fromExclusive, page.through, page.events, page.skippedRanges),
+  );
+});
+
+test("旧客户端不传后台窗口时保持原 catch-up 行为", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  push(store, { createdAt: "2026-08-01T00:00:00.000Z" });
+  const manager = new NotificationSubscriptionManager(
+    store,
+    BRIDGE_ID,
+    EPOCH,
+    () => Date.parse("2026-08-03T12:00:00.000Z"),
+  );
+
+  const page = asPage(
+    manager.subscribe({
+      id: "sub-legacy",
+      installationId: "inst-1",
+      cursor: { eventEpoch: EPOCH, sequence: 0 },
+      scopes: {},
+      scopeVersion: 1,
+    }),
+  );
+
+  assert.deepEqual(page.events.map((event) => event.sequence), [1]);
+  assert.deepEqual(page.skippedRanges, []);
+});
+
+test("后台窗口开始后的 live buffer 完成事件不受 catch-up 过滤", () => {
+  const store = new NotificationEventStore({ baseDir: tmpDir() });
+  store.load();
+  let clock = Date.parse("2026-08-03T12:00:10.000Z");
+  push(store, { createdAt: new Date(clock - 10_000).toISOString() });
+  const manager = new NotificationSubscriptionManager(
+    store,
+    BRIDGE_ID,
+    EPOCH,
+    () => clock,
+  );
+  manager.subscribe({
+    id: "sub-live-window",
+    installationId: "inst-1",
+    cursor: { eventEpoch: EPOCH, sequence: 0 },
+    scopes: {},
+    scopeVersion: 1,
+    pageLimit: 1,
+    backgroundElapsedMs: 1_000,
+  });
+
+  clock += 100;
+  const live = push(store, { createdAt: new Date(clock).toISOString() });
+  manager.onEvent(live);
+  const drained = manager.drainLiveBuffer("sub-live-window");
+
+  assert.ok("events" in drained);
+  assert.deepEqual(drained.events.map((event) => event.sequence), [2]);
+  assert.deepEqual(drained.skipped, []);
 });
 
 // --- cursor 过期与 epoch ----------------------------------------------------

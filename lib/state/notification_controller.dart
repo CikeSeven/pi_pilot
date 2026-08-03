@@ -94,6 +94,29 @@ String taskCompletionTitle(String? sessionName) {
   return name != null && name.isNotEmpty ? '$name 已完成' : 'PiPilot 任务完成';
 }
 
+enum NotificationInitialLifecycleAction {
+  startBackgroundOwner,
+  clearStaleBackgroundWindow,
+}
+
+/// Flutter engine 可能在应用已经 paused/hidden 时重建。初始化不能默认前台，
+/// 否则会清掉仍有效的持久后台窗口并等不到下一次生命周期回调。
+@visibleForTesting
+NotificationInitialLifecycleAction notificationInitialLifecycleAction(
+  AppLifecycleState state,
+) => state == AppLifecycleState.resumed
+    ? NotificationInitialLifecycleAction.clearStaleBackgroundWindow
+    : NotificationInitialLifecycleAction.startBackgroundOwner;
+
+/// 只有应用确实在后台、通知已开启且原生 owner 尚未接管时，Dart 才兜底。
+/// 回到前台后用户已经能看到结果，不再补发系统通知。
+@visibleForTesting
+bool shouldShowTaskCompletionNotification({
+  required bool enabled,
+  required bool inBackground,
+  required bool watcherActive,
+}) => enabled && inBackground && !watcherActive;
+
 /// 连接中断提醒使用固定 id,重复断线会更新同一条通知,重连后也能精确取消。
 @visibleForTesting
 const connectionLostNotificationId = 2;
@@ -133,8 +156,9 @@ class NotificationOperationSequencer {
 ///   常驻通知。必须在应用前台启动(Android 12+ 禁止后台首次启动 FGS)。
 /// - **原生 watcher**:Dart isolate 被系统暂停时,在原生线程维护局域网观察连接,
 ///   对账所选 source 的 streaming 状态,实时刷新工作计数和完成通知。
-/// - **Dart 兜底**:Dart 仍有调度时继续处理状态;若只在回前台后补到完成,
-///   `_streamingWhenBackgrounded` 会补发通知。扩展等待输入、断线也在后台提醒。
+/// - **Dart 兜底**:Dart 仍有调度且原生 owner 尚未接管时,直接消费
+///   `taskCompletionTick`。回到前台后不再补发系统通知,用户已经在结果页内。
+///   扩展等待输入、断线也只在后台提醒。
 ///
 /// 通知 id 策略:FGS 常驻通知固定 id=1;连接中断固定 id=2;任务通知 Dart
 /// 侧从 100 起、原生 watcher 从 200 起。回前台时用 getActiveNotifications
@@ -154,9 +178,6 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     with WidgetsBindingObserver {
   AppLifecycleState _lifecycle = AppLifecycleState.resumed;
   int _notificationId = 99; // 任务通知 id 从 100 起,避开 FGS 常驻通知 id=1
-
-  /// 进入后台时是否正在 streaming。用于进程被杀后回前台补收到完成时兜底发通知。
-  bool _streamingWhenBackgrounded = false;
 
   /// 原生观察连接是否已接管后台事件。接管期间 Dart 侧不再发完成通知,
   /// 否则回前台补收到事件时会和原生通知重复。
@@ -180,6 +201,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   static const _connectionLostGrace = Duration(seconds: 20);
 
   int _watcherRequestGeneration = 0;
+  final _notificationLifecycleOperations = NotificationOperationSequencer();
 
   /// remote_hint_v1:P2P 路径的通知协议穿梭。只在「后台 && transport==p2p
   /// && 连接在」时活跃;帧处理全在原生引擎,这里只管传输生命周期。
@@ -192,10 +214,16 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   @override
   void initState() {
     super.initState();
+    // Flutter engine 可能在应用已经 paused/hidden 时重建。默认 resumed 会让
+    // 初始化路径误清仍有效的后台窗口，并一直等不到下一次生命周期事件。
+    _lifecycle =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     // 原生接管状态由回调驱动,必须在这里就订阅:startWatcher 提交后
     // ready 可能很快到达,晚订阅会漏掉那一次通知。
-    NotificationService.instance.watcherReady.addListener(_onWatcherReadyChanged);
+    NotificationService.instance.watcherReady.addListener(
+      _onWatcherReadyChanged,
+    );
     // 初始化完成后立即同步当前连接态。不能只等待 status 下一次变化:
     // 自动连接可能在通知权限请求期间已经完成,connected 不会再次重放。
     unawaited(_initializeNotifications());
@@ -203,6 +231,16 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
 
   Future<void> _initializeNotifications() async {
     await NotificationService.instance.init();
+    if (!mounted) return;
+    await _notificationLifecycleOperations.enqueue(() async {
+      if (!mounted) return;
+      switch (notificationInitialLifecycleAction(_lifecycle)) {
+        case NotificationInitialLifecycleAction.startBackgroundOwner:
+          _scheduleBackgroundOwnerSync();
+        case NotificationInitialLifecycleAction.clearStaleBackgroundWindow:
+          await NotificationService.instance.endNotificationBackgroundWindow();
+      }
+    });
     if (!mounted) return;
     if (ref.read(piSessionProvider).status == PiConnStatus.connected) {
       _cancelConnectionLostNotification();
@@ -231,27 +269,44 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final wasBackground = _inBackground;
     _lifecycle = state;
-    if (state != AppLifecycleState.resumed) {
-      // 进入后台:记录此刻是否在 streaming,供回前台补收完成时兜底判断
-      _streamingWhenBackgrounded = ref.read(piSessionProvider).isStreaming;
-      // 把后台的连接与通知交给原生线程(Dart isolate 会被 MIUI 停止调度)
-      unawaited(_startWatcher());
-      // P2P 通道上的通知穿梭(Dart 持有 socket,原生引擎处理帧)
-      unawaited(_syncP2pNotificationClient());
-    } else {
-      // 回前台:先收回原生观察连接,避免与 Dart 连接重复收事件
-      unawaited(_stopWatcher());
-      // 回前台:P2P 穿梭也收回,弹过的通知一并撤掉
-      unawaited(_p2pClient.reset());
-      // 回前台:逐个取消任务通知(用户已回到 app),但绝不碰 FGS 常驻通知
-      _cancelTaskNotifications();
+    if (!wasBackground && _inBackground) {
+      _scheduleBackgroundOwnerSync();
+    } else if (wasBackground && !_inBackground) {
+      _scheduleForegroundOwnerStop();
       // 回前台且已连着:确保 FGS 在跑(可能因后台断连被停过)
       _syncForeground();
     }
-    // 从后台回到前台时,wasBackground 已无用,但保留语义清晰
     debugPrint(
-      '[NotificationController] lifecycle: $state, wasBackground=$wasBackground, '
-      'streamingWhenBg=$_streamingWhenBackgrounded',
+      '[NotificationController] lifecycle: $state, wasBackground=$wasBackground',
+    );
+  }
+
+  void _scheduleBackgroundOwnerSync() {
+    unawaited(
+      _notificationLifecycleOperations.enqueue(() async {
+        if (!mounted || !_inBackground) return;
+        // 先持久化后台窗口，再允许任何 owner 订阅。owner 切换或进程
+        // 重建都沿用这个起点，追补过滤不会把真实后台完成当旧事件。
+        await NotificationService.instance.beginNotificationBackgroundWindow();
+        if (!mounted || !_inBackground) return;
+        await Future.wait<void>([
+          _startWatcher(),
+          _syncP2pNotificationClient(),
+        ]);
+      }),
+    );
+  }
+
+  void _scheduleForegroundOwnerStop() {
+    unawaited(
+      _notificationLifecycleOperations.enqueue(() async {
+        // 先收回所有 owner，再结束共享窗口。队列保证快速反复切换时，
+        // 下一轮 begin/start 必定排在本轮 stop/end 之后。
+        await Future.wait<void>([_stopWatcher(), _p2pClient.reset()]);
+        await NotificationService.instance.endNotificationBackgroundWindow();
+        if (!mounted || _inBackground) return;
+        await NotificationService.instance.cancelTaskNotifications();
+      }),
     );
   }
 
@@ -260,7 +315,8 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
   /// (resolveWatcherConnectionTarget 返回 null),两条路径不会同时接管。
   Future<void> _syncP2pNotificationClient() async {
     final session = ref.read(piSessionProvider);
-    final shouldRun = _inBackground &&
+    final shouldRun =
+        _inBackground &&
         _enabled &&
         session.status == PiConnStatus.connected &&
         session.activeTransport == PiActiveTransport.p2p;
@@ -278,12 +334,16 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     final notifier = ref.read(piSessionNotifierProvider);
     final conn = notifier?.activeConnection;
     if (conn == null) {
-      unawaited(NotificationService.instance.logDiagnostic('p2p sync: conn=null'));
+      unawaited(
+        NotificationService.instance.logDiagnostic('p2p sync: conn=null'),
+      );
       return;
     }
     final deviceId = ref.read(deviceManagerProvider).activeDeviceId;
     if (deviceId == null) {
-      unawaited(NotificationService.instance.logDiagnostic('p2p sync: deviceId=null'));
+      unawaited(
+        NotificationService.instance.logDiagnostic('p2p sync: deviceId=null'),
+      );
       return;
     }
     final settings = ref.read(settingsProvider);
@@ -395,10 +455,6 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     await NotificationService.instance.stopWatcher();
   }
 
-  void _cancelTaskNotifications() {
-    unawaited(NotificationService.instance.cancelTaskNotifications());
-  }
-
   /// 首次连上后启动保活。瞬时断线时 [hasSession] 仍为 true,服务必须继续
   /// 运行,否则后台重连计时器也会随进程降级而停摆。只有显式断开才停止。
   void _syncForeground() {
@@ -492,17 +548,16 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
         session.sessionName;
   }
 
-  /// 任务完成:isStreaming true -> false。后台实时通知;或前台兜底(完成发生在
-  /// 后台期间,进程被杀后回前台才补收到)。
+  /// 当前选中会话收到了配对的 agent_end/agent_settled。只在后台且原生
+  /// owner 尚未接管时由 Dart 兜底；前台不补发系统通知。
   void _notifyTaskComplete() {
-    if (!_enabled) return;
-    // Dart 在后台仍收到完成,或回前台补到后台期间的完成。
-    final shouldNotify = _inBackground || _streamingWhenBackgrounded;
-    // 消费兜底标记,避免后续前台正常完成误触发
-    _streamingWhenBackgrounded = false;
-    if (!shouldNotify) return;
-    // 原生观察连接已接管后台通知,这里再发就是重复
-    if (_watcherActive) return;
+    if (!shouldShowTaskCompletionNotification(
+      enabled: _enabled,
+      inBackground: _inBackground,
+      watcherActive: _watcherActive,
+    )) {
+      return;
+    }
     final id = ++_notificationId;
     unawaited(
       NotificationService.instance.show(
@@ -529,9 +584,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     // 避免原生连接继续订阅旧 bridge。
     ref.listen(_watcherIdentityProvider, (previous, next) {
       if (previous == null || previous == next) return;
-      if (_inBackground) unawaited(_startWatcher());
-      // transport 也在身份元组里:LAN ↔ P2P 切换时穿梭要跟着起停。
-      unawaited(_syncP2pNotificationClient());
+      if (_inBackground) _scheduleBackgroundOwnerSync();
     });
 
     // 常驻通知文案:连接状态或会话计数变化时推给原生刷新。
@@ -542,14 +595,14 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       (prev, next) => _pushKeepAliveStatus(),
     );
 
-    // 任务完成:isStreaming true -> false
-    ref.listen(piSessionProvider.select((s) => s.isStreaming), (prev, next) {
-      if (prev == true && next == false) {
-        _notifyTaskComplete();
-      } else if (prev == false && next == true) {
-        // 新任务开始:重置兜底标记(新任务不算"后台期间的完成")
-        _streamingWhenBackgrounded = false;
-      }
+    // 当前选中会话明确完成了一轮任务。这个 tick 只由配对过 agent_start
+    // 的 agent_end/agent_settled 推进；切 source、回退与快照重建不会触发。
+    ref.listen(piSessionProvider.select((s) => s.taskCompletionTick), (
+      prev,
+      next,
+    ) {
+      if (prev == null || next <= prev) return;
+      _notifyTaskComplete();
     });
 
     // 后台会话跑完(并发会话:手机看着 A,B 在后台跑完了)
@@ -592,9 +645,7 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
         //
         // 重复调用安全:coordinator 的 start(sameTarget=true) 快速路径保留
         // 现有 socket,不重建连接、不递增世代。
-        if (_inBackground) unawaited(_startWatcher());
-        // P2P 通道刚连上:后台期间把通知穿梭挂上。
-        unawaited(_syncP2pNotificationClient());
+        if (_inBackground) _scheduleBackgroundOwnerSync();
       } else if (prev == PiConnStatus.connected) {
         // 断线:P2P 穿梭立刻停,引擎 ready 由 p2pNotificationClosed 收回。
         unawaited(_p2pClient.stop());

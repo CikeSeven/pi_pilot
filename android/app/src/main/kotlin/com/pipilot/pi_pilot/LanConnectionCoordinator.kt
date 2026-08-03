@@ -122,6 +122,9 @@ object LanConnectionCoordinator {
     fun startFromPersisted(context: Context): Boolean {
         val stored = NativeLanTarget.load(context) ?: return false
         val token = KeystoreTokenCipher().unwrap(stored.wrappedToken) ?: return false
+        // Flutter 生命周期通常已经持久化后台窗口。进程被系统重建、没有
+        // Dart 回调时这里只做幂等兜底；已有窗口绝不重置起点。
+        NotificationBackgroundWindow.begin(context)
         start(context, stored, token)
         return true
     }

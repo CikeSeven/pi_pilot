@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/core/device_models.dart';
 import 'package:pi_pilot/state/device_manager.dart';
@@ -187,6 +188,71 @@ void main() {
       expect(taskCompletionTitle(null), 'PiPilot 任务完成');
       expect(taskCompletionTitle(''), 'PiPilot 任务完成');
       expect(taskCompletionTitle('  '), 'PiPilot 任务完成');
+    });
+  });
+
+  group('initial notification lifecycle', () {
+    test('前台初始化会清理残留后台窗口', () {
+      expect(
+        notificationInitialLifecycleAction(AppLifecycleState.resumed),
+        NotificationInitialLifecycleAction.clearStaleBackgroundWindow,
+      );
+    });
+
+    test('paused 或 hidden 初始化会立即恢复后台 owner', () {
+      for (final state in [
+        AppLifecycleState.paused,
+        AppLifecycleState.hidden,
+      ]) {
+        expect(
+          notificationInitialLifecycleAction(state),
+          NotificationInitialLifecycleAction.startBackgroundOwner,
+          reason: '$state 进程重建后不能等下一次生命周期回调',
+        );
+      }
+    });
+  });
+
+  group('task completion notification gate', () {
+    test('前台收到完成 tick 不补发系统通知', () {
+      expect(
+        shouldShowTaskCompletionNotification(
+          enabled: true,
+          inBackground: false,
+          watcherActive: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('后台仅在原生 owner 尚未接管时由 Dart 兜底', () {
+      expect(
+        shouldShowTaskCompletionNotification(
+          enabled: true,
+          inBackground: true,
+          watcherActive: false,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldShowTaskCompletionNotification(
+          enabled: true,
+          inBackground: true,
+          watcherActive: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('通知开关关闭时不展示', () {
+      expect(
+        shouldShowTaskCompletionNotification(
+          enabled: false,
+          inBackground: true,
+          watcherActive: false,
+        ),
+        isFalse,
+      );
     });
   });
 }

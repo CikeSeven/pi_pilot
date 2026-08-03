@@ -14,6 +14,9 @@ export const MAX_PAGE_BYTES = 64 * 1024;
 /// 静默丢头部会让客户端的 cursor 越过未处理事件。
 export const MAX_LIVE_BUFFER = 256;
 export const MAX_LIVE_BUFFER_BYTES = 1024 * 1024;
+/// 客户端上报的是单调时钟时长,只用于界定本次后台窗口。上限与完成事件
+/// 的 24h 保留期一致,既容纳长时间后台,也避免异常值把全部历史吞掉。
+export const MAX_BACKGROUND_ELAPSED_MS = 24 * 60 * 60 * 1000;
 
 export interface NotificationScopes {
   sourceIds?: string[];
@@ -32,6 +35,9 @@ export interface SubscribeRequest {
   scopes: NotificationScopes;
   scopeVersion: number;
   pageLimit?: number;
+  /// 本次后台窗口从客户端单调时钟看已持续多久。旧客户端不传时保持
+  /// 原有 catch-up 行为。
+  backgroundElapsedMs?: number;
 }
 
 export interface SkippedRange {
@@ -160,6 +166,17 @@ export function parseSubscribeRequest(value: unknown): SubscribeRequest | undefi
     typeof record.pageLimit === "number" && Number.isSafeInteger(record.pageLimit)
       ? Math.min(Math.max(record.pageLimit, 1), MAX_PAGE_EVENTS)
       : MAX_PAGE_EVENTS;
+  let backgroundElapsedMs: number | undefined;
+  if (record.backgroundElapsedMs !== undefined) {
+    if (
+      typeof record.backgroundElapsedMs !== "number" ||
+      !Number.isSafeInteger(record.backgroundElapsedMs) ||
+      record.backgroundElapsedMs < 0
+    ) {
+      return undefined;
+    }
+    backgroundElapsedMs = Math.min(record.backgroundElapsedMs, MAX_BACKGROUND_ELAPSED_MS);
+  }
   return {
     id: record.id,
     installationId: record.installationId,
@@ -167,6 +184,7 @@ export function parseSubscribeRequest(value: unknown): SubscribeRequest | undefi
     scopes,
     scopeVersion,
     pageLimit,
+    ...(backgroundElapsedMs !== undefined ? { backgroundElapsedMs } : {}),
   };
 }
 
@@ -299,6 +317,9 @@ interface SubscriptionState {
   caughtUp: boolean;
   ready: boolean;
   generation: number;
+  /// catch-up 中早于本次后台窗口的完成事件已在前台被用户看见,只推进
+  /// cursor 不再提醒。live buffer 不走这条过滤。
+  completionNotBefore?: number;
 }
 
 /// drainLiveBuffer 的产出:可投递事件 + 因过期被跳过的 sequence。
@@ -372,6 +393,9 @@ export class NotificationSubscriptionManager {
       caughtUp: tip === 0,
       ready: false,
       generation: ++this.generationCounter,
+      ...(request.backgroundElapsedMs !== undefined
+        ? { completionNotBefore: this.now() - request.backgroundElapsedMs }
+        : {}),
     };
     this.subscriptions.set(request.id, state);
     return this.nextPage(request.id, request.scopeVersion) ?? this.emptyPage(state);
@@ -430,9 +454,16 @@ export class NotificationSubscriptionManager {
         cursor = next;
         continue;
       }
-      // 过期事件(典型:完成通知落盘后断链积压,新任务已开跑)不投递 ——
-      // 标为 skipped,覆盖连续性不破,客户端也不会再弹误导通知。
-      if (this.isStaleEvent(event)) {
+      // 全局过期规则处理“旧完成之后新任务已开跑”；后台窗口规则处理
+      // “用户已在前台看过,此刻退后台才首次订阅”的完成事件。两者都只
+      // 推进 cursor,不交给手机展示。
+      const createdAt = Date.parse(event.createdAt);
+      const beforeBackgroundWindow =
+        event.type === "task_completed" &&
+        state.completionNotBefore !== undefined &&
+        Number.isFinite(createdAt) &&
+        createdAt < state.completionNotBefore;
+      if (this.isStaleEvent(event) || beforeBackgroundWindow) {
         skipped.push(next);
         cursor = next;
         continue;

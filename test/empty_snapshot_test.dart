@@ -1,6 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pi_pilot/state/pi_session.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// 「消息列表莫名其妙没了」的回归测试 —— hub v2 快照路径。
 ///
@@ -24,6 +28,22 @@ class _SnapshotSession extends PiSessionNotifier {
   @override
   PiState build() => nextInitial;
 
+  /// 脚本化向前分页响应。
+  final List<Map<String, dynamic>?> historyResponses = [];
+  final List<Map<String, dynamic>> historyRequests = [];
+
+  @override
+  Future<Map<String, dynamic>?> syncRequest(
+    String type, [
+    Map<String, dynamic> extra = const {},
+  ]) async {
+    if (type != 'get_entries' || !extra.containsKey('before')) {
+      return super.syncRequest(type, extra);
+    }
+    historyRequests.add(Map<String, dynamic>.from(extra));
+    return historyResponses.isEmpty ? null : historyResponses.removeAt(0);
+  }
+
   /// 兜底重同步的调度记录。
   final List<String> resyncReasons = [];
 
@@ -37,6 +57,55 @@ final _provider = NotifierProvider<_SnapshotSession, PiState>(
   _SnapshotSession.new,
 );
 
+class _HubSyncSession extends PiSessionNotifier {
+  _HubSyncSession() : super('dev');
+
+  static PiState nextInitial = PiState.initial();
+
+  @override
+  PiState build() => nextInitial;
+
+  final List<Map<String, dynamic>> requests = [];
+  final List<Future<Map<String, dynamic>?> Function(Map<String, dynamic>)>
+  handlers = [];
+  ({String? anchor, List<Map<String, dynamic>> entries}) rebaseSeed = (
+    anchor: null,
+    entries: const <Map<String, dynamic>>[],
+  );
+  final List<Map<String, dynamic>> entryRequests = [];
+  final List<Future<Map<String, dynamic>?> Function(Map<String, dynamic>)>
+  entryHandlers = [];
+
+  @override
+  Future<({String? anchor, List<Map<String, dynamic>> entries})>
+  loadRebaseSeedForSync() async => rebaseSeed;
+
+  @override
+  Future<Map<String, dynamic>?> syncRequest(
+    String type, [
+    Map<String, dynamic> extra = const {},
+  ]) {
+    if (type != 'get_entries') return super.syncRequest(type, extra);
+    entryRequests.add(Map<String, dynamic>.from(extra));
+    if (entryHandlers.isEmpty) return Future.value(null);
+    return entryHandlers.removeAt(0)(extra);
+  }
+
+  @override
+  Future<Map<String, dynamic>?> hubSyncRequest(Map<String, dynamic> extra) {
+    requests.add(Map<String, dynamic>.from(extra));
+    if (handlers.isEmpty) return Future.value(null);
+    return handlers.removeAt(0)(extra);
+  }
+
+  @override
+  bool get isSyncTransportOpen => true;
+}
+
+final _hubProvider = NotifierProvider<_HubSyncSession, PiState>(
+  _HubSyncSession.new,
+);
+
 Map<String, dynamic> _userEntry(String id, String ts, String text) => {
   'type': 'message',
   'id': id,
@@ -47,6 +116,75 @@ Map<String, dynamic> _userEntry(String id, String ts, String text) => {
     ],
     'timestamp': ts,
   },
+};
+
+Map<String, dynamic> _assistantToolEntry(
+  String id,
+  String ts,
+  String callId,
+  String name,
+) => {
+  'type': 'message',
+  'id': id,
+  'message': {
+    'role': 'assistant',
+    'content': [
+      {
+        'type': 'toolCall',
+        'id': callId,
+        'name': name,
+        'arguments': {'claim': 'review'},
+      },
+    ],
+    'timestamp': ts,
+  },
+};
+
+Map<String, dynamic> _toolResultEntry(
+  String id,
+  String ts,
+  String callId,
+  String text,
+) => {
+  'type': 'message',
+  'id': id,
+  'message': {
+    'role': 'toolResult',
+    'toolCallId': callId,
+    'content': [
+      {'type': 'text', 'text': text},
+    ],
+    'timestamp': ts,
+  },
+};
+
+Map<String, dynamic> _snapshotResponse({
+  required List<Map<String, dynamic>> entries,
+  required String leafId,
+  int baseSeq = 1,
+  bool entriesHasMore = false,
+  String? entriesOldestId,
+}) => {
+  'success': true,
+  'data': {
+    'mode': 'snapshot',
+    'continuous': true,
+    'events': <dynamic>[],
+    'snapshot': {
+      'epoch': 'epoch-1',
+      'baseSeq': baseSeq,
+      'state': {'sessionId': 's1'},
+      'leafId': leafId,
+      'entries': entries,
+    },
+    if (entriesHasMore) 'entriesHasMore': true,
+    'entriesOldestId': ?entriesOldestId,
+  },
+};
+
+Map<String, dynamic> _replayResponse() => {
+  'success': true,
+  'data': {'mode': 'replay', 'continuous': true, 'events': <dynamic>[]},
 };
 
 /// 建一个「已经在看某会话、本地有 2 条消息」的 notifier。
@@ -377,6 +515,355 @@ void main() {
     });
   });
 
+  group('历史基线与重同步竞争', () {
+    test('强制快照在途时 announce 只排队,不能用空 replay 作废快照', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _HubSyncSession.nextInitial = PiState.initial().copyWith(
+        hubId: 'hub-1',
+        selectedSourceId: 'desktop:1',
+        sourceEpoch: 'epoch-1',
+        sessionId: 's1',
+      );
+      final notifier = container.read(_hubProvider.notifier)
+        ..debugEnableHubV2();
+      final snapshot = Completer<Map<String, dynamic>?>();
+      notifier.handlers
+        ..add((_) => snapshot.future)
+        ..add((_) async => _replayResponse());
+
+      final initialSync = notifier.debugSyncSelectedSource(forceFull: true);
+      await Future<void>.delayed(Duration.zero);
+      expect(notifier.requests, hasLength(1));
+      expect(notifier.requests.single, isNot(contains('cursor')));
+
+      notifier.debugScheduleSourceResync(reason: 'announce');
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        notifier.requests,
+        hasLength(1),
+        reason: 'announce 不得另起 generation 抢占正在建立历史的快照',
+      );
+
+      snapshot.complete(
+        _snapshotResponse(
+          entries: [
+            _userEntry('e1', '2026-08-03T15:28:00.000Z', 'advisor 之前的历史'),
+            _userEntry('e2', '2026-08-03T15:29:00.000Z', '当前消息'),
+          ],
+          leafId: 'e2',
+          baseSeq: 10,
+        ),
+      );
+      await initialSync;
+      expect(notifier.debugConversationHydrated, isTrue);
+      expect(notifier.state.items, hasLength(2));
+
+      // 排队的 announce 会在快照落地后做一次普通 replay 对账。
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      expect(notifier.requests, hasLength(2));
+      expect(notifier.requests.last, contains('cursor'));
+      expect(
+        notifier.state.items.whereType<UserItem>().map((item) => item.text),
+        containsAll(['advisor 之前的历史', '当前消息']),
+      );
+    });
+
+    test('慢速 rebase 完成前 announce 不能启动竞争同步', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _HubSyncSession.nextInitial = PiState.initial().copyWith(
+        hubId: 'hub-1',
+        selectedSourceId: 'desktop:1',
+        sourceEpoch: 'epoch-1',
+        sessionId: 's1',
+      );
+      final notifier = container.read(_hubProvider.notifier)
+        ..debugEnableHubV2();
+      notifier.rebaseSeed = (
+        anchor: 'e4',
+        entries: [
+          _assistantToolEntry(
+            'e1',
+            '2026-08-03T15:20:00.000Z',
+            'advisor-rebase',
+            'advisor',
+          ),
+          _toolResultEntry(
+            'e2',
+            '2026-08-03T15:20:01.000Z',
+            'advisor-rebase',
+            '慢链路审查结论',
+          ),
+          _userEntry('e3', '2026-08-03T15:21:00.000Z', '缓存历史'),
+          _userEntry('e4', '2026-08-03T15:22:00.000Z', 'rebase 锚点'),
+        ],
+      );
+      final rebasePage = Completer<Map<String, dynamic>?>();
+      notifier.handlers
+        ..add(
+          (_) async => _snapshotResponse(
+            entries: [
+              _userEntry('e5', '2026-08-03T15:23:00.000Z', '裁剪窗口'),
+              _userEntry('e6', '2026-08-03T15:24:00.000Z', '当前 leaf'),
+            ],
+            leafId: 'e6',
+            baseSeq: 20,
+            entriesHasMore: true,
+            entriesOldestId: 'e5',
+          ),
+        )
+        ..add((_) async => _replayResponse());
+      notifier.entryHandlers.add((_) => rebasePage.future);
+
+      final sync = notifier.debugSyncSelectedSource();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(notifier.requests, hasLength(1));
+      expect(notifier.entryRequests, hasLength(1));
+      expect(notifier.entryRequests.single['since'], 'e4');
+
+      notifier.debugScheduleSourceResync(reason: 'announce');
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        notifier.requests,
+        hasLength(1),
+        reason: 'rebase 仍在补历史时不得启动第二个 hub_sync',
+      );
+
+      rebasePage.complete({
+        'success': true,
+        'data': {
+          'entries': [
+            _userEntry('e5', '2026-08-03T15:23:00.000Z', '裁剪窗口'),
+            _userEntry('e6', '2026-08-03T15:24:00.000Z', '当前 leaf'),
+          ],
+          'tipId': 'e6',
+          'nextSinceId': 'e6',
+          'hasMore': false,
+        },
+      });
+      await sync;
+
+      expect(notifier.debugConversationHydrated, isTrue);
+      expect(notifier.debugLeafId, 'e6');
+      final advisor = notifier.state.items.whereType<ToolItem>().singleWhere(
+        (item) => item.name == 'advisor',
+      );
+      expect(advisor.output, '慢链路审查结论');
+      expect(
+        notifier.state.items.whereType<UserItem>().map((item) => item.text),
+        containsAll(['缓存历史', 'rebase 锚点', '裁剪窗口', '当前 leaf']),
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      expect(notifier.requests, hasLength(2));
+      expect(notifier.requests.last, contains('cursor'));
+    });
+
+    test('未建立历史基线时即使有持久化 cursor 也必须请求快照', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'hub.cursor:hub-1:desktop:1': jsonEncode({
+          'hubId': 'hub-1',
+          'sourceId': 'desktop:1',
+          'sourceEpoch': 'epoch-1',
+          'seq': 99,
+        }),
+      });
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _HubSyncSession.nextInitial = PiState.initial().copyWith(
+        hubId: 'hub-1',
+        selectedSourceId: 'desktop:1',
+        sourceEpoch: 'epoch-1',
+        sessionId: 's1',
+      );
+      final notifier = container.read(_hubProvider.notifier)
+        ..debugEnableHubV2();
+      notifier.handlers.add(
+        (_) async => _snapshotResponse(
+          entries: [_userEntry('e1', '2026-08-03T15:28:00.000Z', '权威历史')],
+          leafId: 'e1',
+          baseSeq: 100,
+        ),
+      );
+
+      await notifier.debugSyncSelectedSource();
+
+      expect(notifier.requests.single, isNot(contains('cursor')));
+      expect(notifier.debugConversationHydrated, isTrue);
+      expect((notifier.state.items.single as UserItem).text, '权威历史');
+    });
+  });
+
+  group('分页历史不能被后续快照裁掉', () {
+    test('同分支裁剪快照保留已加载的 advisor 工具消息并追加新尾部', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        sessionId: 's1',
+      );
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'leafId': 'e4',
+        'entries': [
+          _assistantToolEntry(
+            'e1',
+            '2026-08-03T15:20:00.000Z',
+            'advisor-1',
+            'advisor',
+          ),
+          _toolResultEntry(
+            'e2',
+            '2026-08-03T15:20:01.000Z',
+            'advisor-1',
+            '关键审查结论',
+          ),
+          _userEntry('e3', '2026-08-03T15:21:00.000Z', '旧消息'),
+          _userEntry('e4', '2026-08-03T15:22:00.000Z', '原 leaf'),
+        ],
+      });
+      notifier.debugSetEarlierCursor('e1', hasMore: false);
+
+      notifier.debugApplyHubSnapshot(
+        {
+          'state': {'sessionId': 's1'},
+          'leafId': 'e5',
+          'entries': [
+            _userEntry('e4', '2026-08-03T15:22:00.000Z', '原 leaf'),
+            _userEntry('e5', '2026-08-03T15:23:00.000Z', '新尾部'),
+          ],
+        },
+        reconcile: true,
+        entriesHasMore: true,
+        entriesOldestId: 'e4',
+      );
+
+      final advisor = notifier.state.items.whereType<ToolItem>().singleWhere(
+        (item) => item.name == 'advisor',
+      );
+      expect(advisor.output, '关键审查结论');
+      expect(
+        notifier.state.items.whereType<UserItem>().map((item) => item.text),
+        containsAll(['旧消息', '原 leaf', '新尾部']),
+      );
+      expect(
+        notifier.state.hasMoreHistory,
+        isFalse,
+        reason: '客户端已翻到历史尽头，裁剪快照不能把加载槽重新打开',
+      );
+      expect(notifier.debugOldestEntryId, 'e1');
+      expect(notifier.debugLeafId, 'e5');
+    });
+
+    test('回退快照不含原 leaf 时仍会重建并删除旧分支后缀', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        sessionId: 's1',
+      );
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'leafId': 'e3',
+        'entries': [
+          _userEntry('e1', '2026-08-03T15:20:00.000Z', '保留一'),
+          _userEntry('e2', '2026-08-03T15:21:00.000Z', '保留二'),
+          _userEntry('e3', '2026-08-03T15:22:00.000Z', '应删除的旧后缀'),
+        ],
+      });
+
+      notifier.debugApplyHubSnapshot({
+        'state': {'sessionId': 's1'},
+        'leafId': 'e2',
+        'entries': [
+          _userEntry('e1', '2026-08-03T15:20:00.000Z', '保留一'),
+          _userEntry('e2', '2026-08-03T15:21:00.000Z', '保留二'),
+        ],
+      }, reconcile: true);
+
+      expect(
+        notifier.state.items.whereType<UserItem>().map((item) => item.text),
+        ['保留一', '保留二'],
+      );
+      expect(notifier.debugLeafId, 'e2');
+    });
+
+    test('向前分页只移动 oldest cursor,不会把当前 leaf 倒退到旧消息', () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        sessionId: 's1',
+      );
+      final notifier = container.read(_provider.notifier);
+      notifier.debugApplyHubSnapshot(
+        {
+          'state': {'sessionId': 's1'},
+          'leafId': 'e4',
+          'entries': [
+            _userEntry('e3', '2026-08-03T15:22:00.000Z', '较新三'),
+            _userEntry('e4', '2026-08-03T15:23:00.000Z', '当前 leaf'),
+          ],
+        },
+        entriesHasMore: true,
+        entriesOldestId: 'e3',
+      );
+      notifier.historyResponses.add({
+        'success': true,
+        'data': {
+          'entries': [
+            _userEntry('e1', '2026-08-03T15:20:00.000Z', '更早一'),
+            _userEntry('e2', '2026-08-03T15:21:00.000Z', '更早二'),
+          ],
+          'oldestId': 'e1',
+          'hasMore': false,
+        },
+      });
+
+      expect(await notifier.loadEarlierHistory(), isTrue);
+      expect(notifier.debugLeafId, 'e4');
+      expect(notifier.debugOldestEntryId, 'e1');
+      expect(notifier.state.hasMoreHistory, isFalse);
+      expect(
+        notifier.state.items.whereType<UserItem>().map((item) => item.text),
+        ['更早一', '更早二', '较新三', '当前 leaf'],
+      );
+    });
+
+    test('分页失败保留游标和加载入口并安排恢复', () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        sessionId: 's1',
+      );
+      final notifier = container.read(_provider.notifier);
+      notifier.debugApplyHubSnapshot(
+        {
+          'state': {'sessionId': 's1'},
+          'leafId': 'e4',
+          'entries': [
+            _userEntry('e3', '2026-08-03T15:22:00.000Z', '较新三'),
+            _userEntry('e4', '2026-08-03T15:23:00.000Z', '当前 leaf'),
+          ],
+        },
+        entriesHasMore: true,
+        entriesOldestId: 'e3',
+      );
+      notifier.historyResponses.add(null);
+
+      expect(await notifier.loadEarlierHistory(), isFalse);
+      expect(notifier.state.loadingEarlier, isFalse);
+      expect(notifier.state.hasMoreHistory, isTrue);
+      expect(notifier.debugOldestEntryId, 'e3');
+      expect(notifier.resyncReasons, ['history-page-failed']);
+    });
+  });
+
   group('压缩状态必须可恢复且防倒灌', () {
     test('旧快照提示不能把已经结束的压缩重新盖回 true', () {
       final container = ProviderContainer();
@@ -419,6 +906,50 @@ void main() {
       });
 
       expect(notifier.state.isCompacting, isTrue);
+    });
+
+    test('agent_start → end → settled 只记一次明确完成', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({'type': 'agent_start'});
+      notifier.debugApplyPiEvent({'type': 'agent_end'});
+      notifier.debugApplyPiEvent({'type': 'agent_settled'});
+
+      expect(notifier.state.taskCompletionTick, 1);
+      expect(notifier.state.isStreaming, isFalse);
+    });
+
+    test('没有配对 agent_start 的状态收口不冒充任务完成', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        isStreaming: true,
+      );
+      final notifier = container.read(_provider.notifier);
+
+      // 这模拟切源/回退或断线重建后残留的 UI 布尔状态。settled 和 pi_exit
+      // 可以收口显示，但都不能制造 completion tick。
+      notifier.debugApplyPiEvent({'type': 'agent_settled'});
+      notifier.debugApplyPiEvent({'type': 'bridge_pi_exit', 'code': 0});
+
+      expect(notifier.state.taskCompletionTick, 0);
+      expect(notifier.state.isStreaming, isFalse);
+    });
+
+    test('回退重建不推进完成 tick', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        taskCompletionTick: 3,
+      );
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({'type': 'session_tree', 'leafId': 'older'});
+
+      expect(notifier.state.taskCompletionTick, 3);
     });
 
     test('agent_settled 清掉漏收 compaction_end 后残留的压缩态', () {

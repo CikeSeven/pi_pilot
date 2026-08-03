@@ -242,6 +242,25 @@ class NotificationService {
     }
   }
 
+  /// App 生命周期进入后台。原生持久化同一轮后台的单调时钟起点，
+  /// LAN/P2P owner 切换或进程重建都沿用它。
+  Future<void> beginNotificationBackgroundWindow() async {
+    try {
+      await _systemChannel.invokeMethod<void>('notificationBackgroundBegin');
+    } on PlatformException catch (error) {
+      await logDiagnostic('notification background begin failed: $error');
+    }
+  }
+
+  /// App 回到前台。调用方必须先停完所有后台 owner，再结束窗口。
+  Future<void> endNotificationBackgroundWindow() async {
+    try {
+      await _systemChannel.invokeMethod<void>('notificationBackgroundEnd');
+    } on PlatformException catch (error) {
+      await logDiagnostic('notification background end failed: $error');
+    }
+  }
+
   /// 切后台时把连接参数交给原生层。
   ///
   /// MIUI 会在切后台数十秒后回收前台服务的 wake lock,Dart isolate 随即停止

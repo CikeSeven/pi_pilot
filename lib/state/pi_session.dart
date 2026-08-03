@@ -509,6 +509,7 @@ class PiState {
     this.sessionWaking = false,
     this.transientNotice,
     this.composerFill,
+    this.taskCompletionTick = 0,
     this.backgroundFinishTick = 0,
     this.backgroundFinishName,
     this.activityStatus,
@@ -584,6 +585,10 @@ class PiState {
   /// 桌面 working-activity 插件推过来的实时状态行(TUI Working 行同源)。
   /// 非空时灵动岛直接显示它,不再用本地从 items 推导的二手状态。
   final String? activityStatus;
+
+  /// 当前选中会话确认完成了一轮任务。只由配对过 agent_start 的
+  /// agent_end/agent_settled 推进；切源、回退重建和快照对账都不能改它。
+  final int taskCompletionTick;
 
   /// 后台会话刚刚跑完:tick 自增用于触发监听,name 是会话显示名。
   /// (通知要不要真的弹由 NotificationController 按前后台状态决定。)
@@ -682,6 +687,7 @@ class PiState {
     bool? sessionWaking,
     String? transientNotice,
     String? composerFill,
+    int? taskCompletionTick,
     int? backgroundFinishTick,
     String? backgroundFinishName,
     String? activityStatus,
@@ -748,6 +754,7 @@ class PiState {
       activityStatus: clearSource || clearActivity
           ? null
           : (activityStatus ?? this.activityStatus),
+      taskCompletionTick: taskCompletionTick ?? this.taskCompletionTick,
       backgroundFinishTick: backgroundFinishTick ?? this.backgroundFinishTick,
       backgroundFinishName: backgroundFinishName ?? this.backgroundFinishName,
       rttMs: rttMs ?? this.rttMs,
@@ -794,6 +801,8 @@ final piSessionFamilyProvider =
 const int _leaseTtlMs = 8000;
 
 enum _OpenRoute { configured, lanOnly, p2pOnly }
+
+enum _RebaseResult { completed, fallbackToSnapshot, stale }
 
 typedef _ConnectionScope = ({int generation, PiConnection connection});
 
@@ -855,6 +864,12 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 已知最靠前那条 entry 的 id —— 往前分页的游标。
   String? _oldestEntryId;
 
+  /// 当前 items 是否已经由权威快照/全量同步建立过历史基线。
+  ///
+  /// 仅有缓存或实时 entry 不算：若此时拿持久化 cursor 做 replay，Hub 可以合法
+  /// 返回 0 条事件，客户端却会永远缺少 cursor 之前的历史。
+  bool _conversationHydrated = false;
+
   /// 非 null 时 [_addItem] 改成在这个下标插入并自增。
   ///
   /// 补回来的历史必须落在**头部**,而 _items 只有 add。不给个插入游标的话,
@@ -898,6 +913,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 旧实现是个 bool,两次并发同步会互相踩。
   int _syncGeneration = 0;
   int _activeSyncGeneration = 0;
+  final Map<int, int> _syncDepthByGeneration = {};
   Timer? _resyncTimer;
 
   /// 选中源从推送目录消失后的宽限复核定时器,见 [_scheduleSourceLossCheck]。
@@ -1471,7 +1487,14 @@ class PiSessionNotifier extends Notifier<PiState> {
     final gen = ++_syncGeneration;
     _activeSyncGeneration = gen;
     _bufferedSourceEvents.clear();
-    _leafId = null;
+    // 同源重连不清列表，也不能清当前 leaf；它是后续快照判断“同一分支继续”
+    // 的锚点。只有真正换源时，这两个本地身份才一起作废。
+    final sameSource = sourceId == state.selectedSourceId;
+    if (!sameSource) {
+      _leafId = null;
+      _resetConversation(reason: 'select-source(switch)');
+      state = state.copyWith(clearSource: true);
+    }
     // 同源重连不清列表。
     //
     // 网络切换会走 network_changed → transport_open → _selectSource(同一个
@@ -1481,11 +1504,6 @@ class PiSessionNotifier extends Notifier<PiState> {
     //
     // 同源的旧内容本来就是对的:留着它,让随后的快照做原子替换/对账。真正
     // 需要清的是**换源**(下面那句 clearSource 也只在换源时才有意义)。
-    final sameSource = sourceId == state.selectedSourceId;
-    if (!sameSource) {
-      _resetConversation(reason: 'select-source(switch)');
-      state = state.copyWith(clearSource: true);
-    }
     state = state.copyWith(
       selectedSourceId: sourceId,
       sessionPhase: SyncPhase.syncing,
@@ -1528,6 +1546,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     await _syncSelectedSource(
       forceFull: true,
+      reconcile: sameSource,
       generation: gen,
       connectionScope: connectionScope,
     );
@@ -3004,6 +3023,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     if (!_hubV2 || state.selectedSourceId == null) return;
     final sourceId = state.selectedSourceId;
     final gen = generation ?? ++_syncGeneration;
+    _syncDepthByGeneration[gen] = (_syncDepthByGeneration[gen] ?? 0) + 1;
     _activeSyncGeneration = gen;
     // 每个 await 之后都要确认自己还是最新一代、source 没换且连接没被替代。
     bool stale() =>
@@ -3012,7 +3032,12 @@ class PiSessionNotifier extends Notifier<PiState> {
         !_connectionScopeCurrent(connectionScope) ||
         state.selectedSourceId != sourceId;
     try {
-      final cursor = forceFull ? null : await _loadHubCursor();
+      // 未建立历史基线时绝不能拿持久化 cursor 请求 replay。切源后的强制快照
+      // 若被 announce 重同步抢先作废，下一轮 replay 可能合法返回 0 条，最终只剩
+      // 后续实时消息，且没有任何向前分页入口。
+      final cursor = forceFull || !_conversationHydrated
+          ? null
+          : await _loadHubCursor();
       if (stale()) return;
       if (cursor != null && cursor.sourceId == state.selectedSourceId) {
         state = state.copyWith(
@@ -3024,25 +3049,18 @@ class PiSessionNotifier extends Notifier<PiState> {
       // 锚点,并先用本地缓存渲染首屏,再对账(慢链路下 10s 内可见上次内容)。
       String? rebaseEntryId;
       if (cursor == null && !forceFull) {
-        final v2 = await _loadHubCursorV2();
+        final seed = await loadRebaseSeedForSync();
         if (stale()) return;
-        final anchor = v2?['lastEntryId'];
-        if (anchor is String && anchor.isNotEmpty) rebaseEntryId = anchor;
-        final store = _syncStore;
-        final sourceKey = _syncSourceKey;
-        if (store != null && sourceKey != null) {
-          final cached = await store.loadRecentEntries(sourceKey);
-          if (stale()) return;
-          if (cached.isNotEmpty) {
-            _resetConversation(reason: 'cache-render');
-            for (final entry in cached) {
-              _ingestEntry(entry);
-            }
-            _emit();
+        rebaseEntryId = seed.anchor;
+        if (seed.entries.isNotEmpty) {
+          _resetConversation(reason: 'cache-render');
+          for (final entry in seed.entries) {
+            _ingestEntry(entry);
           }
+          _emit();
         }
       }
-      final resp = await _request('hub_sync', {
+      final resp = await hubSyncRequest({
         if (cursor != null) 'cursor': cursor.toMap(),
       });
       if (stale()) return;
@@ -3093,13 +3111,22 @@ class PiSessionNotifier extends Notifier<PiState> {
               _oldestEntryId = oldest;
               state = state.copyWith(hasMoreHistory: true);
             }
-            unawaited(
-              _rebaseFromEntry(
-                rebaseEntryId,
-                generation: gen,
-                connectionScope: connectionScope,
-              ),
+            final rebased = await _rebaseFromEntry(
+              rebaseEntryId,
+              generation: gen,
+              connectionScope: connectionScope,
             );
+            // rebase 失败时改用当前权威快照重建；被新代次取代时则必须静默退出。
+            if (rebased == _RebaseResult.stale || stale()) return;
+            if (rebased == _RebaseResult.fallbackToSnapshot) {
+              _applyHubSnapshot(
+                snapshot,
+                entriesHasMore: data['entriesHasMore'] == true,
+                entriesOldestId: data['entriesOldestId'] is String
+                    ? data['entriesOldestId'] as String
+                    : null,
+              );
+            }
           }
         }
       } else if (mode == 'rpc') {
@@ -3178,16 +3205,33 @@ class PiSessionNotifier extends Notifier<PiState> {
         expectedSourceId: sourceId,
       );
     } finally {
-      if (gen == _syncGeneration) {
+      final depth = (_syncDepthByGeneration[gen] ?? 1) - 1;
+      if (depth > 0) {
+        _syncDepthByGeneration[gen] = depth;
+      } else {
+        _syncDepthByGeneration.remove(gen);
+      }
+      // 同一 generation 的事件翻页/rebase 可能递归进入本方法。只有最外层
+      // 返回时才能释放事件缓冲和排队 announce，不能由内层提前开闸。
+      if (depth == 0 && gen == _syncGeneration) {
         _activeSyncGeneration = 0;
         _drainBufferedEvents();
+        // select/open 的权威同步执行期间收到的 announce 只排队。历史基线落地后
+        // 再跑一次普通 replay 对账，不能反过来用 replay 作废在途快照。
+        if (!_resyncRunning &&
+            _pendingResyncReason != null &&
+            isSyncTransportOpen) {
+          final pending = _pendingResyncReason!;
+          _pendingResyncReason = null;
+          _scheduleSourceResync(reason: pending);
+        }
       }
     }
   }
 
   /// bridge 重启后的 entryId rebase:从本地最后一条 entry 正向分页补齐,
   /// 历史不整段重拉。失败回退全量快照。
-  Future<void> _rebaseFromEntry(
+  Future<_RebaseResult> _rebaseFromEntry(
     String anchorEntryId, {
     int? generation,
     _ConnectionScope? connectionScope,
@@ -3204,10 +3248,10 @@ class PiSessionNotifier extends Notifier<PiState> {
     var guard = 0;
     while (!stale()) {
       if (guard++ > 200) {
-        _logP2p('rebase: 翻页超过 200 次,中止');
-        return;
+        _logP2p('rebase: 翻页超过 200 次,改用权威快照');
+        return _RebaseResult.fallbackToSnapshot;
       }
-      final resp = await _request('get_entries', {
+      final resp = await syncRequest('get_entries', {
         'since': ?since,
         'forward': true,
         // 与 bridge 的 MAX_ENTRIES_PAGE_BYTES 硬上限对齐(96KiB)。
@@ -3216,16 +3260,11 @@ class PiSessionNotifier extends Notifier<PiState> {
         'limitBytes': maxEntriesPageBytes,
         'tipId': ?tipId,
       });
-      if (stale()) return;
+      if (stale()) return _RebaseResult.stale;
       final data = resp?['data'] as Map?;
       if (resp?['success'] != true || data == null) {
-        _logP2p('rebase: get_entries 失败,回退全量快照');
-        await _syncSelectedSource(
-          forceFull: true,
-          generation: gen,
-          connectionScope: connectionScope,
-        );
-        return;
+        _logP2p('rebase: get_entries 失败,改用权威快照');
+        return _RebaseResult.fallbackToSnapshot;
       }
       tipId = data['tipId'] as String?;
       final entries = data['entries'] as List? ?? const [];
@@ -3237,17 +3276,10 @@ class PiSessionNotifier extends Notifier<PiState> {
       since = data['nextSinceId'] as String?;
       if (since == null) break;
     }
-    if (!stale()) {
-      _logP2p('rebase: entryId 锚点补齐完成');
-      state = state.copyWith(sessionPhase: SyncPhase.synced);
-      unawaited(
-        _saveHubCursor(
-          connectionScope: connectionScope,
-          syncGeneration: gen,
-          expectedSourceId: sourceId,
-        ),
-      );
-    }
+    if (stale()) return _RebaseResult.stale;
+    _conversationHydrated = true;
+    _logP2p('rebase: entryId 锚点补齐完成');
+    return _RebaseResult.completed;
   }
 
   /// 应用一份 hub 快照。
@@ -3271,16 +3303,22 @@ class PiSessionNotifier extends Notifier<PiState> {
     final sessionId = stateData is Map
         ? stateData['sessionId'] as String?
         : null;
-    // 补齐式重同步:同一会话、且新 leaf 已在本地历史里 → 就地对账,不清空对话。
-    // 否则(换会话/换分支)才重建,避免每秒清屏重渲染。
+    final entries = snapshot['entries'] as List? ?? const [];
+    final previousLeafId = _leafId;
+    final wasHydrated = _conversationHydrated;
+    final sameSession = sessionId != null && sessionId == state.sessionId;
+    final containsPreviousLeaf =
+        previousLeafId != null &&
+        entries.any((entry) => entry is Map && entry['id'] == previousLeafId);
+    // 补齐式重同步要证明「新快照延续了本地旧 leaf」：leaf 没变，或快照里
+    // 明确包含旧 leaf。旧判据反过来检查“新 leaf 是否已在本地”，普通追加时
+    // 新 leaf 天然未见，于是每次 announce 都会误重建并裁掉已加载历史。
     final sameBranch =
         reconcile &&
-        sessionId != null &&
-        sessionId == state.sessionId &&
-        leafId != null &&
-        _seenEntryIds.contains(leafId);
+        sameSession &&
+        previousLeafId != null &&
+        (leafId == previousLeafId || containsPreviousLeaf);
 
-    final entries = snapshot['entries'] as List? ?? const [];
     // staged replacement:空快照不许清列表。
     //
     // 这条路径原来是「先清空,再灌 entries」。快照没带 entries(字段缺失被
@@ -3294,7 +3332,6 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 判据要严:只在「同一会话、本地有内容、快照却是空的」时保留。换会话
     // /换分支时快照本就该是空的(那是真的没消息),这时候必须照常清空,
     // 否则会把上一个会话的消息留在界面上冒充新会话的内容。
-    final sameSession = sessionId != null && sessionId == state.sessionId;
     if (entries.isEmpty && sameSession && _items.isNotEmpty) {
       _logP2p('快照 entries 为空但本地有 ${_items.length} 条(同一会话),保留现有列表并调度重同步');
       if (stateData is Map) {
@@ -3330,12 +3367,16 @@ class PiSessionNotifier extends Notifier<PiState> {
         entriesOldestId != null && entriesOldestId.isNotEmpty
         ? entriesOldestId
         : null;
-    if (!sameBranch || cursorFromBridge != null) {
-      if (cursorFromBridge != null) _oldestEntryId = cursorFromBridge;
+    // 只有重建或尚未建立权威基线时才采用快照窗口的分页元数据。
+    // 已经 hydrated 的对账合并必须保留客户端自己的进度：它可能早已把桥上
+    // omitted 的部分全部拉完，快照里的 oldestId 只描述本次裁剪窗口。
+    if (!sameBranch || !wasHydrated) {
+      _oldestEntryId = cursorFromBridge;
       state = state.copyWith(
-        hasMoreHistory: entriesHasMore && _oldestEntryId != null,
+        hasMoreHistory: entriesHasMore && cursorFromBridge != null,
       );
     }
+    _conversationHydrated = true;
     state = state.copyWith(
       loadingEarlier: false,
       sourceEpoch: snapshot['epoch'] as String?,
@@ -3397,6 +3438,17 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
     if (next != state.isStreaming) {
       state = state.copyWith(isStreaming: next);
+    }
+  }
+
+  void _finishTaskFromEvent() {
+    final completed = _eventStreaming;
+    _eventStreaming = false;
+    _snapshotStreaming = false;
+    _sawInFlightMessage = false;
+    _syncStreamingFlag();
+    if (completed) {
+      state = state.copyWith(taskCompletionTick: state.taskCompletionTick + 1);
     }
   }
 
@@ -3486,6 +3538,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     // 增量路径(since)不该动 hasMoreHistory:它取的是 leaf 之后的新消息,
     // 与「更早的历史还在不在」无关,覆盖掉会让「加载更早」凭空消失。
+    if (!incremental) _conversationHydrated = true;
     state = state.copyWith(hasMoreHistory: incremental ? null : more);
     _emit();
     await _saveLeafId(
@@ -3507,11 +3560,17 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
     state = state.copyWith(loadingEarlier: true);
     try {
-      final resp = await _request('get_entries', {'before': cursor});
+      final resp = await syncRequest('get_entries', {'before': cursor});
       final data = resp?['data'] as Map?;
       if (resp?['success'] != true || data == null) {
-        // 取不到就别把按钮永久留在那儿骗人:游标可能已经随分支切换失效了。
-        state = state.copyWith(loadingEarlier: false, hasMoreHistory: false);
+        final error = resp?['error'] ?? 'no-response';
+        _logP2p(
+          'history_page_failed{sourceId:${state.selectedSourceId},cursor:$cursor,error:$error}',
+        );
+        // 传输失败不等于历史到头。保留游标和加载槽，交给重同步恢复；只有
+        // 成功页明确 hasMore:false 才能宣布没有更早历史。
+        state = state.copyWith(loadingEarlier: false);
+        scheduleSyncRecovery(reason: 'history-page-failed');
         return false;
       }
       final entries = data['entries'] as List? ?? const [];
@@ -3519,7 +3578,9 @@ class PiSessionNotifier extends Notifier<PiState> {
       _prependAt = 0;
       try {
         for (final entry in entries) {
-          if (entry is Map) _ingestEntry(Map<String, dynamic>.from(entry));
+          if (entry is Map) {
+            _ingestEntry(Map<String, dynamic>.from(entry), advanceLeaf: false);
+          }
         }
       } finally {
         _prependAt = null;
@@ -3532,8 +3593,12 @@ class PiSessionNotifier extends Notifier<PiState> {
       );
       _emit();
       return entries.isNotEmpty;
-    } catch (_) {
+    } catch (error) {
+      _logP2p(
+        'history_page_failed{sourceId:${state.selectedSourceId},cursor:$cursor,error:$error}',
+      );
       state = state.copyWith(loadingEarlier: false);
+      scheduleSyncRecovery(reason: 'history-page-failed');
       return false;
     }
   }
@@ -3586,6 +3651,28 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 却永远不完成。按 50KB/s 估,20MB 会话大约 7 分钟,给 10 分钟余量。
   static const _hardRequestTimeout = Duration(minutes: 10);
 
+  /// 测试缝隙:读取 rebase 锚点与首屏缓存。
+  @visibleForTesting
+  Future<({String? anchor, List<Map<String, dynamic>> entries})>
+  loadRebaseSeedForSync() async {
+    final v2 = await _loadHubCursorV2();
+    final rawAnchor = v2?['lastEntryId'];
+    final anchor = rawAnchor is String && rawAnchor.isNotEmpty
+        ? rawAnchor
+        : null;
+    final store = _syncStore;
+    final sourceKey = _syncSourceKey;
+    final entries = store != null && sourceKey != null
+        ? await store.loadRecentEntries(sourceKey)
+        : const <Map<String, dynamic>>[];
+    return (anchor: anchor, entries: entries);
+  }
+
+  /// 测试缝隙:hub_sync 走这里，便于脚本化并发快照/replay。
+  @visibleForTesting
+  Future<Map<String, dynamic>?> hubSyncRequest(Map<String, dynamic> extra) =>
+      _request('hub_sync', extra);
+
   /// 测试缝隙:get_entries 走这里,便于脚本化失败/成功。
   @visibleForTesting
   Future<Map<String, dynamic>?> syncRequest(
@@ -3602,6 +3689,30 @@ class PiSessionNotifier extends Notifier<PiState> {
   @visibleForTesting
   Future<void> debugSync({bool forceFull = false}) =>
       _sync(forceFull: forceFull);
+
+  /// 测试缝隙:构造 hub v2 同步环境。
+  @visibleForTesting
+  void debugEnableHubV2() => _hubV2 = true;
+
+  @visibleForTesting
+  Future<void> debugSyncSelectedSource({
+    bool forceFull = false,
+    bool reconcile = false,
+  }) => _syncSelectedSource(forceFull: forceFull, reconcile: reconcile);
+
+  @visibleForTesting
+  void debugScheduleSourceResync({required String reason}) =>
+      _scheduleSourceResync(reason: reason);
+
+  @visibleForTesting
+  bool get debugConversationHydrated => _conversationHydrated;
+
+  @visibleForTesting
+  String? get debugLeafId => _leafId;
+
+  /// 测试可覆写；生产只认当前 PiConnection 的真实开放状态。
+  @visibleForTesting
+  bool get isSyncTransportOpen => _conn?.isOpen == true;
 
   /// 测试缝隙:设置本地 leaf(决定 _sync 走增量还是全量)。
   @visibleForTesting
@@ -3650,6 +3761,7 @@ class PiSessionNotifier extends Notifier<PiState> {
   @visibleForTesting
   void debugSetEarlierCursor(String oldestId, {required bool hasMore}) {
     _oldestEntryId = oldestId;
+    _conversationHydrated = true;
     state = state.copyWith(hasMoreHistory: hasMore);
   }
 
@@ -3966,7 +4078,9 @@ class PiSessionNotifier extends Notifier<PiState> {
     );
     if (selected != null && !selected.ownedByYou) _dropLease(selected.id);
     if (previous?.connected == false && selected?.connected == true) {
-      unawaited(_syncSelectedSource(forceFull: true));
+      // 同一个源恢复在线时本地历史仍有效；让快照按旧 leaf 对账。若离线期间
+      // 真发生了回退，快照不含旧 leaf，_applyHubSnapshot 仍会保守重建。
+      unawaited(_syncSelectedSource(forceFull: true, reconcile: true));
     }
     // 桌面源判死:桌面 TUI 不像 headless 会话那样能被发消息唤醒(进程已被冻住
     // 或退出),继续停在它身上永远等不到事件。
@@ -4200,24 +4314,29 @@ class PiSessionNotifier extends Notifier<PiState> {
   /// 单飞 + 指数退避(250ms→8s, ±20% 抖动)。
   /// 旧实现每个被拒事件都触发一次全量重拉,峰值 ~40 次/秒。
   void _scheduleSourceResync({required String reason}) {
-    if (_disposed || _resyncTimer != null) return;
-    // 正在跑的那一轮不能顶替,但**也不能把请求丢掉**。
-    //
-    // 这里原来直接 return,于是「当前这轮同步的结果本身有问题、需要再来一次」
-    // 的请求会被静默吞掉 —— 空快照守卫排的补货正是这种:它必然在一轮同步
-    // 的执行过程中发出。丢了就等下一次碰巧的触发,列表在那之前一直是残缺的。
-    if (_resyncRunning) {
+    if (_disposed) return;
+    // select/open/force-full 正在建立权威历史时，announce 只能排队。让它另起
+    // generation 会作废在途快照；若新一轮又拿持久化 cursor 得到空 replay，
+    // 客户端就会落入“只有实时新消息、没有历史和加载槽”的状态。
+    if (_activeSyncGeneration != 0 || _resyncRunning) {
       _pendingResyncReason ??= reason;
       return;
     }
+    if (_resyncTimer != null) return;
     // 断线期间重同步只会空转失败:重连流程自己会触发首次同步。
-    if (_conn?.isOpen != true) return;
+    if (!isSyncTransportOpen) return;
     final base = math.min(8000, 250 * math.pow(2, _resyncAttempt).toInt());
     final delay = (base * (0.8 + _jitterRandom.nextDouble() * 0.4)).round();
     _resyncAttempt++;
     _logP2p('调度兜底重同步(reason=$reason, delay=${delay}ms, hub=$_hubV2)');
     _resyncTimer = Timer(Duration(milliseconds: delay), () async {
       _resyncTimer = null;
+      // 定时器排队后用户可能刚好切源；到点时再检查一次，不能抢占它的
+      // force-full generation。
+      if (_activeSyncGeneration != 0) {
+        _pendingResyncReason ??= reason;
+        return;
+      }
       _resyncRunning = true;
       try {
         // hub 模式走源级对账;直连模式重跑一次全量 _sync。
@@ -4287,16 +4406,10 @@ class PiSessionNotifier extends Notifier<PiState> {
         _eventStreaming = true;
         _syncStreamingFlag();
       case 'agent_end':
-        _eventStreaming = false;
-        _snapshotStreaming = false;
-        _sawInFlightMessage = false;
-        _syncStreamingFlag();
+        _finishTaskFromEvent();
         _scheduleContextRefresh();
       case 'agent_settled':
-        _eventStreaming = false;
-        _snapshotStreaming = false;
-        _sawInFlightMessage = false;
-        _syncStreamingFlag();
+        _finishTaskFromEvent();
         // compaction_end 可能在断线窗口丢失;settled 是宿主确认所有自动压缩、
         // 重试和排队工作都结束的最终边界,不能让按钮永久停在停止态。
         if (state.isCompacting) state = state.copyWith(isCompacting: false);
@@ -4907,13 +5020,14 @@ class PiSessionNotifier extends Notifier<PiState> {
 
   // -- entries ------------------------------------------------------------------
 
-  void _ingestEntry(Map<String, dynamic> entry) {
+  void _ingestEntry(Map<String, dynamic> entry, {bool advanceLeaf = true}) {
     final id = entry['id'] as String?;
     if (id != null) {
       // 不再对重复 id 早退:补齐式重同步需要就地更新已有条目
       // (_ingestMessage 对 user/assistant/custom 本就是幂等更新)。
       _seenEntryIds.add(id);
-      _leafId = id;
+      // 向前分页读的是旧历史，绝不能把“当前分支末端”倒退到最老一条。
+      if (advanceLeaf) _leafId = id;
     }
     switch (entry['type']) {
       case 'message':
@@ -5148,6 +5262,7 @@ class PiSessionNotifier extends Notifier<PiState> {
     // 列表清空的全部触发点都过这里,带原因进诊断日志 —— 「消息列表突然
     // 没了」类事故的取证就靠这行。
     _logP2p('清空对话列表(reason=$reason, items=${_items.length})');
+    _conversationHydrated = false;
     _items.clear();
     _itemsByKey.clear();
     _seenEntryIds.clear();

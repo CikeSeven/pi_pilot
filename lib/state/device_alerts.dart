@@ -25,9 +25,9 @@ class DeviceAlertsNotifier extends Notifier<void> {
   /// 扇出从 300 起,互不覆盖;回前台全扫取消对三段一视同仁。
   int _notificationId = 299;
 
-  /// 每台设备上一份 (isStreaming, backgroundFinishTick) 基线。
-  /// build() 是「watch 到变化就重跑」的模型,边沿检测靠自己 diff。
-  final Map<String, bool> _streaming = {};
+  /// 每台设备上一份 (taskCompletionTick, backgroundFinishTick) 基线。
+  /// build() 是「watch 到变化就重跑」的模型,完成只认显式 tick。
+  final Map<String, int> _completionTick = {};
   final Map<String, int> _finishTick = {};
 
   @override
@@ -35,29 +35,29 @@ class DeviceAlertsNotifier extends Notifier<void> {
     final manager = ref.watch(deviceManagerProvider);
     final rosterIds = {for (final d in manager.devices) d.id};
     // 设备从 roster 删除后清掉基线,避免无界累积。
-    _streaming.removeWhere((id, _) => !rosterIds.contains(id));
+    _completionTick.removeWhere((id, _) => !rosterIds.contains(id));
     _finishTick.removeWhere((id, _) => !rosterIds.contains(id));
 
     for (final device in manager.devices) {
       if (device.id == manager.activeDeviceId) {
         // 活跃设备交给 NotificationController。清掉基线:它变成非活跃时
         // 重新记基线,不把活跃期间的变化补发成通知。
-        _streaming.remove(device.id);
+        _completionTick.remove(device.id);
         _finishTick.remove(device.id);
         continue;
       }
       final snapshot = ref.watch(
         piSessionFamilyProvider(
           device.id,
-        ).select((s) => (s.isStreaming, s.backgroundFinishTick)),
+        ).select((s) => (s.taskCompletionTick, s.backgroundFinishTick)),
       );
-      final wasStreaming = _streaming[device.id];
+      final lastCompletion = _completionTick[device.id];
       final lastTick = _finishTick[device.id];
-      _streaming[device.id] = snapshot.$1;
+      _completionTick[device.id] = snapshot.$1;
       _finishTick[device.id] = snapshot.$2;
       // 首次见到这台设备:只记基线,不把接入前的状态补发成通知。
-      if (wasStreaming == null || lastTick == null) continue;
-      if (wasStreaming && !snapshot.$1) {
+      if (lastCompletion == null || lastTick == null) continue;
+      if (snapshot.$1 > lastCompletion) {
         _notifyTaskComplete(device);
       } else if (snapshot.$2 > lastTick) {
         _notifyBackgroundFinish(device);
@@ -67,8 +67,7 @@ class DeviceAlertsNotifier extends Notifier<void> {
 
   bool get _enabled => ref.read(settingsProvider).notificationsEnabled;
 
-  bool get _vibrate =>
-      ref.read(settingsProvider).notificationVibrationEnabled;
+  bool get _vibrate => ref.read(settingsProvider).notificationVibrationEnabled;
 
   /// 选中会话跑完(isStreaming true→false),标题复用活跃设备的格式。
   void _notifyTaskComplete(DeviceProfile device) {
