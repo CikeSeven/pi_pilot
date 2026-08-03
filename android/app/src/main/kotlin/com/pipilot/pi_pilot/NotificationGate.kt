@@ -86,6 +86,10 @@ enum class DeliveryState {
     /// 已显示过的事件再次到达,静默跳过。
     SUPPRESSED_DUPLICATE,
 
+    /// 事件到达时 App 正在前台 —— 用户就看着这个会话,系统通知纯属打扰。
+    /// 记为终态:断线重放的同一事件不会再补弹。
+    SUPPRESSED_FOREGROUND,
+
     /// 通知权限或渠道被关闭,无法显示。
     BLOCKED,
     ;
@@ -96,6 +100,7 @@ enum class DeliveryState {
         PENDING -> 1
         DISPLAY_REQUESTED -> 2
         SUPPRESSED_DUPLICATE -> 3
+        SUPPRESSED_FOREGROUND -> 3
         DISPLAY_CONFIRMED -> 4
         BLOCKED -> 4
     }
@@ -157,6 +162,7 @@ class NotificationDeduplicator(
                 DeliveryState.DISPLAY_REQUESTED,
                 DeliveryState.DISPLAY_CONFIRMED,
                 DeliveryState.SUPPRESSED_DUPLICATE,
+                DeliveryState.SUPPRESSED_FOREGROUND,
                 DeliveryState.BLOCKED,
                 -> return null
             }

@@ -41,7 +41,8 @@ export interface GenerationRecord {
   sourceId: string;
   taskGenerationId: string;
   /// completed 之后同一 generation 的 end/settled 不再生成新事件。
-  state: "in_flight" | "completed";
+  /// cancelled 是用户中断的收口:不产事件,也不许重启后恢复成 in_flight。
+  state: "in_flight" | "completed" | "cancelled";
   eventId?: string;
   at: string;
 }
@@ -359,6 +360,23 @@ export class NotificationEventStore {
       taskGenerationId,
       state: "completed",
       eventId,
+      at: new Date(this.now()).toISOString(),
+    };
+    this.appendSync("generation", record);
+    this.generations.set(taskGenerationId, record);
+    return true;
+  }
+
+  /// 用户中断的收口:不生成事件,但要把代次落了,否则 journal 里的
+  /// in_flight 记录会在 Bridge 重启后被 restoreGenerations 恢复,
+  /// 下一个 agent_end 到来时被当成在飞任务补发一条过期的完成通知。
+  cancelGeneration(taskGenerationId: string): boolean {
+    const existing = this.generations.get(taskGenerationId);
+    if (existing !== undefined && existing.state !== "in_flight") return false;
+    const record: GenerationRecord = {
+      sourceId: existing?.sourceId ?? "",
+      taskGenerationId,
+      state: "cancelled",
       at: new Date(this.now()).toISOString(),
     };
     this.appendSync("generation", record);

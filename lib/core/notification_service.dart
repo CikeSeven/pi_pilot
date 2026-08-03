@@ -130,6 +130,42 @@ class NotificationService {
     ticker: 'PiPilot 任务提醒',
   );
 
+  /// 完成通知专用:固定 id 复用同一槽位时,onlyAlertOnce 保证多个会话
+  /// 先后跑完只打扰一次(后到的静默更新,不重复响铃/震动)。
+  static final _quietTaskChannelAlertOnce = AndroidNotificationDetails(
+    _quietTaskChannelId,
+    '任务提醒（无震动）',
+    channelDescription: 'pi 任务完成、扩展等待输入、连接中断等提醒',
+    importance: Importance.max,
+    priority: Priority.max,
+    playSound: true,
+    enableVibration: false,
+    enableLights: true,
+    showWhen: true,
+    visibility: NotificationVisibility.public,
+    channelShowBadge: true,
+    category: AndroidNotificationCategory.message,
+    ticker: 'PiPilot 任务提醒',
+    onlyAlertOnce: true,
+  );
+
+  static final _vibratingTaskChannelAlertOnce = AndroidNotificationDetails(
+    _vibratingTaskChannelId,
+    '任务提醒（震动）',
+    channelDescription: 'pi 任务完成、扩展等待输入、连接中断等提醒',
+    importance: Importance.max,
+    priority: Priority.max,
+    playSound: true,
+    enableVibration: true,
+    enableLights: true,
+    showWhen: true,
+    visibility: NotificationVisibility.public,
+    channelShowBadge: true,
+    category: AndroidNotificationCategory.message,
+    ticker: 'PiPilot 任务提醒',
+    onlyAlertOnce: true,
+  );
+
   Future<void> init() async {
     if (_initialized) return;
     final pending = _initializing;
@@ -195,6 +231,7 @@ class NotificationService {
     required String title,
     required bool vibrate,
     String? body,
+    bool onlyAlertOnce = false,
   }) async {
     await init();
     if (!_initialized || !_permissionGranted) {
@@ -210,7 +247,11 @@ class NotificationService {
         title: title,
         body: body,
         notificationDetails: NotificationDetails(
-          android: vibrate ? _vibratingTaskChannel : _quietTaskChannel,
+          android: onlyAlertOnce
+              ? (vibrate
+                    ? _vibratingTaskChannelAlertOnce
+                    : _quietTaskChannelAlertOnce)
+              : (vibrate ? _vibratingTaskChannel : _quietTaskChannel),
         ),
       );
       await logDiagnostic('notification posted: id=$id vibrate=$vibrate');

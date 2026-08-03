@@ -699,7 +699,63 @@ const SESSION_MUTATING_COMMANDS = new Set([
 
 const streamingBySource = new Map<string, boolean>();
 
-function noteStreamingFromEvent(sourceId: string, eventType: unknown): void {
+/// 上次结束是否是用户中断。backgroundFinishTick 靠非选中会话的
+/// streaming true→false 边沿推导「跑完了」,中断也会翻出同样的边沿,
+/// 光靠边沿手机无法区分 —— 这个标记随 hub_sessions_changed 下发,
+/// 让手机跳过中断造成的假完成。agent_start/正常结束时清除。
+const lastEndAbortedBySource = new Map<string, boolean>();
+
+/// agent_end 的结束方式标记。扩展帧上由 desktop relay 显式带
+/// (extension/src/index.ts agentEndFrame);headless RPC 帧没有显式标记时
+/// 从 messages 里最后一个 assistant 的 stopReason 派生 —— 与 pi 内部
+/// _willRetryAfterAgentEnd 看的是同一位置。
+function agentEndFlags(event: JsonObject): { willRetry: boolean; aborted: boolean } {
+  let stopReason: unknown;
+  const messages = event.messages;
+  if (Array.isArray(messages)) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i] as { role?: unknown; stopReason?: unknown } | null;
+      if (msg?.role === "assistant") {
+        stopReason = msg.stopReason;
+        break;
+      }
+    }
+  }
+  return {
+    willRetry: event.willRetry === true,
+    aborted: event.aborted === true || stopReason === "aborted",
+  };
+}
+
+/// 把派生出的 agent_end 结束标记写回事件载荷,让广播/journal/手机/原生
+/// watcher 看到的帧与 bridge 内部判定一致(headless RPC 帧只有 messages,
+/// 手机端不该各自再派生一遍)。只增不改:已有显式标记或无需标记时原样返回。
+function withAgentEndFlags(event: JsonObject): JsonObject {
+  if (event.type !== "agent_end") return event;
+  const { willRetry, aborted } = agentEndFlags(event);
+  if (
+    (willRetry === false || event.willRetry === true) &&
+    (aborted === false || event.aborted === true)
+  ) {
+    return event;
+  }
+  return {
+    ...event,
+    ...(willRetry ? { willRetry: true } : {}),
+    ...(aborted ? { aborted: true } : {}),
+  };
+}
+
+function noteStreamingFromEvent(sourceId: string, event: JsonObject): void {
+  const eventType = event.type;
+  // agent_end(willRetry):API 报错后 pi 还会自动重试,本轮并未结束。
+  // 现在翻 false 会立刻生成一条「任务完成」误报,而重试的 agent_start
+  // 紧跟着又到 —— 收口交给重试后的最终 agent_end / agent_settled。
+  // agent_end(aborted):用户中断,轮次确实结束(streaming 要翻 false),
+  // 但不该生成「任务完成」事件 —— 代次按取消丢弃。
+  const { willRetry, aborted } =
+    eventType === "agent_end" ? agentEndFlags(event) : { willRetry: false, aborted: false };
+  if (eventType === "agent_end" && willRetry) return;
   const next =
     eventType === "agent_start"
       ? true
@@ -710,11 +766,18 @@ function noteStreamingFromEvent(sourceId: string, eventType: unknown): void {
   // 值没真翻就不广播 —— 每个 desktop_event 都会过这里,不能每次都刷。
   if ((streamingBySource.get(sourceId) ?? false) === next) return;
   streamingBySource.set(sourceId, next);
+  if (next || !(eventType === "agent_end" && aborted)) {
+    lastEndAbortedBySource.delete(sourceId);
+  } else {
+    lastEndAbortedBySource.set(sourceId, true);
+  }
   // 通知事件挂在这个权威边沿上,而不是相信手机上报的 isStreaming ——
   // 手机的状态会因进程冻结、socket 半开、状态防抖而落后甚至永久错位。
   // agent_end 与 agent_settled 都会走到这里,靠 taskGenerationId 去重成一条。
   if (next) {
     notificationDetector.onTaskStart(sourceId);
+  } else if (eventType === "agent_end" && aborted) {
+    notificationDetector.onTaskAborted(sourceId);
   } else {
     const snapshot = sources.getSnapshot(sourceId);
     const sessionId =
@@ -837,6 +900,7 @@ function collectSessions(cwd?: string): JsonObject[] {
             : "dormant",
       connected: source.connected,
       streaming: sourceIsStreaming(source.id),
+      lastEndAborted: lastEndAbortedBySource.get(source.id) === true,
       pid: live?.proc.pid ?? null,
     });
   }
@@ -2672,7 +2736,8 @@ const pool = new PiPool(config, {
       resolvePending(message.id, message, entry.sourceId);
       return;
     }
-    noteStreamingFromEvent(entry.sourceId, message.type);
+    message = withAgentEndFlags(message);
+    noteStreamingFromEvent(entry.sourceId, message);
     pool.setStreaming(entry.sourceId, sourceIsStreaming(entry.sourceId));
     const event = sources.recordLocalEvent(entry.sourceId, message);
     if (event.ok) broadcastSourceEvent(event.event);
@@ -3015,11 +3080,12 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
         sendObject(desktop.ws, { type: "desktop_error", error: "invalid event" });
         return;
       }
+      const desktopEvent = withAgentEndFlags(msg.event as JsonObject);
       const result = sources.recordDesktopEvent(
         sourceId,
         msg.epoch,
         msg.seq,
-        msg.event as JsonObject,
+        desktopEvent,
       );
       if (!result.ok) {
         sendObject(desktop.ws, {
@@ -3028,7 +3094,7 @@ async function handleDesktopMessage(desktop: DesktopClient, text: string): Promi
         });
         return;
       }
-      noteStreamingFromEvent(sourceId, (msg.event as JsonObject).type);
+      noteStreamingFromEvent(sourceId, desktopEvent);
       broadcastSourceEvent(result.event);
       sendObject(desktop.ws, { type: "desktop_ack", epoch: msg.epoch, seq: msg.seq });
       return;

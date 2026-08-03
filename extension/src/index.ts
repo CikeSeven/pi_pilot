@@ -102,6 +102,36 @@ function patchAgentSessionCompactionControl(): void {
 patchAgentSessionCompactionControl();
 patchRunnerContext();
 
+/**
+ * 给 agent_end 帧补上 willRetry / aborted 标记。
+ *
+ * pi 给 session 订阅者的 agent_end 带 willRetry(agent-session.js 的
+ * _willRetryAfterAgentEnd),但扩展事件只有 messages。手机/Bridge/原生
+ * watcher 都靠这两个标记区分三种结束:
+ *  - willRetry:API 报错后还要自动重试 —— 不能当完成,否则会先弹
+ *    「任务完成」再看到重试的 agent_start。
+ *  - aborted:用户中断(电脑端 Esc / 手机端停止)—— 轮次确实结束,
+ *    但不该弹完成通知。
+ *
+ * 这里按 pi 的同一规则判:看 messages 里最后一个 assistant 的 stopReason。
+ * willRetry 判偏(重试被禁用/次数耗尽/错误不可重试)也无害:不重试时
+ * agent_settled 紧随其后,由它负责收口。
+ */
+export function agentEndFrame(event: unknown): unknown {
+  const source = (event ?? {}) as { messages?: unknown };
+  const messages = source.messages;
+  if (!Array.isArray(messages)) return event;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i] as { role?: unknown; stopReason?: unknown } | null;
+    if (msg?.role === "assistant") {
+      if (msg.stopReason === "error") return { ...source, willRetry: true };
+      if (msg.stopReason === "aborted") return { ...source, aborted: true };
+      return event;
+    }
+  }
+  return event;
+}
+
 export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   let relay: DesktopRelay | undefined;
   // 远程回退要用命令上下文(普通 ctx 上没有 navigateTree),这里缓存一次
@@ -152,7 +182,7 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
     // 一轮结束(含被中断):pi 把未发送的排队消息回填到电脑端输入框,
     // 镜像必须跟着清空,否则手机会一直显示一批不存在的待发消息。
     relay?.noteAborted(ctx);
-    relay?.emitBoundary(event, ctx);
+    relay?.emitBoundary(agentEndFrame(event), ctx);
   });
   pi.on("agent_settled", (event, ctx) => {
     relay?.setStreaming(false, ctx);

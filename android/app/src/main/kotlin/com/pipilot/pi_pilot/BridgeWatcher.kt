@@ -372,8 +372,17 @@ object BridgeWatcher {
             }
 
             // agent_end 与 agent_settled 都代表本轮结束,取先到的那个。
+            // 例外一:agent_end 带 willRetry 时(API 报错后电脑端会自动重试)
+            // 本轮还没结束,收口交给重试后的最终 agent_end / agent_settled。
+            // 例外二:agent_end 带 aborted 时(用户中断)轮次结束但不是
+            // 「完成」—— 翻 streaming 但不弹通知。
             "agent_end", "agent_settled" -> {
-                if (engine?.notificationProtocol != true) reconcileStreaming(run, false, true)
+                val type = frame.optString("type")
+                val willRetry = type == "agent_end" && frame.optBoolean("willRetry", false)
+                val aborted = type == "agent_end" && frame.optBoolean("aborted", false)
+                if (engine?.notificationProtocol != true && !willRetry) {
+                    reconcileStreaming(run, false, !aborted)
+                }
             }
 
             else -> {
@@ -477,7 +486,8 @@ object BridgeWatcher {
                 type = "task_completed",
                 title = title,
                 body = "点击查看结果",
-                collapseKey = null,
+                // 与协议路径一致:完成通知共享同一槽位,多会话完成只更新不新弹。
+                collapseKey = "task_completed",
                 vibrate = current.vibrate,
             ),
         )

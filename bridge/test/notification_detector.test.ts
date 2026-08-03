@@ -44,6 +44,38 @@ test("agent_end 与 agent_settled 对同一代次只生成一个完成事件", (
   assert.equal(detector.onTaskEnd("source-a"), undefined);
 });
 
+test("中断取消在飞代次:不产事件,后续 end/settled 也不补发", () => {
+  const { detector } = setup();
+  detector.onTaskStart("source-a");
+  detector.onTaskAborted("source-a");
+  // 中断后到达的 agent_settled 找不到在飞代次,绝不能凭空造事件。
+  assert.equal(detector.onTaskEnd("source-a"), undefined);
+});
+
+test("中断的代次重启后不复活,下一轮正常完成不受影响", () => {
+  const dir = tmpDir();
+  const first = setup({ dir });
+  first.detector.onTaskStart("source-a");
+  first.detector.onTaskAborted("source-a");
+
+  // 同一 journal 重建:cancelled 不是 in_flight,不能恢复成「任务还在跑」。
+  const second = setup({ dir });
+  assert.equal(second.store.inFlightGenerations().length, 0);
+  assert.equal(second.detector.onTaskEnd("source-a"), undefined);
+
+  // 下一轮正常完成:恰好一条,不多(中断没残留)不少(正常完成不受影响)。
+  second.detector.onTaskStart("source-a");
+  const done = second.detector.onTaskEnd("source-a");
+  assert.equal(done?.event.type, "task_completed");
+  assert.equal(second.detector.onTaskEnd("source-a"), undefined);
+});
+
+test("没有开始过的源上调中断是幂等空操作", () => {
+  const { detector } = setup();
+  detector.onTaskAborted("source-never-started");
+  assert.equal(detector.onTaskEnd("source-never-started"), undefined);
+});
+
 test("重复的 agent_start 不开新代次", () => {
   const { detector } = setup();
   const first = detector.onTaskStart("source-a");

@@ -18,6 +18,17 @@ class MainActivity : FlutterActivity() {
     /// 持有 system channel,用于把原生 ready 状态主动推给 Dart。
     private var systemMethodChannel: MethodChannel? = null
 
+    override fun onResume() {
+        super.onResume()
+        // 用户正在看 App:任务完成的系统通知由 NotificationGate 抑制。
+        AppForegroundTracker.resumed = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        AppForegroundTracker.resumed = false
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, systemChannel)

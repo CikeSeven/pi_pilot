@@ -89,6 +89,7 @@ class HubSession {
     required this.liveness,
     required this.connected,
     required this.streaming,
+    this.lastEndAborted = false,
     this.cwd,
     this.name,
     this.path,
@@ -106,6 +107,7 @@ class HubSession {
     },
     connected: map['connected'] == true,
     streaming: map['streaming'] == true,
+    lastEndAborted: map['lastEndAborted'] == true,
     cwd: map['cwd'] as String?,
     name: map['name'] as String?,
     path: map['path'] as String?,
@@ -118,6 +120,11 @@ class HubSession {
   final SessionLiveness liveness;
   final bool connected;
   final bool streaming;
+
+  /// 上次 streaming 翻空是用户中断造成的(backgroundFinishTick 靠边沿
+  /// 推导「跑完了」,没有这个标记中断也会被当成完成)。bridge 随
+  /// hub_sessions_changed 下发,agent_start/正常结束时清除。
+  final bool lastEndAborted;
   final String? cwd;
   final String? name;
   final String? path;

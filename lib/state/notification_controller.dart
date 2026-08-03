@@ -121,6 +121,12 @@ bool shouldShowTaskCompletionNotification({
 @visibleForTesting
 const connectionLostNotificationId = 2;
 
+/// 任务完成通知使用固定 id:多个会话先后跑完时后到的更新同一条(配合
+/// onlyAlertOnce 不再打扰),而不是各弹一条。与原生引擎的
+/// collapseKey=task_completed 同槽位语义;落在 Dart 侧 100 起分段内。
+@visibleForTesting
+const taskCompletionNotificationId = 100;
+
 /// 保证快速的断线/重连状态变化仍按发生顺序操作系统通知。
 @visibleForTesting
 class NotificationOperationSequencer {
@@ -548,9 +554,11 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
         session.sessionName;
   }
 
-  /// 当前选中会话收到了配对的 agent_end/agent_settled。只在后台且原生
-  /// owner 尚未接管时由 Dart 兜底；前台不补发系统通知。
-  void _notifyTaskComplete() {
+  /// 当前选中会话收到了配对的 agent_end/agent_settled,或某个后台会话
+  /// 跑完(title 会带上那个会话的名字)。只在后台且原生 owner 尚未接管
+  /// 时由 Dart 兜底;前台不补发系统通知。所有完成通知共用固定槽位:
+  /// 多会话完成只静默更新同一条,不刷屏。
+  void _notifyTaskComplete({String? title}) {
     if (!shouldShowTaskCompletionNotification(
       enabled: _enabled,
       inBackground: _inBackground,
@@ -558,18 +566,20 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
     )) {
       return;
     }
-    final id = ++_notificationId;
     unawaited(
       NotificationService.instance.show(
-        id: id,
-        title: taskCompletionTitle(_selectedSessionName()),
+        // 固定 id + onlyAlertOnce:多个会话先后跑完时后到的静默更新同一条,
+        // 而不是各弹一条(与原生引擎的 collapseKey=task_completed 同槽位语义)。
+        id: taskCompletionNotificationId,
+        title: title ?? taskCompletionTitle(_selectedSessionName()),
         body: '点击查看结果',
         vibrate: _vibrate,
+        onlyAlertOnce: true,
       ),
     );
     unawaited(
       NotificationService.instance.logDiagnostic(
-        'task complete trigger: id=$id background=$_inBackground',
+        'task complete trigger: id=$taskCompletionNotificationId background=$_inBackground',
       ),
     );
   }
@@ -605,14 +615,15 @@ class _NotificationControllerState extends ConsumerState<NotificationController>
       _notifyTaskComplete();
     });
 
-    // 后台会话跑完(并发会话:手机看着 A,B 在后台跑完了)
+    // 后台会话跑完(并发会话:手机看着 A,B 在后台跑完了)。与当前会话的
+    // 完成通知共用固定槽位:并发热完成只更新同一条,不刷屏。
     ref.listen(piSessionProvider.select((s) => s.backgroundFinishTick), (
       prev,
       next,
     ) {
       if (prev == null || next <= prev) return;
       final name = ref.read(piSessionProvider).backgroundFinishName;
-      _notify('${name ?? "另一个会话"} 已完成', '点击查看结果');
+      _notifyTaskComplete(title: '${name ?? "另一个会话"} 已完成');
     });
 
     // 扩展等待输入

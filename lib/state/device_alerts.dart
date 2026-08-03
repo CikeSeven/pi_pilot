@@ -21,9 +21,10 @@ final deviceAlertsProvider = NotifierProvider<DeviceAlertsNotifier, void>(
 );
 
 class DeviceAlertsNotifier extends Notifier<void> {
-  /// 任务通知 id 分段:活跃设备 Dart 侧从 100 起、原生 watcher 从 200 起,
-  /// 扇出从 300 起,互不覆盖;回前台全扫取消对三段一视同仁。
-  int _notificationId = 299;
+  /// 任务通知 id 分段:活跃设备 Dart 侧从 100 起、原生 watcher 从 200 起、
+  /// 扇出固定用 300,互不覆盖;回前台全扫取消对三段一视同仁。
+  /// 扇出用固定 id(而非递增):多台设备先后跑完只静默更新同一条通知。
+  static const int _fanoutNotificationId = 300;
 
   /// 每台设备上一份 (taskCompletionTick, backgroundFinishTick) 基线。
   /// build() 是「watch 到变化就重跑」的模型,完成只认显式 tick。
@@ -81,11 +82,12 @@ class DeviceAlertsNotifier extends Notifier<void> {
         s.sessionName;
     unawaited(
       NotificationService.instance.show(
-        id: ++_notificationId,
+        id: _fanoutNotificationId,
         title: taskCompletionTitle(name),
         // 多台设备同时跑时,设备名是区分「谁完成了」的关键信息。
         body: '${device.name} · 点击查看结果',
         vibrate: _vibrate,
+        onlyAlertOnce: true,
       ),
     );
   }
@@ -96,10 +98,11 @@ class DeviceAlertsNotifier extends Notifier<void> {
     final s = ref.read(piSessionFamilyProvider(device.id));
     unawaited(
       NotificationService.instance.show(
-        id: ++_notificationId,
+        id: _fanoutNotificationId,
         title: '${s.backgroundFinishName ?? "另一个会话"} 已完成',
         body: device.name,
         vibrate: _vibrate,
+        onlyAlertOnce: true,
       ),
     );
   }

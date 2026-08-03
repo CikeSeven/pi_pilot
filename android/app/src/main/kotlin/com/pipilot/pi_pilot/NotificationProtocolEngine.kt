@@ -313,7 +313,12 @@ class NotificationProtocolEngine(
             type = type,
             title = presentation?.optString("title")?.takeIf { it.isNotEmpty() } ?: "PiPilot",
             body = presentation?.optString("body")?.takeIf { it.isNotEmpty() },
-            collapseKey = event.optString("collapseKey").takeIf { it.isNotEmpty() },
+            // 完成通知全部落同一个槽位:多个会话先后跑完时,后到的更新
+            // 同一条通知(onlyAlertOnce 下不再响铃),而不是各弹一条。
+            collapseKey = when (type) {
+                "task_completed" -> "task_completed"
+                else -> event.optString("collapseKey").takeIf { it.isNotEmpty() }
+            },
             vibrate = vibrate,
             silent = silent,
         )
@@ -388,6 +393,7 @@ class NotificationProtocolEngine(
             DeliveryState.DISPLAY_REQUESTED -> "display_requested"
             DeliveryState.DISPLAY_CONFIRMED -> "display_confirmed"
             DeliveryState.SUPPRESSED_DUPLICATE -> "suppressed_duplicate"
+            DeliveryState.SUPPRESSED_FOREGROUND -> "suppressed_foreground"
             DeliveryState.BLOCKED -> "blocked_permission"
         }
     }

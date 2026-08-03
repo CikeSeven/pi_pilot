@@ -3441,13 +3441,13 @@ class PiSessionNotifier extends Notifier<PiState> {
     }
   }
 
-  void _finishTaskFromEvent() {
+  void _finishTaskFromEvent({bool notify = true}) {
     final completed = _eventStreaming;
     _eventStreaming = false;
     _snapshotStreaming = false;
     _sawInFlightMessage = false;
     _syncStreamingFlag();
-    if (completed) {
+    if (completed && notify) {
       state = state.copyWith(taskCompletionTick: state.taskCompletionTick + 1);
     }
   }
@@ -3741,6 +3741,11 @@ class PiSessionNotifier extends Notifier<PiState> {
   @visibleForTesting
   void debugApplyPiEvent(Map<String, dynamic> event) => _applyPiEvent(event);
 
+  /// 测试缝隙:直接喂一份会话表,验证后台会话完成/中断的 tick 判定。
+  @visibleForTesting
+  void debugApplySessionsChanged(List<Map<String, dynamic>> sessions) =>
+      _onSessionsChanged({'sessions': sessions});
+
   /// 测试缝隙:读往前分页游标(断言「标志为真时游标必须存在」)。
   @visibleForTesting
   String? get debugOldestEntryId => _oldestEntryId;
@@ -3993,6 +3998,9 @@ class PiSessionNotifier extends Notifier<PiState> {
     for (final entry in next) {
       if (entry.streaming || entry.sourceId == selected) continue;
       if (!wasStreaming.contains(entry.sessionId)) continue;
+      // 中断造成的翻空不是「跑完了」:bridge 在会话帧上带了
+      // lastEndAborted 标记(见 hub_models.dart),跳过不记。
+      if (entry.lastEndAborted) continue;
       state = state.copyWith(
         backgroundFinishTick: state.backgroundFinishTick + 1,
         backgroundFinishName: entry.displayName,
@@ -4406,7 +4414,15 @@ class PiSessionNotifier extends Notifier<PiState> {
         _eventStreaming = true;
         _syncStreamingFlag();
       case 'agent_end':
-        _finishTaskFromEvent();
+        // aborted:用户中断(电脑端 Esc / 手机端停止),轮次结束但不是
+        // 「完成」—— 重置流式状态,不推完成 tick、不弹通知。
+        // willRetry:API 报错后电脑端会自动重试,本轮还没结束 —— 收口交给
+        // 重试后的最终 agent_end 或 agent_settled,否则会误报「任务完成」。
+        if (event['aborted'] == true) {
+          _finishTaskFromEvent(notify: false);
+        } else if (event['willRetry'] != true) {
+          _finishTaskFromEvent();
+        }
         _scheduleContextRefresh();
       case 'agent_settled':
         _finishTaskFromEvent();
@@ -4636,7 +4652,11 @@ class PiSessionNotifier extends Notifier<PiState> {
             bubble.thinkingLenSeen = thinking.length;
           }
           _streamingAssistant = null;
-          _noteAssistantError(item: bubble, stopReason: stopReason);
+          _noteAssistantError(
+            item: bubble,
+            stopReason: stopReason,
+            errorMessage: message['errorMessage'] as String?,
+          );
         } else {
           _ingestMessage(message);
         }
@@ -4722,30 +4742,68 @@ class PiSessionNotifier extends Notifier<PiState> {
       );
       bubble.thinkingLenSeen = thinking.length;
     }
-    // 流式 error delta:reason 为 aborted/error。message_end 可能随后到
+    // 流式 error delta:reason 为 aborted/error,error 是完整消息,
+    // 其 errorMessage 就是电脑端展示的具体错误内容。message_end 可能随后到
     // 也可能在断层里丢掉,这里先标记并提示,避免错误被吞。
     final delta = event['assistantMessageEvent'];
     if (delta is Map<String, dynamic> && delta['type'] == 'error') {
       final reason = delta['reason'] as String?;
       bubble.stopReason = reason ?? 'error';
-      _noteAssistantError(item: bubble, stopReason: bubble.stopReason);
+      final deltaError = delta['error'];
+      _noteAssistantError(
+        item: bubble,
+        stopReason: bubble.stopReason,
+        errorMessage: deltaError is Map<String, dynamic>
+            ? deltaError['errorMessage'] as String?
+            : null,
+      );
     }
     _emit();
   }
 
   /// assistant 消息因 error/aborted 终止时发一条系统提示,避免静默失败。
-  /// 用 _erroredAssistantKeys 去重,同一气泡只提示一次。
-  final Set<String> _erroredAssistantKeys = {};
-  void _noteAssistantError({AssistantItem? item, String? stopReason}) {
+  /// 与电脑端一致带上具体错误内容(pi 的 AssistantMessage.errorMessage,
+  /// 如 "429 rate limit")。同一气泡只提示一次;但流式 error delta 可能先到、
+  /// 带完整 errorMessage 的 message_end 后到 —— 后者若更详细,原位升级文本。
+  final Map<String, SystemItem> _erroredAssistantNotes = {};
+  void _noteAssistantError({
+    AssistantItem? item,
+    String? stopReason,
+    String? errorMessage,
+  }) {
     if (item == null) return;
     final isErr = stopReason == 'error' || stopReason == 'aborted';
     if (!isErr) return;
-    if (!_erroredAssistantKeys.add(item.key)) return; // 已提示
     final label = stopReason == 'aborted' ? '已中断' : '出错';
-    _addSystem(
-      '助手响应$label${item.text.isEmpty ? "(无输出)" : ""}',
-      SystemKind.error,
+    // 中断是用户主动行为,不附错误详情;出错则与桌面端一致展示原文。
+    // provider 返回的错误可能是长 JSON,截断防刷屏。
+    var detail = stopReason == 'error' ? (errorMessage?.trim() ?? '') : '';
+    if (detail.length > 600) detail = '${detail.substring(0, 600)}…';
+    final text =
+        '助手响应$label${item.text.isEmpty ? "(无输出)" : ""}'
+        '${detail.isNotEmpty ? ':$detail' : ''}';
+    final existing = _erroredAssistantNotes[item.key];
+    if (existing != null) {
+      if (existing.text == text) return; // 已提示
+      final index = _items.indexOf(existing);
+      final upgraded = SystemItem(existing.key, text: text, kind: existing.kind);
+      if (index >= 0) {
+        _items[index] = upgraded;
+      } else {
+        _addItem(upgraded);
+      }
+      _erroredAssistantNotes[item.key] = upgraded;
+      _emit();
+      return;
+    }
+    final note = SystemItem(
+      'sys:${++_systemSeq}',
+      text: text,
+      kind: SystemKind.error,
     );
+    _erroredAssistantNotes[item.key] = note;
+    _addItem(note);
+    _emit();
   }
 
   void _onToolStart(Map<String, dynamic> event) {
@@ -5128,6 +5186,7 @@ class PiSessionNotifier extends Notifier<PiState> {
         _noteAssistantError(
           item: _itemsByKey[key] as AssistantItem?,
           stopReason: stopReason,
+          errorMessage: message['errorMessage'] as String?,
         );
         // 工具参数只存在于 assistant 条目的 toolCall 块上,**不在** toolResult 上。
         // 以前这里只取 text/thinking,toolCall 块被整个丢掉,于是历史回放出来的

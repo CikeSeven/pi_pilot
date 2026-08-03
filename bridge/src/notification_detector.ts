@@ -106,6 +106,16 @@ export class NotificationDetector {
     return generationId;
   }
 
+  /// 任务被用户中断(电脑端 Esc / 手机端停止)。轮次确实结束,但这不是
+  /// 「完成」——不产事件,只把在飞代次取消掉。不取消的话 journal 里的
+  /// in_flight 会在重启后复活,被下一个 agent_end 补发成过期完成通知。
+  onTaskAborted(sourceId: string): void {
+    const generationId = this.activeGeneration.get(sourceId);
+    if (generationId === undefined) return;
+    this.store.cancelGeneration(generationId);
+    this.activeGeneration.delete(sourceId);
+  }
+
   /// 任务结束。返回 undefined 表示这一代已经通知过了 ——
   /// 这正是 agent_end 与 agent_settled 去重的落点。
   onTaskEnd(

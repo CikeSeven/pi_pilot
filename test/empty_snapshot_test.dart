@@ -989,4 +989,214 @@ void main() {
       expect((notifier.state.items.last as SystemItem).kind, SystemKind.error);
     });
   });
+
+  group('完成通知边界:中断与自动重试不冒充完成', () {
+    test('用户中断的 agent_end 收口但不推进完成 tick', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({'type': 'agent_start'});
+      notifier.debugApplyPiEvent({'type': 'agent_end', 'aborted': true});
+      // settled 紧随:中断的轮次已收口,settled 也不能再补 tick。
+      notifier.debugApplyPiEvent({'type': 'agent_settled'});
+
+      expect(notifier.state.taskCompletionTick, 0);
+      expect(notifier.state.isStreaming, isFalse);
+    });
+
+    test('willRetry 的 agent_end 不收口,重试后的最终结束才记完成', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({'type': 'agent_start'});
+      notifier.debugApplyPiEvent({'type': 'agent_end', 'willRetry': true});
+      // API 报错后电脑端会自动重试:流式状态必须保持,tick 不动。
+      expect(notifier.state.taskCompletionTick, 0);
+      expect(notifier.state.isStreaming, isTrue);
+
+      // 重试:新的 agent_start 是幂等的,最终 agent_end 才收口。
+      notifier.debugApplyPiEvent({'type': 'agent_start'});
+      notifier.debugApplyPiEvent({'type': 'agent_end'});
+      notifier.debugApplyPiEvent({'type': 'agent_settled'});
+
+      expect(notifier.state.taskCompletionTick, 1);
+      expect(notifier.state.isStreaming, isFalse);
+    });
+
+    test('后台会话中断翻空不记 backgroundFinishTick', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial().copyWith(
+        selectedSourceId: 'desktop:1',
+        sessions: const [
+          HubSession(
+            sessionId: 'sess-2',
+            sourceId: 'headless:2',
+            liveness: SessionLiveness.headless,
+            connected: true,
+            streaming: true,
+          ),
+        ],
+      );
+      final notifier = container.read(_provider.notifier);
+
+      // 中断翻空:bridge 在会话帧上带了 lastEndAborted,不是「跑完了」。
+      notifier.debugApplySessionsChanged([
+        {
+          'sessionId': 'sess-2',
+          'sourceId': 'headless:2',
+          'liveness': 'headless',
+          'connected': true,
+          'streaming': false,
+          'lastEndAborted': true,
+        },
+      ]);
+      expect(notifier.state.backgroundFinishTick, 0);
+
+      // 对照:正常结束(无 aborted 标记)要记一笔。
+      notifier.debugApplySessionsChanged([
+        {
+          'sessionId': 'sess-2',
+          'sourceId': 'headless:2',
+          'liveness': 'headless',
+          'connected': true,
+          'streaming': true,
+        },
+      ]);
+      notifier.debugApplySessionsChanged([
+        {
+          'sessionId': 'sess-2',
+          'sourceId': 'headless:2',
+          'liveness': 'headless',
+          'connected': true,
+          'streaming': false,
+        },
+      ]);
+      expect(notifier.state.backgroundFinishTick, 1);
+    });
+  });
+
+  group('错误提示带具体内容', () {
+    test('message_end 的 errorMessage 显示在错误提示里', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({
+        'type': 'message_start',
+        'message': {'role': 'assistant', 'timestamp': 1000, 'content': []},
+      });
+      notifier.debugApplyPiEvent({
+        'type': 'message_end',
+        'message': {
+          'role': 'assistant',
+          'timestamp': 1000,
+          'content': [],
+          'stopReason': 'error',
+          'errorMessage': '429 rate limit exceeded',
+        },
+      });
+
+      final errors = notifier.state.items.whereType<SystemItem>().where(
+            (i) => i.kind == SystemKind.error,
+          );
+      expect(errors.length, 1);
+      expect(errors.single.text, contains('429 rate limit exceeded'));
+      expect(errors.single.text, contains('出错'));
+    });
+
+    test('流式 error delta 的 errorMessage 也能显示', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({
+        'type': 'message_start',
+        'message': {'role': 'assistant', 'timestamp': 1000, 'content': []},
+      });
+      notifier.debugApplyPiEvent({
+        'type': 'message_update',
+        'message': {'role': 'assistant', 'timestamp': 1000, 'content': []},
+        'assistantMessageEvent': {
+          'type': 'error',
+          'reason': 'error',
+          'error': {'errorMessage': 'connection reset by peer'},
+        },
+      });
+
+      final errors = notifier.state.items.whereType<SystemItem>().where(
+            (i) => i.kind == SystemKind.error,
+          );
+      expect(errors.length, 1);
+      expect(errors.single.text, contains('connection reset by peer'));
+    });
+
+    test('delta 先到没详情时,message_end 原位升级而不是追加第二条', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({
+        'type': 'message_start',
+        'message': {'role': 'assistant', 'timestamp': 1000, 'content': []},
+      });
+      // 旧版 pi 的 error delta 不带 error 消息体:先出无详情提示。
+      notifier.debugApplyPiEvent({
+        'type': 'message_update',
+        'message': {'role': 'assistant', 'timestamp': 1000, 'content': []},
+        'assistantMessageEvent': {'type': 'error', 'reason': 'error'},
+      });
+      notifier.debugApplyPiEvent({
+        'type': 'message_end',
+        'message': {
+          'role': 'assistant',
+          'timestamp': 1000,
+          'content': [],
+          'stopReason': 'error',
+          'errorMessage': 'model overloaded',
+        },
+      });
+
+      final errors = notifier.state.items.whereType<SystemItem>().where(
+            (i) => i.kind == SystemKind.error,
+          );
+      expect(errors.length, 1, reason: '升级不是追加,仍只有一条提示');
+      expect(errors.single.text, contains('model overloaded'));
+    });
+
+    test('中断是用户主动行为,不附错误详情', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      _SnapshotSession.nextInitial = PiState.initial();
+      final notifier = container.read(_provider.notifier);
+
+      notifier.debugApplyPiEvent({
+        'type': 'message_start',
+        'message': {'role': 'assistant', 'timestamp': 1000, 'content': []},
+      });
+      notifier.debugApplyPiEvent({
+        'type': 'message_end',
+        'message': {
+          'role': 'assistant',
+          'timestamp': 1000,
+          'content': [],
+          'stopReason': 'aborted',
+          'errorMessage': 'Request was aborted',
+        },
+      });
+
+      final errors = notifier.state.items.whereType<SystemItem>().where(
+            (i) => i.kind == SystemKind.error,
+          );
+      expect(errors.length, 1);
+      expect(errors.single.text, '助手响应已中断(无输出)');
+    });
+  });
 }

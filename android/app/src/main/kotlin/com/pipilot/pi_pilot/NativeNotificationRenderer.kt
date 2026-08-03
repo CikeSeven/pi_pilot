@@ -226,6 +226,13 @@ class NotificationGate(
             Log.i(TAG, "suppressed duplicate ${shortId(event.eventId)}")
             return DeliveryState.SUPPRESSED_DUPLICATE
         }
+        if (event.type == "task_completed" && AppForegroundTracker.resumed) {
+            // 用户正看着这个会话:结果就在屏幕上,系统通知纯属打扰。
+            // 先 claim 再抑制:事件已消费并落表,断线重放不会再补弹。
+            deduplicator.markState(scope, event.eventId, DeliveryState.SUPPRESSED_FOREGROUND)
+            Log.i(TAG, "suppressed foreground ${shortId(event.eventId)}")
+            return DeliveryState.SUPPRESSED_FOREGROUND
+        }
         if (!renderer.notificationsEnabled() || renderer.channelBlocked(event.vibrate, event.silent)) {
             // 被阻塞是终态:再重试也不会显示。但 cursor 仍可安全推进,
             // 因为「已安全处理」不等于「用户看见了」。
