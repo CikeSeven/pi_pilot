@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../state/back_dispatch.dart';
 import '../../../state/pi_session.dart';
 import '../../theme/motion.dart';
 import '../../theme/shapes.dart';
@@ -304,8 +305,6 @@ class ModelPicker extends ConsumerStatefulWidget {
 }
 
 class _ModelPickerState extends ConsumerState<ModelPicker> {
-  bool _expanded = false;
-
   /// 展开卡内的视图:一级选模型,二级选思考深度。
   /// 选完模型自动进二级 —— 模型和深度是配套决策,不该让用户再点一次。
   _PickerView _view = _PickerView.models;
@@ -315,14 +314,12 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
   bool _loading = false;
 
   Future<void> _toggle() async {
-    if (_expanded) {
-      setState(() => _expanded = false);
+    if (ref.read(modelPickerExpandedProvider)) {
+      ref.read(modelPickerExpandedProvider.notifier).state = false;
       return;
     }
-    setState(() {
-      _expanded = true;
-      _view = _PickerView.models;
-    });
+    ref.read(modelPickerExpandedProvider.notifier).state = true;
+    setState(() => _view = _PickerView.models);
     if (_models == null && !_loading) {
       _loading = true;
       final notifier = ref.read(piSessionNotifierProvider);
@@ -352,7 +349,7 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
         ?.setModel(m.provider, m.id);
     if (!mounted) return;
     if (ok != true) {
-      setState(() => _expanded = false);
+      ref.read(modelPickerExpandedProvider.notifier).state = false;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('切换模型失败')));
@@ -362,7 +359,7 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
   }
 
   Future<void> _selectLevel(String level) async {
-    setState(() => _expanded = false);
+    ref.read(modelPickerExpandedProvider.notifier).state = false;
     final ok = await ref
         .read(piSessionNotifierProvider)
         ?.setThinkingLevel(level);
@@ -394,6 +391,8 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
 
   @override
   Widget build(BuildContext context) {
+    // 展开态事实来源在 provider:返回键要读它,也要能置 false 把卡收起来。
+    final expanded = ref.watch(modelPickerExpandedProvider);
     final colors = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final currentName =
@@ -413,11 +412,11 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 320),
       curve: Curves.easeInOutCubic,
-      width: _expanded ? expandedWidth : 132,
-      height: _expanded ? _expandedHeight : 32,
+      width: expanded ? expandedWidth : 132,
+      height: expanded ? _expandedHeight : 32,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(_expanded ? 18 : 16),
+        borderRadius: BorderRadius.circular(expanded ? 18 : 16),
         // 液态玻璃:比输入卡再亮一档,像嵌在卡里的玻璃珠。
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -447,7 +446,7 @@ class _ModelPickerState extends ConsumerState<ModelPicker> {
         color: Colors.transparent,
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 180),
-          child: !_expanded
+          child: !expanded
               ? _buildPill(colors, pillText)
               : (_view == _PickerView.models
                     ? _buildList(colors, currentId)

@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../state/back_dispatch.dart';
 import '../chat/chat_body.dart';
 import '../chat/widgets/island_bar.dart';
 import '../sessions/devices_page.dart';
@@ -36,6 +37,9 @@ class _AppShellState extends ConsumerState<AppShell> {
   // 对话是主页面,放第一页(initialPage 默认 0):往左依次是设备、设置。
   final _pageController = PageController();
   int _index = 0;
+
+  /// 返回键要关抽屉时,从这里够到 _ChatTab。
+  final _chatTabKey = GlobalKey<_ChatTabState>();
 
   static const _keys = [
     GlobalObjectKey('tab-chat'),
@@ -84,79 +88,112 @@ class _AppShellState extends ConsumerState<AppShell> {
         ? scheme.surfaceContainerHigh
         : scheme.surfaceContainerLow;
 
-    return Scaffold(
-      extendBody: true,
-      body: BackdropPaper(
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            // ── 三页(PageView 自带左右滑动,跟手、回弹) ──
-            // 向右开抽屉的手势在对话页**内部**处理(见 _ChatTab 里的
-            // DrawerDragRecognizer) —— 只有作为 PageView 的后代才能同台竞争,
-            // 抢得下整根 pointer,右滑拉开、不松手左滑推回都跟手。
-            PageView(
-              controller: _pageController,
-              onPageChanged: (i) => setState(() => _index = i),
-              children: [
-                _KeepAlivePage(key: _keys[0], child: const _ChatTab()),
-                _KeepAlivePage(key: _keys[1], child: const DevicesPage()),
-                _KeepAlivePage(key: _keys[2], child: const SettingsScreen()),
-              ],
-            ),
-            // ── 导航栏(指示器跟着滚动位置;可见性按页区分) ──
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: SafeArea(
-                top: false,
-                child: AnimatedBuilder(
-                  animation: _pageController,
-                  builder: (context, _) {
-                    final page = _pageController.hasClients
-                        ? (_pageController.page ?? 0.0)
-                        : 0.0;
-                    // 只「读」isScrollingNotifier 不够 —— 外层 AnimatedBuilder 的
-                    // 重建由 pixels 变化驱动,而滚动**停止**那一刻不再产生 pixels
-                    // 通知,builder 会拿到陈旧的 isScrolling=true,底栏卡住不淡出。
-                    // 内层直接监听 isScrollingNotifier,滚停瞬间立刻重建。
-                    return AnimatedBuilder(
-                      animation: _pageController.hasClients
-                          ? _pageController.position.isScrollingNotifier
-                          : const AlwaysStoppedAnimation<bool>(false),
-                      builder: (context, _) {
-                        final isScrolling =
-                            _pageController.hasClients &&
-                            _pageController.position.isScrollingNotifier.value;
-                        // 对话页(第 0 页)平时收起、滑动时现身;
-                        // 设备/设置页常驻显示。
-                        final onChat = _index == 0;
-                        final opacity = !onChat || isScrolling ? 1.0 : 0.0;
-                        return AnimatedOpacity(
-                          opacity: opacity,
-                          duration: const Duration(milliseconds: 200),
-                          child: IgnorePointer(
-                            ignoring: opacity < 0.5,
-                            child: Container(
-                              color: bg,
-                              child: LiquidNavBar(
-                                selectedIndex: _index,
-                                tabs: _tabs,
-                                onTap: _onTabTap,
-                                // 滚动时传浮点位置,指示器跟着滚动;
-                                // 停止时传 null,走内部水滴动画。
-                                position: isScrolling ? page : null,
+    // 返回键统一在这里分发:先收看得见的展开态,全收完了才放行退出。
+    // canPop 必须盯住全部拦截条件 —— 漏一个,那个状态下返回键就直接退应用。
+    final backTarget = resolveBackTarget(
+      drawerOpen: ref.watch(drawerOpenProvider),
+      pageIndex: _index,
+      islandExpanded: ref.watch(islandExpandedProvider),
+      modelPickerExpanded: ref.watch(modelPickerExpandedProvider),
+    );
+
+    return PopScope(
+      canPop: backTarget == BackTarget.exit,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        switch (backTarget) {
+          case BackTarget.exit:
+            break;
+          case BackTarget.drawer:
+            _chatTabKey.currentState?.closeDrawer();
+          case BackTarget.chatPage:
+            _onTabTap(0);
+          case BackTarget.island:
+            ref.read(islandExpandedProvider.notifier).state = false;
+          case BackTarget.modelPicker:
+            ref.read(modelPickerExpandedProvider.notifier).state = false;
+        }
+      },
+      child: Scaffold(
+        extendBody: true,
+        body: BackdropPaper(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // ── 三页(PageView 自带左右滑动,跟手、回弹) ──
+              // 向右开抽屉的手势在对话页**内部**处理(见 _ChatTab 里的
+              // DrawerDragRecognizer) —— 只有作为 PageView 的后代才能同台竞争,
+              // 抢得下整根 pointer,右滑拉开、不松手左滑推回都跟手。
+              PageView(
+                controller: _pageController,
+                onPageChanged: (i) => setState(() => _index = i),
+                children: [
+                  _KeepAlivePage(
+                    key: _keys[0],
+                    child: _ChatTab(key: _chatTabKey),
+                  ),
+                  _KeepAlivePage(key: _keys[1], child: const DevicesPage()),
+                  _KeepAlivePage(key: _keys[2], child: const SettingsScreen()),
+                ],
+              ),
+              // ── 导航栏(指示器跟着滚动位置;可见性按页区分) ──
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                  top: false,
+                  child: AnimatedBuilder(
+                    animation: _pageController,
+                    builder: (context, _) {
+                      final page = _pageController.hasClients
+                          ? (_pageController.page ?? 0.0)
+                          : 0.0;
+                      // 只「读」isScrollingNotifier 不够 —— 外层 AnimatedBuilder 的
+                      // 重建由 pixels 变化驱动,而滚动**停止**那一刻不再产生 pixels
+                      // 通知,builder 会拿到陈旧的 isScrolling=true,底栏卡住不淡出。
+                      // 内层直接监听 isScrollingNotifier,滚停瞬间立刻重建。
+                      return AnimatedBuilder(
+                        animation: _pageController.hasClients
+                            ? _pageController.position.isScrollingNotifier
+                            : const AlwaysStoppedAnimation<bool>(false),
+                        builder: (context, _) {
+                          final isScrolling =
+                              _pageController.hasClients &&
+                              _pageController
+                                  .position
+                                  .isScrollingNotifier
+                                  .value;
+                          // 对话页(第 0 页)平时收起、滑动时现身;
+                          // 设备/设置页常驻显示。
+                          final onChat = _index == 0;
+                          final opacity = !onChat || isScrolling ? 1.0 : 0.0;
+                          return AnimatedOpacity(
+                            opacity: opacity,
+                            duration: const Duration(milliseconds: 200),
+                            child: IgnorePointer(
+                              ignoring: opacity < 0.5,
+                              child: Container(
+                                color: bg,
+                                child: LiquidNavBar(
+                                  selectedIndex: _index,
+                                  tabs: _tabs,
+                                  onTap: _onTabTap,
+                                  // 滚动时传浮点位置,指示器跟着滚动;
+                                  // 停止时传 null,走内部水滴动画。
+                                  position: isScrolling ? page : null,
+                                ),
                               ),
                             ),
-                          ),
-                        );
-                      },
-                    );
-                  },
+                          );
+                        },
+                      );
+                    },
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -186,14 +223,14 @@ class _KeepAlivePageState extends State<_KeepAlivePage>
 }
 
 /// 会话 tab:灵动岛 + 消息流 + 自渲染的会话抽屉。
-class _ChatTab extends StatefulWidget {
-  const _ChatTab();
+class _ChatTab extends ConsumerStatefulWidget {
+  const _ChatTab({super.key});
 
   @override
-  State<_ChatTab> createState() => _ChatTabState();
+  ConsumerState<_ChatTab> createState() => _ChatTabState();
 }
 
-class _ChatTabState extends State<_ChatTab>
+class _ChatTabState extends ConsumerState<_ChatTab>
     with SingleTickerProviderStateMixin {
   final _islandKey = GlobalKey<DynamicIslandBarState>();
 
@@ -216,6 +253,24 @@ class _ChatTabState extends State<_ChatTab>
   }
 
   bool get _isOpen => _drawer.value > 0;
+
+  /// 上一次的开关镜像:只在 0/非 0 边沿写 provider,不逐帧写。
+  bool _drawerOpenMirror = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // PopScope 上移到了 AppShell,这里把抽屉开合镜像过去,
+    // 否则它不知道返回键该不该先关抽屉。
+    _drawer.addListener(_syncDrawerOpen);
+  }
+
+  void _syncDrawerOpen() {
+    final open = _isOpen;
+    if (open == _drawerOpenMirror) return;
+    _drawerOpenMirror = open;
+    ref.read(drawerOpenProvider.notifier).state = open;
+  }
 
   @override
   void dispose() {
@@ -268,83 +323,77 @@ class _ChatTabState extends State<_ChatTab>
       animation: _drawer,
       builder: (context, _) {
         final progress = _drawer.value;
-        return PopScope(
-          canPop: progress == 0,
-          onPopInvokedWithResult: (didPop, result) {
-            if (didPop) return;
-            closeDrawer();
-          },
-          child: Scaffold(
-            backgroundColor: Colors.transparent,
-            extendBodyBehindAppBar: true,
-            // 无常驻 AppBar —— 灵动岛浮在内容上,内容区全屏,
-            // 顶部渐变遮罩让滚上去的内容渐隐,岛只占自己那一小块。
-            body: RawGestureDetector(
-              // 识别器必须在 PageView **页面内部**才能与翻页同台竞争 ——
-              // 挂在外层或事后才挂都接不住当前这根 pointer。
-              //
-              // behavior 必须显强制指定:缺省时只有命中子树里实际 RenderBox 的
-              // 点才会派发事件。未连接态的 ChatBody 是 `Center` 包一小块内容,
-              // 屏幕大片区域是空的,手指落在那里识别器根本收不到事件。
-              // 用 translucent 而不是 opaque:后者会把点击也吐掉,聊天内容就
-              // 点不动了。translucent 只把自己加进命中链,不抢子节点的事件。
-              behavior: HitTestBehavior.translucent,
-              gestures: {
-                DrawerDragRecognizer:
-                    GestureRecognizerFactoryWithHandlers<DrawerDragRecognizer>(
-                      () => DrawerDragRecognizer(
-                        isOpen: () => _isOpen,
-                        onStart: _onDragStart,
-                        onDelta: _onDragDelta,
-                        onEnd: _onDragEnd,
-                        debugOwner: this,
-                      ),
-                      (recognizer) {},
+        // 返回键不在这里拦:PopScope 上移到 AppShell 统一分发
+        // (抽屉/灵动岛/模型选择/切页共用一条优先级链),
+        // 抽屉开态经 drawerOpenProvider 镜像过去。
+        return Scaffold(
+          backgroundColor: Colors.transparent,
+          extendBodyBehindAppBar: true,
+          // 无常驻 AppBar —— 灵动岛浮在内容上,内容区全屏,
+          // 顶部渐变遮罩让滚上去的内容渐隐,岛只占自己那一小块。
+          body: RawGestureDetector(
+            // 识别器必须在 PageView **页面内部**才能与翻页同台竞争 ——
+            // 挂在外层或事后才挂都接不住当前这根 pointer。
+            //
+            // behavior 必须显强制指定:缺省时只有命中子树里实际 RenderBox 的
+            // 点才会派发事件。未连接态的 ChatBody 是 `Center` 包一小块内容,
+            // 屏幕大片区域是空的,手指落在那里识别器根本收不到事件。
+            // 用 translucent 而不是 opaque:后者会把点击也吐掉,聊天内容就
+            // 点不动了。translucent 只把自己加进命中链,不抢子节点的事件。
+            behavior: HitTestBehavior.translucent,
+            gestures: {
+              DrawerDragRecognizer:
+                  GestureRecognizerFactoryWithHandlers<DrawerDragRecognizer>(
+                    () => DrawerDragRecognizer(
+                      isOpen: () => _isOpen,
+                      onStart: _onDragStart,
+                      onDelta: _onDragDelta,
+                      onEnd: _onDragEnd,
+                      debugOwner: this,
                     ),
+                    (recognizer) {},
+                  ),
+            },
+            child: NotificationListener<ScrollNotification>(
+              // 滚动列表时自动收起灵动岛(iOS 标准行为)。
+              onNotification: (n) {
+                if (n is ScrollStartNotification) {
+                  _islandKey.currentState?.collapse();
+                }
+                return false;
               },
-              child: NotificationListener<ScrollNotification>(
-                // 滚动列表时自动收起灵动岛(iOS 标准行为)。
-                onNotification: (n) {
-                  if (n is ScrollStartNotification) {
-                    _islandKey.currentState?.collapse();
-                  }
-                  return false;
-                },
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ChatBody(
-                      topPadding: MediaQuery.paddingOf(context).top + 52,
-                    ),
-                    // 灵动岛:平时小胶囊,点击展开成完整信息卡。
-                    DynamicIslandBar(key: _islandKey, onOpenDrawer: openDrawer),
-                    // 遮罩:跟着进度变深。progress == 0 时完全不拦点击。
-                    if (progress > 0)
-                      Positioned.fill(
-                        child: IgnorePointer(
-                          ignoring: progress == 0,
-                          child: GestureDetector(
-                            onTap: closeDrawer,
-                            child: ColoredBox(
-                              color: Colors.black54.withValues(
-                                alpha: 0.54 * progress,
-                              ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ChatBody(topPadding: MediaQuery.paddingOf(context).top + 52),
+                  // 灵动岛:平时小胶囊,点击展开成完整信息卡。
+                  DynamicIslandBar(key: _islandKey, onOpenDrawer: openDrawer),
+                  // 遮罩:跟着进度变深。progress == 0 时完全不拦点击。
+                  if (progress > 0)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        ignoring: progress == 0,
+                        child: GestureDetector(
+                          onTap: closeDrawer,
+                          child: ColoredBox(
+                            color: Colors.black54.withValues(
+                              alpha: 0.54 * progress,
                             ),
                           ),
                         ),
                       ),
-                    // 抽屉本体:按进度从左侧推出。跟手的关键就在这里 ——
-                    // progress 由 pointer delta 连续驱动,而不是一段固定动画。
-                    if (progress > 0)
-                      Positioned(
-                        left: (progress - 1) * width,
-                        top: 0,
-                        bottom: 0,
-                        width: width,
-                        child: SessionsDrawer(onClose: closeDrawer),
-                      ),
-                  ],
-                ),
+                    ),
+                  // 抽屉本体:按进度从左侧推出。跟手的关键就在这里 ——
+                  // progress 由 pointer delta 连续驱动,而不是一段固定动画。
+                  if (progress > 0)
+                    Positioned(
+                      left: (progress - 1) * width,
+                      top: 0,
+                      bottom: 0,
+                      width: width,
+                      child: SessionsDrawer(onClose: closeDrawer),
+                    ),
+                ],
               ),
             ),
           ),

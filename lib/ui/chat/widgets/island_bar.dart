@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../state/back_dispatch.dart';
 import '../../../state/pi_session.dart';
 import '../../sessions/session_tree_screen.dart';
 import '../../theme/shapes.dart';
@@ -51,8 +52,6 @@ String? islandWorkStatus(PiState state) {
 /// public 状态类:_ChatTab 通过 GlobalKey 调 collapse()(滚动列表时自动收起)。
 class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
     with SingleTickerProviderStateMixin {
-  bool _expanded = false;
-
   late final AnimationController _ctrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 380),
@@ -100,19 +99,15 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
   }
 
   void _toggle() {
-    setState(() => _expanded = !_expanded);
-    if (_expanded) {
-      _ctrl.forward();
-    } else {
-      _ctrl.reverse();
-    }
+    ref.read(islandExpandedProvider.notifier).state = !ref.read(
+      islandExpandedProvider,
+    );
   }
 
-  /// 收起(供外部调用:滚动列表时自动收起)。
+  /// 收起(供外部调用:滚动列表、抽屉拖动、返回键时自动收起)。
   void collapse() {
-    if (!_expanded) return;
-    setState(() => _expanded = false);
-    _ctrl.reverse();
+    if (!ref.read(islandExpandedProvider)) return;
+    ref.read(islandExpandedProvider.notifier).state = false;
   }
 
   void _collapse() => collapse();
@@ -148,6 +143,17 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
 
   @override
   Widget build(BuildContext context) {
+    // 展开态的唯一事实来源在 provider:返回键要靠它决定 canPop,
+    // 也要能从这里把岛收起来。动画 controller 只跟着 provider 走。
+    ref.listen<bool>(islandExpandedProvider, (prev, next) {
+      if (prev == next) return;
+      if (next) {
+        _ctrl.forward();
+      } else {
+        _ctrl.reverse();
+      }
+    });
+    final expanded = ref.watch(islandExpandedProvider);
     final state = ref.watch(piSessionProvider);
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
@@ -168,7 +174,7 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
       children: [
         // 展开时的全屏点击层:点岛外任意处收起。
         // translucent:滑动(切页/滚列表)穿透不受影响,只有 tap 触发收起。
-        if (_expanded)
+        if (expanded)
           Positioned.fill(
             child: GestureDetector(
               behavior: HitTestBehavior.translucent,

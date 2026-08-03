@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pi_pilot/state/back_dispatch.dart';
 import 'package:pi_pilot/ui/sessions/sessions_drawer.dart';
 import 'package:pi_pilot/ui/shell/app_shell.dart';
 import 'package:pi_pilot/ui/theme/app_theme.dart';
@@ -81,6 +82,57 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
+    expect(await pressBack(tester), isFalse);
+  });
+
+  testWidgets('灵动岛展开时返回键只收岛,不退出到桌面', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AppShell)),
+    );
+    container.read(islandExpandedProvider.notifier).state = true;
+    await tester.pump();
+
+    // 被拦下(true)并收岛;再按一下才放行给系统。
+    expect(await pressBack(tester), isTrue);
+    expect(container.read(islandExpandedProvider), isFalse);
+    expect(await pressBack(tester), isFalse);
+  });
+
+  testWidgets('模型选择展开时返回键只收选择器,不退出到桌面', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AppShell)),
+    );
+    container.read(modelPickerExpandedProvider.notifier).state = true;
+    await tester.pump();
+
+    expect(await pressBack(tester), isTrue);
+    expect(container.read(modelPickerExpandedProvider), isFalse);
+    expect(await pressBack(tester), isFalse);
+  });
+
+  testWidgets('设备页按返回切回对话页,再按才退出', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // 左滑翻页到「设备」(抽屉识别器对左滑会让位给 PageView)。
+    await tester.fling(find.byType(PageView), const Offset(-400, 0), 1000);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // 被拦下(true)并切回对话页;再按一下才放行给系统。
+    expect(await pressBack(tester), isTrue);
     expect(await pressBack(tester), isFalse);
   });
 }
