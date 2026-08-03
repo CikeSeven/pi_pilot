@@ -19,7 +19,13 @@
         android:label="PiPilot"
         android:name="${applicationName}"
         android:usesCleartextTraffic="true"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:enableOnBackInvokedCallback="true">
+        <!-- enableOnBackInvokedCallback:开启预测性返回手势(侧滑按住时
+             预览回到桌面/上一页)。Android 15+ 默认强制开启,13/14 必须
+             显式声明才有预览动画。PopScope 拦截时(抽屉/灵动岛/模型选择
+             展开)引擎会注册 back callback,此时不显示预览、松手走我们的
+             分发逻辑,行为不变。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

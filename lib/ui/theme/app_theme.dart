@@ -40,7 +40,10 @@ ThemeData _build(
 ) {
   const transitions = PageTransitionsTheme(
     builders: {
-      TargetPlatform.android: FadeForwardsPageTransitionsBuilder(),
+      // Android U+ 必须用预测返回变体:侧滑按住时才有「预览上一页」的
+      // 共享元素动画;普通转场/按钮返回自动回落为 FadeForwards,观感不变。
+      // 写成纯 FadeForwards 会把预测返回预览整个关掉。
+      TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
       TargetPlatform.iOS: FadeForwardsPageTransitionsBuilder(),
       TargetPlatform.macOS: FadeForwardsPageTransitionsBuilder(),
       TargetPlatform.linux: FadeForwardsPageTransitionsBuilder(),

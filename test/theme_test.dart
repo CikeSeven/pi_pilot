@@ -169,8 +169,16 @@ void main() {
     test('非 Cupertino 转场 / 水波纹保留但含蓄', () {
       for (final theme in [buildLightTheme(), buildDarkTheme()]) {
         expect(theme.splashFactory, isNot(NoSplash.splashFactory));
+        // Android 必须是预测返回变体:侧滑按住时才有「预览上一页」
+        // 动画;普通转场/按钮返回自动回落为 FadeForwards,观感一致。
+        // 写成纯 FadeForwards 会把预测返回预览整个关掉。
         expect(
           theme.pageTransitionsTheme.builders[TargetPlatform.android],
+          isA<PredictiveBackPageTransitionsBuilder>(),
+        );
+        // 其余平台维持 FadeForwards,不引入 Cupertino 转场。
+        expect(
+          theme.pageTransitionsTheme.builders[TargetPlatform.iOS],
           isA<FadeForwardsPageTransitionsBuilder>(),
         );
       }
