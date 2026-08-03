@@ -60,6 +60,49 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
   static const _collapsedH = 42.0;
   static const _expandedH = 108.0;
 
+  /// 液态玻璃质感:岛本体与左侧抽屉圆钮共用,保证两者观感一致。
+  static BoxDecoration _glassDecoration(
+    ColorScheme colors,
+    bool isDark, {
+    bool circle = false,
+  }) {
+    return BoxDecoration(
+      shape: circle ? BoxShape.circle : BoxShape.rectangle,
+      // 圆角和输入卡、PiShape.lg 统一。
+      borderRadius: circle ? null : BorderRadius.circular(PiShape.lg),
+      // 和输入框同一套语言。
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Color.lerp(
+            colors.surfaceContainerLow,
+            Colors.white,
+            isDark ? 0.06 : 0.15,
+          )!,
+          colors.surfaceContainerLow,
+          Color.lerp(
+            colors.surfaceContainerLow,
+            Colors.black,
+            isDark ? 0.08 : 0.04,
+          )!,
+        ],
+        stops: const [0.0, 0.5, 1.0],
+      ),
+      border: Border.all(
+        color: colors.outlineVariant.withValues(alpha: 0.3),
+        width: 0.5,
+      ),
+      boxShadow: [
+        BoxShadow(
+          color: colors.shadow.withValues(alpha: 0.08),
+          blurRadius: 16,
+          offset: const Offset(0, 4),
+        ),
+      ],
+    );
+  }
+
   /// 收起态宽度随文案自适应:短文案窄、长文案宽,
   /// working-activity 的长状态行不再被 ellipsis 截断。
   double _measureCollapsedW(
@@ -182,8 +225,10 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
             ),
           ),
         // 岛本体:一个 controller 驱动尺寸 + 双层内容交叉淡化。
+        // 收起时右移给左侧抽屉圆钮让位(12 + 42 + 8),展开时滑回 left:12。
         Positioned(
-          left: 12,
+          left: 0,
+          right: 0,
           top: topPad + 4,
           child: AnimatedBuilder(
             animation: _ctrl,
@@ -192,81 +237,97 @@ class DynamicIslandBarState extends ConsumerState<DynamicIslandBar>
               // 收起内容:前 35% 淡出;展开内容:后 45% 淡入。
               final collapsedOpacity = 1 - (t / 0.35).clamp(0.0, 1.0);
               final expandedOpacity = ((t - 0.55) / 0.45).clamp(0.0, 1.0);
-              return TweenAnimationBuilder<double>(
-                tween: Tween<double>(end: collapsedW),
-                duration: const Duration(milliseconds: 280),
-                curve: Curves.easeOutCubic,
-                builder: (context, animW, _) => Container(
-                  width: animW + (screenW - 24 - animW) * t,
-                  height: _collapsedH + (_expandedH - _collapsedH) * t,
-                  clipBehavior: Clip.antiAlias,
-                  decoration: BoxDecoration(
-                    // 圆角和输入卡、PiShape.lg 统一。
-                    borderRadius: BorderRadius.circular(PiShape.lg),
-                    // 液态玻璃:和输入框同一套语言。
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Color.lerp(
-                          colors.surfaceContainerLow,
-                          Colors.white,
-                          isDark ? 0.06 : 0.15,
-                        )!,
-                        colors.surfaceContainerLow,
-                        Color.lerp(
-                          colors.surfaceContainerLow,
-                          Colors.black,
-                          isDark ? 0.08 : 0.04,
-                        )!,
-                      ],
-                      stops: const [0.0, 0.5, 1.0],
-                    ),
-                    border: Border.all(
-                      color: colors.outlineVariant.withValues(alpha: 0.3),
-                      width: 0.5,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: colors.shadow.withValues(alpha: 0.08),
-                        blurRadius: 16,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
+              return Align(
+                alignment: Alignment.topLeft,
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    left: 12 + (1 - t) * (_collapsedH + 8),
                   ),
-                  // Material 提供 InkWell 水波宿主(transparent 不盖渐变)。
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        if (collapsedOpacity > 0)
-                          Opacity(
-                            opacity: collapsedOpacity,
-                            child: IgnorePointer(
-                              ignoring: t > 0.1,
-                              child: _buildCollapsed(
-                                context,
-                                state,
-                                colors,
-                                notifier,
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween<double>(end: collapsedW),
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeOutCubic,
+                    builder: (context, animW, _) => Container(
+                      width: animW + (screenW - 24 - animW) * t,
+                      height: _collapsedH + (_expandedH - _collapsedH) * t,
+                      clipBehavior: Clip.antiAlias,
+                      decoration: _glassDecoration(colors, isDark),
+                      // Material 提供 InkWell 水波宿主(transparent 不盖渐变)。
+                      child: Material(
+                        color: Colors.transparent,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            if (collapsedOpacity > 0)
+                              Opacity(
+                                opacity: collapsedOpacity,
+                                child: IgnorePointer(
+                                  ignoring: t > 0.1,
+                                  child: _buildCollapsed(
+                                    context,
+                                    state,
+                                    colors,
+                                    notifier,
+                                  ),
+                                ),
                               ),
-                            ),
-                          ),
-                        if (expandedOpacity > 0)
-                          Opacity(
-                            opacity: expandedOpacity,
-                            child: IgnorePointer(
-                              ignoring: t < 0.9,
-                              child: _buildExpanded(
-                                context,
-                                state,
-                                colors,
-                                notifier,
+                            if (expandedOpacity > 0)
+                              Opacity(
+                                opacity: expandedOpacity,
+                                child: IgnorePointer(
+                                  ignoring: t < 0.9,
+                                  child: _buildExpanded(
+                                    context,
+                                    state,
+                                    colors,
+                                    notifier,
+                                  ),
+                                ),
                               ),
-                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        // 抽屉圆钮:独立于岛本体,同一套液态玻璃质感;点击拉开会话抽屉。
+        // 岛展开时它随收起内容一起在前 35% 淡出,并把位置让还给岛。
+        Positioned(
+          left: 12,
+          top: topPad + 4,
+          child: AnimatedBuilder(
+            animation: _ctrl,
+            builder: (context, _) {
+              final t = Curves.easeInOutCubic.transform(_ctrl.value);
+              final opacity = 1 - (t / 0.35).clamp(0.0, 1.0);
+              if (opacity <= 0) return const SizedBox.shrink();
+              return Opacity(
+                opacity: opacity,
+                child: IgnorePointer(
+                  ignoring: t > 0.1,
+                  child: Container(
+                    width: _collapsedH,
+                    height: _collapsedH,
+                    decoration: _glassDecoration(colors, isDark, circle: true),
+                    child: Material(
+                      color: Colors.transparent,
+                      shape: const CircleBorder(),
+                      clipBehavior: Clip.antiAlias,
+                      child: Tooltip(
+                        message: '会话列表',
+                        child: InkWell(
+                          onTap: widget.onOpenDrawer,
+                          child: Icon(
+                            Icons.menu_rounded,
+                            size: 20,
+                            color: colors.onSurfaceVariant,
                           ),
-                      ],
+                        ),
+                      ),
                     ),
                   ),
                 ),

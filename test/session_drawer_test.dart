@@ -76,6 +76,19 @@ void main() {
     return gesture;
   }
 
+  testWidgets('灵动岛左侧圆钮:点击拉开会话抽屉', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(wrap());
+    await settle(tester);
+
+    expect(drawerReveal(tester), 0);
+    await tester.tap(find.byTooltip('会话列表'));
+    await settle(tester);
+
+    expect(find.byType(SessionsDrawer), findsOneWidget);
+    expect(drawerReveal(tester), greaterThan(0));
+  });
+
   testWidgets('右滑任意位置跟手拉开会话抽屉(不再限于左边缘)', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(wrap());
