@@ -39,7 +39,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
   }
 
-  /// 抽屉当前展开的宽度。0 = 完全关闭(不在树里)。
+  /// 抽屉当前展开的宽度。0 = 完全关闭(常驻树内、整体停在屏外)。
   ///
   /// 自渲染抽屉按进度定位:`left = (progress - 1) * width`,所以量它的左缘
   /// 就能反推进度,比去翻内部 AnimationController 稳。
@@ -253,8 +253,8 @@ void main() {
     );
     expect(island, isNotNull);
 
-    // 抽屉初始不在树里。
-    expect(find.byType(SessionsDrawer), findsNothing);
+    // 抽屉常驻树内,初始整体停在屏外。
+    expect(drawerReveal(tester), 0);
   });
 
   testWidgets('抽屉是会话列表,不做会话创建与目录管理', (tester) async {
@@ -448,7 +448,7 @@ void main() {
     await settle(tester);
     expect(harness['dev-work']!.selectedSources, ['win-2']);
     // 选完抽屉自己关上(onClose 回调)。
-    expect(find.byType(SessionsDrawer), findsNothing);
+    expect(drawerReveal(tester), 0);
   });
 
   testWidgets('关抽屉不会把焦点还给输入框(否则键盘每次都弹出来)', (tester) async {
@@ -469,11 +469,7 @@ void main() {
     // 先断言抽屉真的关了:早先这条用例点了遮罩却从不检查结果,
     // 以至于「抽屉开着时识别器在 pointer down 就 accept、竞技场当场拒掉
     // 所有 TapGestureRecognizer」的 bug(点击切换会话失灵)从这里溜过去。
-    expect(
-      find.byType(SessionsDrawer),
-      findsNothing,
-      reason: '点遮罩后抽屉必须关闭,否则遮罩上的点击也被手势吞了',
-    );
+    expect(drawerReveal(tester), 0, reason: '点遮罩后抽屉必须关闭,否则遮罩上的点击也被手势吞了');
     for (final editable in tester.widgetList<EditableText>(
       find.byType(EditableText),
     )) {

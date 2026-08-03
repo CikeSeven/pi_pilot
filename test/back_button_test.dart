@@ -60,8 +60,8 @@ void main() {
 
     // 返回被拦下(true = 没有冒泡给系统),抽屉关掉
     expect(await pressBack(tester), isTrue);
-    // 进度归零后抽屉整体从树里移除。
-    expect(find.byType(SessionsDrawer), findsNothing);
+    // 抽屉常驻树内(进度归零时整体停在屏外),判定看位置不看在不在树里。
+    expect(tester.getRect(find.byType(SessionsDrawer)).right, 0);
   });
 
   testWidgets('抽屉关掉之后再按返回才冒泡给系统(退出到桌面)', (tester) async {

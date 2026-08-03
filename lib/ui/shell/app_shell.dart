@@ -319,84 +319,127 @@ class _ChatTabState extends ConsumerState<_ChatTab>
   @override
   Widget build(BuildContext context) {
     final width = _drawerWidth(context);
+    // 返回键不在这里拦:PopScope 上移到 AppShell 统一分发
+    // (抽屉/灵动岛/模型选择/切页共用一条优先级链),
+    // 抽屉开态经 drawerOpenProvider 镜像过去。
+    //
+    // 顺滑的关键:这一层不再监听 _drawer —— 拖动与落位动画期间整页
+    // (尤其 ChatBody 的消息列表)一帧都不重建,逐帧变化的只有
+    // _DrawerOverlay 那一小块。
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      extendBodyBehindAppBar: true,
+      // 无常驻 AppBar —— 灵动岛浮在内容上,内容区全屏,
+      // 顶部渐变遮罩让滚上去的内容渐隐,岛只占自己那一小块。
+      body: RawGestureDetector(
+        // 识别器必须在 PageView **页面内部**才能与翻页同台竞争 ——
+        // 挂在外层或事后才挂都接不住当前这根 pointer。
+        //
+        // behavior 必须显强制指定:缺省时只有命中子树里实际 RenderBox 的
+        // 点才会派发事件。未连接态的 ChatBody 是 `Center` 包一小块内容,
+        // 屏幕大片区域是空的,手指落在那里识别器根本收不到事件。
+        // 用 translucent 而不是 opaque:后者会把点击也吐掉,聊天内容就
+        // 点不动了。translucent 只把自己加进命中链,不抢子节点的事件。
+        behavior: HitTestBehavior.translucent,
+        gestures: {
+          DrawerDragRecognizer:
+              GestureRecognizerFactoryWithHandlers<DrawerDragRecognizer>(
+                () => DrawerDragRecognizer(
+                  isOpen: () => _isOpen,
+                  onStart: _onDragStart,
+                  onDelta: _onDragDelta,
+                  onEnd: _onDragEnd,
+                  debugOwner: this,
+                ),
+                (recognizer) {},
+              ),
+        },
+        child: NotificationListener<ScrollNotification>(
+          // 滚动列表时自动收起灵动岛(iOS 标准行为)。
+          onNotification: (n) {
+            if (n is ScrollStartNotification) {
+              _islandKey.currentState?.collapse();
+            }
+            return false;
+          },
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ChatBody(topPadding: MediaQuery.paddingOf(context).top + 52),
+              // 灵动岛:平时小胶囊,点击展开成完整信息卡。
+              DynamicIslandBar(key: _islandKey, onOpenDrawer: openDrawer),
+              // 抽屉覆盖层:遮罩 + 抽屉本体,唯一跟 _drawer 逐帧重建的部分。
+              Positioned.fill(
+                child: _DrawerOverlay(
+                  animation: _drawer,
+                  width: width,
+                  onClose: closeDrawer,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 抽屉覆盖层:遮罩 + 抽屉本体。
+///
+/// 单独抽出来的意义在于**重建范围**:抽屉滑动期间每一帧只有这里 rebuild,
+/// 后面的 ChatBody/灵动岛完全不动。抽屉常驻树内(关着时停在屏外),
+/// 拖动的第一帧不用临时把会话列表建树;RepaintBoundary 让位移只更新
+/// 图层偏移,不触发抽屉内容重绘。
+class _DrawerOverlay extends StatelessWidget {
+  const _DrawerOverlay({
+    required this.animation,
+    required this.width,
+    required this.onClose,
+  });
+
+  final Animation<double> animation;
+  final double width;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _drawer,
-      builder: (context, _) {
-        final progress = _drawer.value;
-        // 返回键不在这里拦:PopScope 上移到 AppShell 统一分发
-        // (抽屉/灵动岛/模型选择/切页共用一条优先级链),
-        // 抽屉开态经 drawerOpenProvider 镜像过去。
-        return Scaffold(
-          backgroundColor: Colors.transparent,
-          extendBodyBehindAppBar: true,
-          // 无常驻 AppBar —— 灵动岛浮在内容上,内容区全屏,
-          // 顶部渐变遮罩让滚上去的内容渐隐,岛只占自己那一小块。
-          body: RawGestureDetector(
-            // 识别器必须在 PageView **页面内部**才能与翻页同台竞争 ——
-            // 挂在外层或事后才挂都接不住当前这根 pointer。
-            //
-            // behavior 必须显强制指定:缺省时只有命中子树里实际 RenderBox 的
-            // 点才会派发事件。未连接态的 ChatBody 是 `Center` 包一小块内容,
-            // 屏幕大片区域是空的,手指落在那里识别器根本收不到事件。
-            // 用 translucent 而不是 opaque:后者会把点击也吐掉,聊天内容就
-            // 点不动了。translucent 只把自己加进命中链,不抢子节点的事件。
-            behavior: HitTestBehavior.translucent,
-            gestures: {
-              DrawerDragRecognizer:
-                  GestureRecognizerFactoryWithHandlers<DrawerDragRecognizer>(
-                    () => DrawerDragRecognizer(
-                      isOpen: () => _isOpen,
-                      onStart: _onDragStart,
-                      onDelta: _onDragDelta,
-                      onEnd: _onDragEnd,
-                      debugOwner: this,
-                    ),
-                    (recognizer) {},
+      animation: animation,
+      // 抽屉本体只建一次:跟手滑动期间不重建会话列表。
+      child: RepaintBoundary(child: SessionsDrawer(onClose: onClose)),
+      builder: (context, drawer) {
+        final progress = animation.value;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            // 遮罩:跟着进度变深;全关时不拦点击。
+            Positioned.fill(
+              child: IgnorePointer(
+                ignoring: progress == 0,
+                child: GestureDetector(
+                  onTap: onClose,
+                  child: ColoredBox(
+                    color: Colors.black54.withValues(alpha: 0.54 * progress),
                   ),
-            },
-            child: NotificationListener<ScrollNotification>(
-              // 滚动列表时自动收起灵动岛(iOS 标准行为)。
-              onNotification: (n) {
-                if (n is ScrollStartNotification) {
-                  _islandKey.currentState?.collapse();
-                }
-                return false;
-              },
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ChatBody(topPadding: MediaQuery.paddingOf(context).top + 52),
-                  // 灵动岛:平时小胶囊,点击展开成完整信息卡。
-                  DynamicIslandBar(key: _islandKey, onOpenDrawer: openDrawer),
-                  // 遮罩:跟着进度变深。progress == 0 时完全不拦点击。
-                  if (progress > 0)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        ignoring: progress == 0,
-                        child: GestureDetector(
-                          onTap: closeDrawer,
-                          child: ColoredBox(
-                            color: Colors.black54.withValues(
-                              alpha: 0.54 * progress,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  // 抽屉本体:按进度从左侧推出。跟手的关键就在这里 ——
-                  // progress 由 pointer delta 连续驱动,而不是一段固定动画。
-                  if (progress > 0)
-                    Positioned(
-                      left: (progress - 1) * width,
-                      top: 0,
-                      bottom: 0,
-                      width: width,
-                      child: SessionsDrawer(onClose: closeDrawer),
-                    ),
-                ],
+                ),
               ),
             ),
-          ),
+            // 抽屉本体:按进度从左侧推出。跟手的关键就在这里 ——
+            // progress 由 pointer delta 连续驱动,而不是一段固定动画。
+            Positioned(
+              left: (progress - 1) * width,
+              top: 0,
+              bottom: 0,
+              width: width,
+              child: IgnorePointer(
+                ignoring: progress == 0,
+                child: ExcludeSemantics(
+                  excluding: progress == 0,
+                  child: drawer!,
+                ),
+              ),
+            ),
+          ],
         );
       },
     );
