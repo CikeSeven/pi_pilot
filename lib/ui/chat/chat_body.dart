@@ -1017,7 +1017,7 @@ class _LivenessBanner extends ConsumerWidget {
       // 以前只有一条 2px 进度条 —— 等于没提示。所以压缩要占横幅。
       _ when state.isCompacting => (
         Icons.compress,
-        '${source.label} 正在压缩上下文 · 消息会排队等它完成',
+        '${source.label} 正在压缩上下文 · 可中断后发送',
         colors.surfaceContainerHighest,
         colors.onSurfaceVariant,
         null,

@@ -44,6 +44,33 @@ export function sessionTreeFrame(event: {
   };
 }
 
+/**
+ * 压缩生命周期事件的线框化:只保留手机端需要的小字段。
+ *
+ * pi 的 session_before_compact 携带 preparation + branchEntries(整段
+ * 会话)+ AbortSignal;触发自动压缩的会话本来就顶着上下文上限,这份
+ * 负载随便就超过单帧 1MiB 预算。直接转发会让 cloneForWire 抛异常 →
+ * sendEvent 静默丢事件并 resnapshot(epoch 重置)→ 手机被迫全量重同步,
+ * 重同步期间事件全部缓冲 —— 「正在压缩」整整晚一个周期才到手机,
+ * 「已取消」再晚一个周期(2026-08 实测复现)。session_compact 同理
+ * (compactionEntry 里是整份摘要)。手机端只读 type/aborted/errorMessage
+ * /result.tokensBefore,其余一律剥掉。
+ */
+export function compactEventFrame(event: unknown): JsonObject {
+  const source = (event ?? {}) as Record<string, unknown>;
+  const frame: JsonObject = { type: source.type };
+  if (typeof source.reason === "string") frame.reason = source.reason;
+  if (typeof source.willRetry === "boolean") frame.willRetry = source.willRetry;
+  const entry = source.compactionEntry;
+  if (entry && typeof entry === "object") {
+    const tokensBefore = (entry as Record<string, unknown>).tokensBefore;
+    if (typeof tokensBefore === "number") {
+      frame.result = { tokensBefore };
+    }
+  }
+  return frame;
+}
+
 const MAX_SOCKET_BUFFER = 2 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;

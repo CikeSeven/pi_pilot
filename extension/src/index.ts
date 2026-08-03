@@ -7,7 +7,7 @@ import { AgentSession, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { loadRelayConfig, RELAY_CONFIG_PATH } from "./config.js";
 import { NavCommandContextCache, registerNavCommands } from "./nav_commands.js";
 import { abortRemoteOperation } from "./remote_commands.js";
-import { DesktopRelay, sessionTreeFrame } from "./relay.js";
+import { DesktopRelay, compactEventFrame, sessionTreeFrame } from "./relay.js";
 
 /**
  * 给普通事件 ctx 补上 PiPilot 远程控制需要的会话级能力。
@@ -184,12 +184,14 @@ export default function pipilotDesktopRelay(pi: ExtensionAPI): void {
   });
   pi.on("session_before_compact", (event, ctx) => {
     relay?.setCompacting(true, ctx);
-    relay?.emitBoundary(event, ctx);
+    // 必须线框化:原始事件带整段 branchEntries + AbortSignal,超预算
+    // 会让 sendEvent 静默丢事件并重置 epoch(详见 compactEventFrame)。
+    relay?.emitBoundary(compactEventFrame(event), ctx);
     relay?.snapshot(ctx);
   });
   pi.on("session_compact", (event, ctx) => {
     relay?.setCompacting(false, ctx);
-    relay?.emitBoundary(event, ctx);
+    relay?.emitBoundary(compactEventFrame(event), ctx);
     relay?.snapshot(ctx);
   });
   // 会话切换/分支操作:先发提示帧,手机才知道随后的离线是"切换"不是"掉线"
